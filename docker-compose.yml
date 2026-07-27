@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:18.4-alpine
+    container_name: goose-database
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    ports:
+      - "5455:5432"
+    volumes:
+      - postgres_data:/var/lib/postgres
+
+volumes:
+  postgres_data:

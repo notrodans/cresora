@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram accounts · Nebula</title><link rel="stylesheet" href="/operator-accounts/authenticate/style.css">
+</head>
+<body>
+<main class="shell">
+  <header class="masthead"><a class="brand" href="/operator-accounts/authenticate"><span class="mark">✦</span> NEBULA</a><span class="eyebrow">OPERATOR CONSOLE / TELEGRAM</span></header>
+  <section class="hero"><div><p class="kicker">ACCOUNT AUTHENTICATION</p><h1>Bring your<br><em>operators</em> online.</h1><p class="intro">Connect a Telegram account securely, then use it across your operator workflows.</p></div><div class="orb" aria-hidden="true"><span></span></div></section>
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}{{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
+  <section class="grid">
+    <div class="panel accounts"><div class="panel-head"><div><p class="kicker">CONNECTED ACCOUNTS</p><h2>Your operators</h2></div><span class="count">{{len .Accounts}}</span></div>
+      {{if .Accounts}}<div class="table" role="table" aria-label="Connected Telegram accounts"><div class="thead" role="row"><span>ACCOUNT</span><span>PHONE</span><span>STATUS</span></div>{{range .Accounts}}<div class="tr" role="row"><strong>{{.Name}}</strong><span>{{.Phone}}</span><span class="pill">{{if .State}}{{.State}}{{else}}Connected{{end}}</span></div>{{end}}</div>{{else}}<div class="empty"><span class="empty-icon">◎</span><p>No Telegram accounts connected yet.</p><small>Choose a sign-in method to add your first operator.</small></div>{{end}}
+    </div>
+    <div class="panel auth"><div class="tabs"><a class="tab active" href="#phone">Phone</a><a class="tab" href="#qr">QR code</a></div>
+      <div id="phone" class="method"><p class="kicker">PHONE SIGN-IN</p><h2>Use your phone</h2><p class="muted">Telegram will send a verification code to your account.</p><form method="post" action="/operator-accounts/authenticate/phone"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><label for="phone">Phone number</label><input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+1 555 000 0000" value="{{.Phone}}" required><button type="submit">Send code <span>↗</span></button></form>{{if .CodeSent}}<form class="code-form" method="post" action="/operator-accounts/authenticate/phone/code"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><label for="code">Verification code</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" required><button type="submit">Verify account <span>↗</span></button></form>{{end}}</div>
+      <div id="qr" class="method qr-method"><p class="kicker">QR SIGN-IN</p><h2>Scan to connect</h2><p class="muted">Open Telegram on your phone and scan this code.</p>{{if .QR}}<img class="qr" src="{{.QR.Image}}" alt="Telegram sign-in QR code"><p class="expires" data-expires="{{.QR.Expires}}">Refreshing in <strong>—</strong></p><form method="post" action="/operator-accounts/authenticate/qr/refresh"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="secondary" type="submit">Refresh QR code <span>↻</span></button></form>{{else}}<form method="post" action="/operator-accounts/authenticate/qr"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button type="submit">Generate QR code <span>↗</span></button></form>{{end}}</div>
+    </div>
+  </section><footer><span>NEBULA SYSTEMS</span><span>AUTHENTICATION IS ENCRYPTED IN TRANSIT</span></footer>
+</main><script src="/operator-accounts/authenticate/authenticate.js" defer></script>
+</body></html>

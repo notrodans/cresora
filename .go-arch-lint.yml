@@ -1,0 +1,50 @@
+version: 3
+
+workdir: internal
+
+# Сначала разрешаем сторонние библиотеки везде.
+# Архитектурные границы внутри проекта всё равно проверяются.
+allow:
+  depOnAnyVendor: true
+
+components:
+  entrypoint:
+    in: internal/entrypoint/**
+
+  infrastracture:
+    in: internal/infrastracture/**
+
+  application:
+    in: internal/application/**
+
+  domain:
+    in: internal/domain/**
+
+  composition:
+    in: cmd/**
+
+deps:
+  # Domain не может импортировать другие компоненты проекта.
+  domain: {}
+
+  entrypoint:
+    mayDependOn:
+		- domain
+		- application
+        - infrastracture
+		- transport
+
+  infrastracture:
+    mayDependOn:
+		- domain
+		- application
+		- transport
+
+  application:
+    mayDependOn:
+      - domain
+	  - infrastracture
+
+  # Composition root связывает всё вместе.
+  composition:
+    anyProjectDeps: true

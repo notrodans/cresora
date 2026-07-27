@@ -1,0 +1,462 @@
+openapi: 3.0.3
+info:
+  title: Nebula Mailing API
+  version: 0.1.0
+  description: |
+    Команды управления жизненным циклом рассылки.
+
+    API описывает CRUD-операции для рассылок, а также постановку рассылки в
+    очередь и её остановку.
+servers:
+  - url: /api/v1
+tags:
+  - name: Mailings
+    description: Управление жизненным циклом рассылок.
+paths:
+  /mailings:
+    get:
+      operationId: listMailings
+      tags: [Mailings]
+      summary: Получить список рассылок
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Фильтр по статусу рассылки.
+          schema:
+            $ref: '#/components/schemas/MailingStatus'
+        - name: limit
+          in: query
+          required: false
+          description: Максимальное количество рассылок в ответе.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          description: Количество рассылок, которые нужно пропустить.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Список рассылок.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MailingList'
+    post:
+      operationId: createMailing
+      tags: [Mailings]
+      summary: Создать рассылку
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMailingRequest'
+      responses:
+        '201':
+          description: Рассылка создана.
+          headers:
+            Location:
+              description: URL созданной рассылки.
+              required: true
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Mailing'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /mailings/{mailingID}:
+    get:
+      operationId: getMailing
+      tags: [Mailings]
+      summary: Получить рассылку
+      parameters:
+        - $ref: '#/components/parameters/MailingID'
+      responses:
+        '200':
+          description: Рассылка.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Mailing'
+        '404':
+          $ref: '#/components/responses/MailingNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      operationId: updateMailing
+      tags: [Mailings]
+      summary: Изменить рассылку
+      parameters:
+        - $ref: '#/components/parameters/MailingID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMailingRequest'
+      responses:
+        '200':
+          description: Рассылка изменена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Mailing'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/MailingNotFound'
+        '409':
+          $ref: '#/components/responses/MailingConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      operationId: deleteMailing
+      tags: [Mailings]
+      summary: Удалить рассылку
+      parameters:
+        - $ref: '#/components/parameters/MailingID'
+      responses:
+        '204':
+          description: Рассылка удалена.
+        '404':
+          $ref: '#/components/responses/MailingNotFound'
+        '409':
+          $ref: '#/components/responses/MailingConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /mailings/{mailingID}/queue:
+    post:
+      operationId: queueMailing
+      tags: [Mailings]
+      summary: Поставить рассылку в очередь
+      description: |
+        Создаёт новый запуск рассылки и задачи доставки для подходящих получателей.
+        Допустимые исходные состояния: `draft` и `stopped`.
+      parameters:
+        - $ref: '#/components/parameters/MailingID'
+      responses:
+        '204':
+          description: Рассылка поставлена в очередь.
+        '404':
+          $ref: '#/components/responses/MailingNotFound'
+        '409':
+          description: Рассылка находится в состоянии, из которого её нельзя поставить в очередь, либо не имеет подходящих получателей.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /mailings/{mailingID}/stop:
+    post:
+      operationId: stopMailing
+      tags: [Mailings]
+      summary: Остановить рассылку
+      description: |
+        Переводит рассылку в состояние `stopped`.
+        Допустимые исходные состояния: `queued`, `running`, `paused`.
+      parameters:
+        - $ref: '#/components/parameters/MailingID'
+      responses:
+        '204':
+          description: Рассылка остановлена.
+        '404':
+          $ref: '#/components/responses/MailingNotFound'
+        '409':
+          description: Рассылка находится в состоянии, из которого её нельзя остановить.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  parameters:
+    MailingID:
+      name: mailingID
+      in: path
+      required: true
+      description: UUID рассылки.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Некорректные данные запроса.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    MailingConflict:
+      description: Операция конфликтует с текущим состоянием рассылки.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    MailingNotFound:
+      description: Рассылка не найдена.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalError:
+      description: Непредвиденная ошибка сервера.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    Mailing:
+      type: object
+      required:
+        - id
+        - name
+        - messageText
+        - status
+        - sendMode
+        - repeatMode
+        - roundDelaySeconds
+        - recipientDelaySeconds
+        - postJoinDelaySeconds
+        - preflightCheck
+        - accountID
+        - recipients
+        - schedule
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 255
+        messageText:
+          type: string
+        status:
+          $ref: '#/components/schemas/MailingStatus'
+        sendMode:
+          $ref: '#/components/schemas/MailingSendMode'
+        repeatMode:
+          $ref: '#/components/schemas/MailingRepeatMode'
+        roundDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        recipientDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        postJoinDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        preflightCheck:
+          type: boolean
+        accountID:
+          type: string
+          format: uuid
+        recipients:
+          type: array
+          items:
+            $ref: '#/components/schemas/MailingRecipient'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateMailingRequest:
+      type: object
+      required:
+        - name
+        - messageText
+        - accountID
+        - recipients
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        messageText:
+          type: string
+        sendMode:
+          $ref: '#/components/schemas/MailingSendMode'
+        repeatMode:
+          $ref: '#/components/schemas/MailingRepeatMode'
+        roundDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        recipientDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        postJoinDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        preflightCheck:
+          type: boolean
+        accountID:
+          type: string
+          format: uuid
+        recipients:
+          type: array
+          items:
+            $ref: '#/components/schemas/MailingRecipient'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+    UpdateMailingRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        messageText:
+          type: string
+        sendMode:
+          $ref: '#/components/schemas/MailingSendMode'
+        repeatMode:
+          $ref: '#/components/schemas/MailingRepeatMode'
+        roundDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        recipientDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        postJoinDelaySeconds:
+          type: integer
+          format: int32
+          minimum: 0
+        preflightCheck:
+          type: boolean
+        accountID:
+          type: string
+          format: uuid
+        recipients:
+          type: array
+          items:
+            $ref: '#/components/schemas/MailingRecipient'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+    MailingList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mailing'
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+    MailingRecipient:
+      oneOf:
+        - $ref: '#/components/schemas/SharedDialogRecipient'
+        - $ref: '#/components/schemas/PrivateDialogRecipient'
+    SharedDialogRecipient:
+      type: object
+      additionalProperties: false
+      required: [sharedDialogID]
+      properties:
+        sharedDialogID:
+          type: string
+          format: uuid
+    PrivateDialogRecipient:
+      type: object
+      additionalProperties: false
+      required: [privateAccountID, peerType, peerID]
+      properties:
+        privateAccountID:
+          type: string
+          format: uuid
+        peerType:
+          $ref: '#/components/schemas/PeerType'
+        peerID:
+          type: integer
+          format: int64
+    Schedule:
+      type: object
+      required: [mode, timezone]
+      properties:
+        mode:
+          $ref: '#/components/schemas/ScheduleMode'
+        startsAt:
+          type: string
+          format: date-time
+          nullable: true
+        endsAt:
+          type: string
+          format: date-time
+          nullable: true
+        dailyUntil:
+          type: string
+          format: time
+          nullable: true
+        timezone:
+          type: string
+          maxLength: 64
+    MailingStatus:
+      type: string
+      enum:
+        - draft
+        - queued
+        - running
+        - paused
+        - stopped
+        - completed
+        - failed
+    MailingSendMode:
+      type: string
+      enum: [sequential, parallel]
+    MailingRepeatMode:
+      type: string
+      enum: [once, rounds]
+    ScheduleMode:
+      type: string
+      enum: [always, window]
+    PeerType:
+      type: string
+      enum: [user, chat, channel]
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://nebula.dev/problems/mailing-state-conflict
+        title:
+          type: string
+          example: Mailing state conflict
+        status:
+          type: integer
+          format: int32
+          example: 409
+        detail:
+          type: string
+          example: Mailing cannot be queued from status "running".
+        instance:
+          type: string
+          format: uri-reference
+          example: /api/v1/mailings/018f5f7a-8e4b-7c39-bc8e-9ec9dcbf8842/queue

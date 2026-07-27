@@ -1,0 +1,49 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test / coverage
+*.test
+*.out
+coverage.html
+coverage/
+
+# Environment / secrets
+.env
+.env.*
+
+# Go module cache (should live in GOPATH, not in-project)
+pkg/mod/
+pkg/sumdb/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres_data/
+
+# CodeGraph
+.codegraph/
+
+# OpenCode / Slim
+.opencode/
+.slim/deepwork/
+
+# Logs
+*.log
+
+# Temp
+tmp/
+temp/

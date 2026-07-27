@@ -1,0 +1,90 @@
+{{define "index.html"}}<!doctype html>
+<html lang="ru">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Рассылки</title>
+		<link rel="stylesheet" href="/style.css">
+	</head>
+	<body>
+		<main class="shell">
+			<header class="header">
+				<h1>Рассылки</h1>
+				<p>Создание и постановка сообщений в очередь</p>
+			</header>
+			{{if .Notice}}
+			<div class="notice" role="status">{{if eq .Notice "draft-created"}}Черновик создан{{else if eq .Notice "queued"}}Рассылка поставлена в очередь{{end}}</div>
+			{{end}}
+			{{if .Error}}
+			<div class="alert" role="alert">{{.Error}}</div>
+			{{end}}
+			<div class="columns">
+				<section class="panel form-panel">
+					<h2>Новая рассылка</h2>
+					<form method="post" action="/mailings">
+						<input type="hidden" name="csrf_token" value="{{.CSRF}}">
+						<fieldset>
+							<legend>Основное</legend>
+							<label for="name">Название рассылки</label><input id="name" name="name" value="{{.Form.Name}}" placeholder="Например, объявление о мероприятии" aria-describedby="name-help name-error"><small id="name-help">Внутреннее название, его увидит только оператор</small>{{with index .Form.FieldErrors "name"}}<em id="name-error">{{.}}</em>{{end}}
+							<label for="message">Текст сообщения</label>
+							<textarea id="message" name="message" rows="7" placeholder="Введите текст сообщения" aria-describedby="message-error">{{.Form.Message}}</textarea>
+							{{with index .Form.FieldErrors "message"}}<em id="message-error">{{.}}</em>{{end}}
+						</fieldset>
+						<fieldset>
+							<legend>Аккаунт отправителя</legend>
+							<label for="account_id">Аккаунт отправителя</label>
+							<select id="account_id" name="account_id">
+								<option value="">Выберите аккаунт</option>
+								{{range .Dashboard.Accounts}}<option value="{{.ID}}" {{if eq (print .ID) $.Form.AccountID}}selected{{end}}>{{if .TelegramUsername}}@{{.TelegramUsername}}{{else}}{{.TelegramFirstName}} {{.TelegramLastName}}{{end}} {{.Phone}}</option>{{end}}
+							</select>
+							{{with index .Form.FieldErrors "account"}}<em>{{.}}</em>{{end}}
+						</fieldset>
+						<fieldset>
+							<legend>Получатели</legend>
+							<p class="help">Выберите хотя бы одного получателя.</p>
+							<div class="target-group">
+								<h3>Общие диалоги</h3>
+								{{range .Dashboard.SharedDialogs}}<label class="check" data-account-id="{{.AccountID}}"><input type="checkbox" name="shared_dialog_id" value="{{.ID}}" {{if contains $.Form.Shared (print .ID)}}checked{{end}}><span>{{if .Title}}{{.Title}}{{else}}{{.CanonicalUsername}}{{end}}</span></label>{{else}}
+								<p class="muted">Нет доступных общих диалогов.</p>
+								{{end}}
+							</div>
+							<div class="target-group">
+								<h3>Личные диалоги</h3>
+								{{range .Dashboard.PrivateDialogs}}<label class="check" data-account-id="{{.AccountID}}"><input type="checkbox" name="private_target" value="{{.PeerType}}:{{.PeerID}}" {{if contains $.Form.Private (printf "%s:%d" .PeerType .PeerID)}}checked{{end}}><span>{{if .Title}}{{.Title}}{{else}}{{.Username}}{{end}}</span></label>{{else}}
+								<p class="muted">Нет доступных личных диалогов.</p>
+								{{end}}
+							</div>
+							{{with index .Form.FieldErrors "recipients"}}<em>{{.}}</em>{{end}}
+						</fieldset>
+						<button class="primary" type="submit">Сохранить черновик</button>
+					</form>
+				</section>
+				<section class="panel list-panel">
+					<h2>Последние рассылки</h2>
+					{{if .Dashboard.Mailings}}
+					<div class="mailings">
+						{{range .Dashboard.Mailings}}
+						<article class="mailing">
+							<div>
+								<h3>{{.Name}}</h3>
+								<p>{{.RecipientCount}} получателей · {{.CreatedAt.Format "02.01.2006 15:04"}}</p>
+							</div>
+							<span class="status status-{{.Status}}">{{statusLabel .Status}}</span>{{if eq .Status "draft"}}
+							<form method="post" action="/mailings/{{.ID}}/queue"><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button class="secondary" type="submit">Поставить в очередь</button></form>
+							{{end}}
+						</article>
+						{{end}}
+					</div>
+					{{else}}
+					<div class="empty">
+						<strong>Рассылок пока нет</strong>
+						<p>Создайте первый черновик с помощью формы выше.</p>
+					</div>
+					{{end}}
+				</section>
+			</div>
+		</main>
+		<script src="/console.js" defer></script>
+	</body>
+</html>
+{{end}}
