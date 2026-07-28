@@ -120,6 +120,40 @@ func TestClaimabilityChecksOnlyEligiblePendingDeliveries(t *testing.T) {
 	}
 }
 
+func TestDeliveryFenceChecksOnlyInspectSendingDeliveries(t *testing.T) {
+	for _, name := range []CheckName{
+		CheckSendingDeliveryWithStaleExecutionGeneration,
+		CheckSendingDeliveryWithInactiveParent,
+	} {
+		t.Run(string(name), func(t *testing.T) {
+			var fenceCheck checkSpec
+			for _, check := range checks {
+				if check.name == name {
+					fenceCheck = check
+					break
+				}
+			}
+			if !strings.Contains(fenceCheck.query, "delivery.status = 'sending'") {
+				t.Fatalf("fence query %q does not require sending status", fenceCheck.query)
+			}
+			if name == CheckSendingDeliveryWithStaleExecutionGeneration {
+				if !strings.Contains(fenceCheck.query, "delivery.lease_execution_generation IS DISTINCT FROM run.execution_generation") {
+					t.Fatalf("generation fence query %q does not compare delivery and run generations", fenceCheck.query)
+				}
+			} else {
+				for _, predicate := range []string{
+					"mailing.status = 'queued' AND run.status = 'queued'",
+					"mailing.status = 'running' AND run.status = 'running'",
+				} {
+					if !strings.Contains(fenceCheck.query, predicate) {
+						t.Fatalf("parent fence query %q lacks admissible pair %q", fenceCheck.query, predicate)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestCheckNamesAndSeveritiesAreStable(t *testing.T) {
 	want := []struct {
 		name     CheckName
@@ -131,6 +165,8 @@ func TestCheckNamesAndSeveritiesAreStable(t *testing.T) {
 		{CheckExpiredSendingLease, SeverityWarning},
 		{CheckRunStatusTimestampContradiction, SeverityError},
 		{CheckMailingRunStatusContradiction, SeverityError},
+		{CheckSendingDeliveryWithStaleExecutionGeneration, SeverityError},
+		{CheckSendingDeliveryWithInactiveParent, SeverityError},
 	}
 	if len(checks) != len(want) {
 		t.Fatalf("check count = %d, want %d", len(checks), len(want))

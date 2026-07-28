@@ -74,12 +74,24 @@ func TestPostgreSQLInvariants(t *testing.T) {
 
 	baselineCounts := resultCounts(baseline)
 	observedCounts := resultCounts(observed)
+	for _, name := range []invariants.CheckName{
+		invariants.CheckSendingDeliveryWithStaleExecutionGeneration,
+		invariants.CheckSendingDeliveryWithInactiveParent,
+	} {
+		if baselineCounts[name] != 0 {
+			t.Fatalf("clean baseline check %q count = %d, want 0", name, baselineCounts[name])
+		}
+	}
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckStoppedMailingWithClaimableDelivery, 0)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckCancelledRunWithClaimableDelivery, 0)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithoutLease, 0)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckExpiredSendingLease, 1)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckRunStatusTimestampContradiction, 1)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckMailingRunStatusContradiction, 4)
+	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithStaleExecutionGeneration, 1)
+	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithInactiveParent, 1)
+	assertSample(t, observed, invariants.CheckSendingDeliveryWithStaleExecutionGeneration, fixture.generationMismatch)
+	assertSample(t, observed, invariants.CheckSendingDeliveryWithInactiveParent, fixture.inactiveParent)
 
 	for _, result := range observed.Results {
 		if len(result.Sample) > invariants.DefaultSampleLimit {
@@ -89,8 +101,10 @@ func TestPostgreSQLInvariants(t *testing.T) {
 }
 
 type fixture struct {
-	operatorID uuid.UUID
-	mailingIDs []uuid.UUID
+	operatorID         uuid.UUID
+	mailingIDs         []uuid.UUID
+	generationMismatch invariants.Sample
+	inactiveParent     invariants.Sample
 }
 
 func createFixture(context context.Context, database *pgxpool.Pool) (fixture, error) {
@@ -120,7 +134,7 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 		return fixture, fmt.Errorf("insert account: %w", failure)
 	}
 
-	mailingIDs := make([]uuid.UUID, 0, 7)
+	mailingIDs := make([]uuid.UUID, 0, 8)
 	insertMailing := func(status string) (uuid.UUID, error) {
 		mailingID := uuid.New()
 		_, failure := database.Exec(
@@ -164,6 +178,10 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 	if failure != nil {
 		return fixture, fmt.Errorf("insert status mailing: %w", failure)
 	}
+	generationMismatchMailing, failure := insertMailing("running")
+	if failure != nil {
+		return fixture, fmt.Errorf("insert generation-mismatch mailing: %w", failure)
+	}
 	noRouteMailing, failure := insertMailing("stopped")
 	if failure != nil {
 		return fixture, fmt.Errorf("insert no-route mailing: %w", failure)
@@ -198,6 +216,9 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 		case "cancelled":
 			query += `, queued_at, started_at, finished_at)`
 			values += `, CURRENT_TIMESTAMP - INTERVAL '1 second', CURRENT_TIMESTAMP - INTERVAL '1 second', CURRENT_TIMESTAMP)`
+		case "running":
+			query += `, queued_at, started_at)`
+			values += `, CURRENT_TIMESTAMP - INTERVAL '1 second', CURRENT_TIMESTAMP)`
 		case "timestamp":
 			query += `, queued_at, started_at)`
 			values += `, CURRENT_TIMESTAMP - INTERVAL '1 second', CURRENT_TIMESTAMP)`
@@ -252,6 +273,11 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 	); failure != nil {
 		return fixture, fmt.Errorf("make cancelled sending lease recently expired: %w", failure)
 	}
+	fixture.inactiveParent = invariants.Sample{
+		MailingID:   cancelledMailing,
+		RunID:       cancelledRun,
+		RecipientID: cancelledRecipient,
+	}
 
 	noLeaseRun, noLeaseRecipient, failure := insertRun(noLeaseMailing, "queued", "")
 	if failure != nil {
@@ -275,6 +301,26 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 	if _, _, failure = insertRun(statusMailing, "queued", ""); failure != nil {
 		return fixture, fmt.Errorf("insert status run: %w", failure)
 	}
+	generationMismatchRun, generationMismatchRecipient, failure := insertRun(generationMismatchMailing, "running", "running")
+	if failure != nil {
+		return fixture, fmt.Errorf("insert generation-mismatch run: %w", failure)
+	}
+	if failure = insertDelivery(context, database, generationMismatchMailing, generationMismatchRun, generationMismatchRecipient, "sending", "leased"); failure != nil {
+		return fixture, fmt.Errorf("insert generation-mismatch delivery: %w", failure)
+	}
+	if _, failure = database.Exec(
+		context,
+		`UPDATE mailing_runs SET execution_generation = 2 WHERE mailing_id = $1 AND id = $2`,
+		generationMismatchMailing,
+		generationMismatchRun,
+	); failure != nil {
+		return fixture, fmt.Errorf("make delivery generation stale: %w", failure)
+	}
+	fixture.generationMismatch = invariants.Sample{
+		MailingID:   generationMismatchMailing,
+		RunID:       generationMismatchRun,
+		RecipientID: generationMismatchRecipient,
+	}
 	noRouteRun, noRouteRecipient, failure := insertRun(noRouteMailing, "queued", "")
 	if failure != nil {
 		return fixture, fmt.Errorf("insert no-route run: %w", failure)
@@ -296,9 +342,11 @@ func insertDelivery(
 	query := `INSERT INTO mailing_deliveries
 		(mailing_id, run_id, recipient_id, status, ready_at, lease_token, lease_until, lease_execution_generation)
 		VALUES ($1, $2, $3, $4, CASE WHEN $5 = 'future' THEN CURRENT_TIMESTAMP + INTERVAL '1 hour' ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute' END,
-		        CASE WHEN $5 = 'expired' THEN $6::uuid ELSE NULL END,
-		        CASE WHEN $5 = 'expired' THEN CURRENT_TIMESTAMP - INTERVAL '1 minute' ELSE NULL END,
-		        CASE WHEN $5 = 'expired' THEN 1 ELSE NULL END)`
+		        CASE WHEN $5 IN ('expired', 'leased') THEN $6::uuid ELSE NULL END,
+		        CASE WHEN $5 = 'expired' THEN CURRENT_TIMESTAMP - INTERVAL '1 minute'
+		             WHEN $5 = 'leased' THEN CURRENT_TIMESTAMP + INTERVAL '1 hour'
+		             ELSE NULL END,
+		        CASE WHEN $5 IN ('expired', 'leased') THEN 1 ELSE NULL END)`
 	_, failure := database.Exec(context, query, mailingID, runID, recipientID, status, kind, uuid.New())
 	return failure
 }
@@ -318,18 +366,27 @@ func fixtureState(context context.Context, database *pgxpool.Pool, mailingIDs []
 	failure := database.QueryRow(
 		context,
 		`SELECT md5(COALESCE(string_agg(
-			format('%s:%s:%s:%s:%s:%s:%s:%s:%s',
+			format('%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s',
 			       delivery.mailing_id,
 			       delivery.run_id,
 			       delivery.recipient_id,
+			       mailing.status,
+			       run.status,
+			       run.execution_generation,
 			       delivery.status,
 			       delivery.attempt_count,
 			       delivery.ready_at,
 			       COALESCE(delivery.started_at::text, ''),
 			       COALESCE(delivery.lease_token::text, ''),
-			       COALESCE(delivery.lease_until::text, '')),
+			       COALESCE(delivery.lease_until::text, ''),
+			       COALESCE(delivery.lease_execution_generation::text, '')),
 			'|' ORDER BY delivery.mailing_id, delivery.run_id, delivery.recipient_id), ''))
 		 FROM mailing_deliveries AS delivery
+		 JOIN mailings AS mailing
+		   ON mailing.id = delivery.mailing_id
+		 JOIN mailing_runs AS run
+		   ON run.mailing_id = delivery.mailing_id
+		  AND run.id = delivery.run_id
 		 WHERE delivery.mailing_id = ANY($1)`,
 		mailingIDs,
 	).Scan(&state)
@@ -358,6 +415,23 @@ func assertCountDelta(
 	if delta != want {
 		t.Fatalf("check %q count delta = %d, want %d (baseline=%d observed=%d)", name, delta, want, baseline[name], observed[name])
 	}
+}
+
+func assertSample(t *testing.T, report invariants.Report, name invariants.CheckName, want invariants.Sample) {
+	t.Helper()
+	for _, result := range report.Results {
+		if result.Name != name {
+			continue
+		}
+		if len(result.Sample) != 1 {
+			t.Fatalf("check %q samples = %#v, want one stable sample", name, result.Sample)
+		}
+		if result.Sample[0] != want {
+			t.Fatalf("check %q sample = %#v, want %#v", name, result.Sample[0], want)
+		}
+		return
+	}
+	t.Fatalf("check %q missing from report", name)
 }
 
 func newIsolatedInvariantDatabase(
