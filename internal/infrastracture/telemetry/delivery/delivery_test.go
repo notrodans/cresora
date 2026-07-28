@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 
 	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	"github.com/notrodans/nebula-go/internal/domain/mailing"
 	"github.com/notrodans/nebula-go/internal/domain/message"
 	"github.com/notrodans/nebula-go/internal/domain/recipient"
 )
@@ -103,6 +104,11 @@ func TestPortRecordsDurationAndOutcome(t *testing.T) {
 			err:     fmt.Errorf("send: %w", context.Canceled),
 			outcome: sendOutcomeCanceled,
 		},
+		{
+			name:    "deadline exceeded",
+			err:     fmt.Errorf("send: %w", context.DeadlineExceeded),
+			outcome: sendOutcomeDeadline,
+		},
 	}
 
 	for _, test := range tests {
@@ -122,6 +128,65 @@ func TestPortRecordsDurationAndOutcome(t *testing.T) {
 			histogram := meter.histogram(SendDurationMetricName)
 			if len(histogram.records) != 1 {
 				t.Fatalf("recorded %d send measurements, want 1", len(histogram.records))
+			}
+			assertMeasurement(t, histogram.records[0], test.outcome)
+		})
+	}
+}
+
+func TestNewCommandWithNilMeterIsNoOp(t *testing.T) {
+	delegate := commandFunc{err: errors.New("command failed")}
+	decorated := NewCommand(delegate, nil)
+	if decorated != delegate {
+		t.Fatalf("NewCommand returned %T, want the original delegate", decorated)
+	}
+	gotError := decorated.Execute(context.Background(), mailing.ID{}, mailing.RunID{}, recipient.ID{}, applicationdelivery.Token{})
+	if gotError != delegate.err {
+		t.Fatalf("Execute returned error %v, want exact error %v", gotError, delegate.err)
+	}
+}
+
+func TestCommandRecordsBoundedExecutionOutcomes(t *testing.T) {
+	wantError := errors.New("command failed")
+	wantPanic := errors.New("command panicked")
+	tests := []struct {
+		name    string
+		err     error
+		panic   error
+		outcome string
+	}{
+		{name: "completed", outcome: commandOutcomeCompleted},
+		{name: "error", err: wantError, outcome: commandOutcomeError},
+		{name: "canceled", err: fmt.Errorf("command: %w", context.Canceled), outcome: commandOutcomeCanceled},
+		{
+			name:    "deadline exceeded",
+			err:     fmt.Errorf("command: %w", context.DeadlineExceeded),
+			outcome: commandOutcomeDeadlineExceeded,
+		},
+		{name: "panic", panic: wantPanic, outcome: commandOutcomePanic},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			meter := newRecordingMeter()
+			delegate := commandFunc{err: test.err, panicValue: test.panic}
+			decorated := NewCommand(delegate, meter)
+			if test.panic != nil {
+				func() {
+					defer func() {
+						if recovered := recover(); recovered != test.panic {
+							t.Errorf("Execute panic = %v, want %v", recovered, test.panic)
+						}
+					}()
+					_ = decorated.Execute(context.Background(), mailing.ID{}, mailing.RunID{}, recipient.ID{}, applicationdelivery.Token{})
+				}()
+			} else if gotError := decorated.Execute(context.Background(), mailing.ID{}, mailing.RunID{}, recipient.ID{}, applicationdelivery.Token{}); gotError != test.err {
+				t.Fatalf("Execute returned error %v, want exact error %v", gotError, test.err)
+			}
+
+			histogram := meter.histogram(CommandDurationMetricName)
+			if len(histogram.records) != 1 {
+				t.Fatalf("recorded %d command measurements, want 1", len(histogram.records))
 			}
 			assertMeasurement(t, histogram.records[0], test.outcome)
 		})
@@ -172,6 +237,24 @@ func (taskStub) Release(context.Context, error) error {
 type portStub struct {
 	err   error
 	count int
+}
+
+type commandFunc struct {
+	err        error
+	panicValue error
+}
+
+func (command commandFunc) Execute(
+	context.Context,
+	mailing.ID,
+	mailing.RunID,
+	recipient.ID,
+	applicationdelivery.Token,
+) error {
+	if command.panicValue != nil {
+		panic(command.panicValue)
+	}
+	return command.err
 }
 
 func (stub *portStub) Send(context.Context, recipient.Recipient, message.Message, int64) error {
