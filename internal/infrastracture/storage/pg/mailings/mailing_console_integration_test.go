@@ -5,15 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
 	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
@@ -28,14 +31,10 @@ func TestMailingConsolePostgres(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if failure := applyMailingConsoleMigrations(ctx, databaseURL); failure != nil {
-		t.Fatalf("apply migrations: %v", failure)
-	}
-	database, failure := pgxpool.New(ctx, databaseURL)
+	database, _, failure := newIsolatedMailingConsoleDatabase(ctx, t, databaseURL)
 	if failure != nil {
-		t.Fatalf("open PostgreSQL pool: %v", failure)
+		t.Fatalf("prepare isolated PostgreSQL database: %v", failure)
 	}
-	defer database.Close()
 	if failure = database.Ping(ctx); failure != nil {
 		t.Fatalf("ping PostgreSQL: %v", failure)
 	}
@@ -113,6 +112,9 @@ func TestMailingConsolePostgres(t *testing.T) {
 		status, _, _ = mailingConsoleQueueState(t, ctx, database, operatorBDraft.UUID())
 		if status != "stopped" {
 			t.Fatalf("expected stopped status, got %q", status)
+		}
+		if failure = operatorBMailings.Mailing(operatorBDraft).Stop(ctx); failure != nil {
+			t.Fatalf("repeat stop operator B draft: %v", failure)
 		}
 	})
 
@@ -541,6 +543,92 @@ func assertMailingConsoleError(t *testing.T, failure error, expected error) {
 	}
 }
 
+func newIsolatedMailingConsoleDatabase(
+	ctx context.Context,
+	t *testing.T,
+	databaseURL string,
+) (*pgxpool.Pool, string, error) {
+	t.Helper()
+	baseConfig, failure := pgxpool.ParseConfig(databaseURL)
+	if failure != nil {
+		return nil, "", fmt.Errorf("parse PostgreSQL URL: %w", failure)
+	}
+	adminDatabase, failure := pgxpool.NewWithConfig(ctx, baseConfig)
+	if failure != nil {
+		return nil, "", fmt.Errorf("open PostgreSQL admin pool: %w", failure)
+	}
+	if failure = adminDatabase.Ping(ctx); failure != nil {
+		adminDatabase.Close()
+		return nil, "", fmt.Errorf("ping PostgreSQL admin pool: %w", failure)
+	}
+
+	schema := "mailing_console_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	quotedSchema := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
+	if _, failure = adminDatabase.Exec(ctx, "CREATE SCHEMA "+quotedSchema); failure != nil {
+		adminDatabase.Close()
+		return nil, "", fmt.Errorf("create isolated schema: %w", failure)
+	}
+
+	var database *pgxpool.Pool
+	t.Cleanup(func() {
+		if database != nil {
+			database.Close()
+		}
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if _, cleanupFailure := adminDatabase.Exec(cleanupContext, "DROP SCHEMA "+quotedSchema+" CASCADE"); cleanupFailure != nil {
+			t.Errorf("drop isolated schema %q: %v", schema, cleanupFailure)
+		}
+		adminDatabase.Close()
+	})
+
+	isolatedURL, failure := mailingConsoleDatabaseURL(databaseURL, schema)
+	if failure != nil {
+		return nil, "", failure
+	}
+	if failure = applyMailingConsoleMigrations(ctx, isolatedURL); failure != nil {
+		return nil, "", fmt.Errorf("apply migrations to isolated schema: %w", failure)
+	}
+	isolatedConfig := baseConfig.Copy()
+	if isolatedConfig.ConnConfig.RuntimeParams == nil {
+		isolatedConfig.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	isolatedConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	options := isolatedConfig.ConnConfig.RuntimeParams["options"]
+	if options != "" {
+		options += " "
+	}
+	isolatedConfig.ConnConfig.RuntimeParams["options"] = options + "-c search_path=" + schema
+	database, failure = pgxpool.NewWithConfig(ctx, isolatedConfig)
+	if failure != nil {
+		return nil, "", fmt.Errorf("open isolated PostgreSQL pool: %w", failure)
+	}
+	if failure = database.Ping(ctx); failure != nil {
+		database.Close()
+		return nil, "", fmt.Errorf("ping isolated PostgreSQL pool: %w", failure)
+	}
+	return database, schema, nil
+}
+
+func mailingConsoleDatabaseURL(databaseURL, schema string) (string, error) {
+	parsedURL, failure := url.Parse(databaseURL)
+	if failure != nil {
+		return "", fmt.Errorf("parse isolated PostgreSQL URL: %w", failure)
+	}
+	if parsedURL.Scheme != "postgres" && parsedURL.Scheme != "postgresql" {
+		return "", errors.New("TEST_DATABASE_URL must be a PostgreSQL URL")
+	}
+	query := parsedURL.Query()
+	query.Set("search_path", schema)
+	options := query.Get("options")
+	if options != "" {
+		options += " "
+	}
+	query.Set("options", options+"-c search_path="+schema)
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.String(), nil
+}
+
 func applyMailingConsoleMigrations(context context.Context, databaseURL string) error {
 	database, failure := sql.Open("pgx", databaseURL)
 	if failure != nil {
@@ -557,11 +645,17 @@ func applyMailingConsoleMigrations(context context.Context, databaseURL string) 
 	provider, failure := goose.NewProvider(
 		goose.DialectPostgres,
 		database,
-		os.DirFS(filepath.Join(filepath.Dir(filename), "../../../migrations")),
+		os.DirFS(filepath.Join(filepath.Dir(filename), "../../../../../migrations")),
 		goose.WithAllowOutofOrder(true),
 	)
 	if failure != nil {
 		return failure
+	}
+	if _, failure = provider.Up(context); failure == nil {
+		return errors.New("apply migrations without delivery execution v2 acknowledgement")
+	}
+	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
+		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
 	}
 	_, failure = provider.Up(context)
 	return failure

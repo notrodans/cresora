@@ -62,8 +62,14 @@ type Invoker interface {
 	QueueMailing(ctx context.Context, params QueueMailingParams) (QueueMailingRes, error)
 	// StopMailing invokes stopMailing operation.
 	//
-	// Переводит рассылку в состояние `stopped`. Допустимые
-	// исходные состояния: `queued`, `running`, `paused`.
+	// Атомарно отменяет активный запуск и переводит
+	// рассылку в состояние `stopped`. Ожидающие доставки
+	// пропускаются и освобождают свои lease. Уже допущенные к
+	// отправке доставки (`sending`) не изменяются, поэтому их
+	// результат может быть сохранён после ответа. Повторная
+	// остановка уже остановленной рассылки идемпотентно
+	// возвращает `204`. Допустимые исходные состояния: `queued`,
+	// `running`, `paused`, `stopped`.
 	//
 	// POST /mailings/{mailingID}/stop
 	StopMailing(ctx context.Context, params StopMailingParams) (StopMailingRes, error)
@@ -631,8 +637,14 @@ func (c *Client) sendQueueMailing(ctx context.Context, params QueueMailingParams
 
 // StopMailing invokes stopMailing operation.
 //
-// Переводит рассылку в состояние `stopped`. Допустимые
-// исходные состояния: `queued`, `running`, `paused`.
+// Атомарно отменяет активный запуск и переводит
+// рассылку в состояние `stopped`. Ожидающие доставки
+// пропускаются и освобождают свои lease. Уже допущенные к
+// отправке доставки (`sending`) не изменяются, поэтому их
+// результат может быть сохранён после ответа. Повторная
+// остановка уже остановленной рассылки идемпотентно
+// возвращает `204`. Допустимые исходные состояния: `queued`,
+// `running`, `paused`, `stopped`.
 //
 // POST /mailings/{mailingID}/stop
 func (c *Client) StopMailing(ctx context.Context, params StopMailingParams) (StopMailingRes, error) {

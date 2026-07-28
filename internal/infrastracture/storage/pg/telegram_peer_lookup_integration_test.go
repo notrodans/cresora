@@ -7,15 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
 	"github.com/notrodans/nebula-go/internal/transport/telegram"
@@ -29,14 +32,10 @@ func TestTelegramPeerLookupPostgres(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	if failure := applyIntegrationMigrations(ctx, databaseURL); failure != nil {
-		t.Fatalf("apply migrations: %v", failure)
-	}
-	database, failure := pgxpool.New(ctx, databaseURL)
+	database, _, failure := newIsolatedTelegramPeerLookupDatabase(ctx, t, databaseURL)
 	if failure != nil {
-		t.Fatalf("open PostgreSQL pool: %v", failure)
+		t.Fatalf("prepare isolated PostgreSQL database: %v", failure)
 	}
-	defer database.Close()
 	if failure = database.Ping(ctx); failure != nil {
 		t.Fatalf("ping PostgreSQL: %v", failure)
 	}
@@ -417,6 +416,92 @@ func cleanupTelegramPeerLookupFixture(
 	return transaction.Commit(context)
 }
 
+func newIsolatedTelegramPeerLookupDatabase(
+	ctx context.Context,
+	t *testing.T,
+	databaseURL string,
+) (*pgxpool.Pool, string, error) {
+	t.Helper()
+	baseConfig, failure := pgxpool.ParseConfig(databaseURL)
+	if failure != nil {
+		return nil, "", fmt.Errorf("parse PostgreSQL URL: %w", failure)
+	}
+	adminDatabase, failure := pgxpool.NewWithConfig(ctx, baseConfig)
+	if failure != nil {
+		return nil, "", fmt.Errorf("open PostgreSQL admin pool: %w", failure)
+	}
+	if failure = adminDatabase.Ping(ctx); failure != nil {
+		adminDatabase.Close()
+		return nil, "", fmt.Errorf("ping PostgreSQL admin pool: %w", failure)
+	}
+
+	schema := "telegram_peer_lookup_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	quotedSchema := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
+	if _, failure = adminDatabase.Exec(ctx, "CREATE SCHEMA "+quotedSchema); failure != nil {
+		adminDatabase.Close()
+		return nil, "", fmt.Errorf("create isolated schema: %w", failure)
+	}
+
+	var database *pgxpool.Pool
+	t.Cleanup(func() {
+		if database != nil {
+			database.Close()
+		}
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if _, cleanupFailure := adminDatabase.Exec(cleanupContext, "DROP SCHEMA "+quotedSchema+" CASCADE"); cleanupFailure != nil {
+			t.Errorf("drop isolated schema %q: %v", schema, cleanupFailure)
+		}
+		adminDatabase.Close()
+	})
+
+	isolatedURL, failure := telegramPeerLookupDatabaseURL(databaseURL, schema)
+	if failure != nil {
+		return nil, "", failure
+	}
+	if failure = applyIntegrationMigrations(ctx, isolatedURL); failure != nil {
+		return nil, "", fmt.Errorf("apply migrations to isolated schema: %w", failure)
+	}
+	isolatedConfig := baseConfig.Copy()
+	if isolatedConfig.ConnConfig.RuntimeParams == nil {
+		isolatedConfig.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	isolatedConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	options := isolatedConfig.ConnConfig.RuntimeParams["options"]
+	if options != "" {
+		options += " "
+	}
+	isolatedConfig.ConnConfig.RuntimeParams["options"] = options + "-c search_path=" + schema
+	database, failure = pgxpool.NewWithConfig(ctx, isolatedConfig)
+	if failure != nil {
+		return nil, "", fmt.Errorf("open isolated PostgreSQL pool: %w", failure)
+	}
+	if failure = database.Ping(ctx); failure != nil {
+		database.Close()
+		return nil, "", fmt.Errorf("ping isolated PostgreSQL pool: %w", failure)
+	}
+	return database, schema, nil
+}
+
+func telegramPeerLookupDatabaseURL(databaseURL, schema string) (string, error) {
+	parsedURL, failure := url.Parse(databaseURL)
+	if failure != nil {
+		return "", fmt.Errorf("parse isolated PostgreSQL URL: %w", failure)
+	}
+	if parsedURL.Scheme != "postgres" && parsedURL.Scheme != "postgresql" {
+		return "", errors.New("TEST_DATABASE_URL must be a PostgreSQL URL")
+	}
+	query := parsedURL.Query()
+	query.Set("search_path", schema)
+	options := query.Get("options")
+	if options != "" {
+		options += " "
+	}
+	query.Set("options", options+"-c search_path="+schema)
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.String(), nil
+}
+
 func applyIntegrationMigrations(context context.Context, databaseURL string) error {
 	database, failure := sql.Open("pgx", databaseURL)
 	if failure != nil {
@@ -439,6 +524,12 @@ func applyIntegrationMigrations(context context.Context, databaseURL string) err
 	)
 	if failure != nil {
 		return failure
+	}
+	if _, failure = provider.Up(context); failure == nil {
+		return errors.New("apply migrations without delivery execution v2 acknowledgement")
+	}
+	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
+		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
 	}
 	_, failure = provider.Up(context)
 	return failure

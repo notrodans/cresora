@@ -148,12 +148,10 @@ var checks = [...]checkSpec{
 			JOIN telegram_mailing_routes AS route
 			  ON route.mailing_id = delivery.mailing_id
 			WHERE mailing.status = 'stopped'
-			  AND (
-					(delivery.status = 'pending'
-					 AND delivery.ready_at <= CURRENT_TIMESTAMP)
-				 OR (delivery.status = 'sending'
-					 AND delivery.lease_until < CURRENT_TIMESTAMP)
-				  )`,
+			  AND delivery.status = 'pending'
+			  AND delivery.ready_at <= CURRENT_TIMESTAMP
+			  AND delivery.attempt_count < delivery.max_attempts
+			  AND (delivery.lease_until IS NULL OR delivery.lease_until < CURRENT_TIMESTAMP)`,
 	},
 	{
 		name:     CheckCancelledRunWithClaimableDelivery,
@@ -167,12 +165,10 @@ var checks = [...]checkSpec{
 			JOIN telegram_mailing_routes AS route
 			  ON route.mailing_id = delivery.mailing_id
 			WHERE run.status = 'cancelled'
-			  AND (
-					(delivery.status = 'pending'
-					 AND delivery.ready_at <= CURRENT_TIMESTAMP)
-				 OR (delivery.status = 'sending'
-					 AND delivery.lease_until < CURRENT_TIMESTAMP)
-				  )`,
+			  AND delivery.status = 'pending'
+			  AND delivery.ready_at <= CURRENT_TIMESTAMP
+			  AND delivery.attempt_count < delivery.max_attempts
+			  AND (delivery.lease_until IS NULL OR delivery.lease_until < CURRENT_TIMESTAMP)`,
 	},
 	{
 		name:     CheckSendingDeliveryWithoutLease,
@@ -184,6 +180,7 @@ var checks = [...]checkSpec{
 			  AND (
 					delivery.lease_token IS NULL
 				 OR delivery.lease_until IS NULL
+				 OR delivery.lease_execution_generation IS NULL
 				  )`,
 	},
 	{

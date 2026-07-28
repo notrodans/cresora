@@ -760,8 +760,14 @@ func (s *Server) handleQueueMailingRequest(args [1]string, argsEscaped bool, w h
 
 // handleStopMailingRequest handles stopMailing operation.
 //
-// Переводит рассылку в состояние `stopped`. Допустимые
-// исходные состояния: `queued`, `running`, `paused`.
+// Атомарно отменяет активный запуск и переводит
+// рассылку в состояние `stopped`. Ожидающие доставки
+// пропускаются и освобождают свои lease. Уже допущенные к
+// отправке доставки (`sending`) не изменяются, поэтому их
+// результат может быть сохранён после ответа. Повторная
+// остановка уже остановленной рассылки идемпотентно
+// возвращает `204`. Допустимые исходные состояния: `queued`,
+// `running`, `paused`, `stopped`.
 //
 // POST /mailings/{mailingID}/stop
 func (s *Server) handleStopMailingRequest(args [1]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
