@@ -24,10 +24,10 @@ type persistentDelivery struct {
 }
 
 func (entity persistentDelivery) Dispatch(
-	context context.Context,
+	executionContext context.Context,
 	port application.Port,
 ) error {
-	if context == nil {
+	if executionContext == nil {
 		panic("dispatch PostgreSQL delivery without context")
 	}
 	if entity.database == nil {
@@ -39,7 +39,7 @@ func (entity persistentDelivery) Dispatch(
 	var body string
 	var random int64
 	failure := entity.database.QueryRow(
-		context,
+		executionContext,
 		`UPDATE mailing_deliveries AS delivery
 		 SET status = 'sending',
 		     started_at = CURRENT_TIMESTAMP,
@@ -78,19 +78,29 @@ func (entity persistentDelivery) Dispatch(
 		return fmt.Errorf("admit mailing delivery: %w", failure)
 	}
 	failure = port.Send(
-		context,
+		executionContext,
 		recipient.Identity(entity.identity.Recipient().UUID()),
 		message.Text(body),
 		random,
 	)
+	finalizationContext, cancelFinalization := context.WithTimeout(
+		context.WithoutCancel(executionContext),
+		application.OutcomeFinalizationTimeout,
+	)
+	defer cancelFinalization()
 	if failure != nil {
-		if record := entity.quarantine(context, failure); record != nil {
-			return fmt.Errorf("quarantine mailing delivery after %v: %w", failure, record)
+		if record := entity.quarantine(finalizationContext, failure); record != nil {
+			return fmt.Errorf(
+				"%w: quarantine mailing delivery after %v: %w",
+				application.ErrOutcomeFinalization,
+				failure,
+				record,
+			)
 		}
 		return nil
 	}
 	result, failure := entity.database.Exec(
-		context,
+		finalizationContext,
 		`UPDATE mailing_deliveries
 		 SET status = 'sent',
 		     sent_at = CURRENT_TIMESTAMP,
@@ -110,10 +120,10 @@ func (entity persistentDelivery) Dispatch(
 		entity.token.UUID(),
 	)
 	if failure != nil {
-		return fmt.Errorf("mark mailing delivery sent: %w", failure)
+		return fmt.Errorf("%w: mark mailing delivery sent: %w", application.ErrOutcomeFinalization, failure)
 	}
 	if result.RowsAffected() == 0 {
-		return errStale
+		return fmt.Errorf("%w: %w", application.ErrOutcomeFinalization, errStale)
 	}
 	return nil
 }

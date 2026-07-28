@@ -39,8 +39,8 @@ func TestDefaultsAndConfigValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LeaseSafetyDuration() returned %v, want nil error", err)
 	}
-	if leaseSafety != 35*time.Second {
-		t.Fatalf("LeaseSafetyDuration() = %s, want 35s", leaseSafety)
+	if leaseSafety != 37*time.Second {
+		t.Fatalf("LeaseSafetyDuration() = %s, want 37s", leaseSafety)
 	}
 
 	invalid := []struct {
@@ -53,7 +53,7 @@ func TestDefaultsAndConfigValidation(t *testing.T) {
 		{"cleanup timeout", func(config *Config) { config.CleanupTimeout = 0 }},
 		{"lease duration", func(config *Config) { config.LeaseDuration = 0 }},
 		{"lease safety margin", func(config *Config) { config.LeaseSafetyMargin = 0 }},
-		{"lease bound", func(config *Config) { config.LeaseDuration = 35 * time.Second }},
+		{"lease bound", func(config *Config) { config.LeaseDuration = 37 * time.Second }},
 		{"lease arithmetic overflow", func(config *Config) {
 			config.ExecutionTimeout = maxDuration - time.Nanosecond
 			config.LeaseSafetyMargin = 2 * time.Nanosecond
@@ -237,6 +237,147 @@ func TestWorkerSuccessDoesNotRelease(t *testing.T) {
 	}
 }
 
+func TestWorkerRenewsExactlyOnceBeforeExecution(t *testing.T) {
+	config := testConfig()
+	renewed := make(chan struct{})
+	executed := make(chan struct{})
+	var task *taskStub
+	task = &taskStub{
+		renew: func(_ context.Context, duration time.Duration) error {
+			if duration != config.LeaseDuration {
+				t.Errorf("Renew() duration = %s, want %s", duration, config.LeaseDuration)
+			}
+			closeOnce(renewed)
+			return nil
+		},
+		execute: func(context.Context, applicationdelivery.Command) error {
+			if got := task.renewCount(); got != 1 {
+				t.Errorf("Renew() count before Execute() = %d, want 1", got)
+			}
+			closeOnce(executed)
+			return nil
+		},
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	result := runWorker(New(&claimsStub{tasks: []applicationdelivery.Task{task}}, &commandsStub{}, config), parent)
+	awaitSignal(t, renewed)
+	awaitSignal(t, executed)
+	cancel()
+	if err := awaitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if got := task.renewCount(); got != 1 {
+		t.Fatalf("Renew() called %d times, want 1", got)
+	}
+}
+
+func TestWorkerRenewalFailureReleasesAndContinues(t *testing.T) {
+	renewalFailure := errors.New("renewal failed")
+	released := make(chan struct{})
+	secondExecuted := make(chan struct{})
+	first := &taskStub{
+		renew: func(context.Context, time.Duration) error { return renewalFailure },
+		release: func(_ context.Context, cause error) error {
+			if !errors.Is(cause, renewalFailure) {
+				t.Errorf("Release() cause = %v, want %v", cause, renewalFailure)
+			}
+			closeOnce(released)
+			return nil
+		},
+	}
+	second := &taskStub{execute: func(context.Context, applicationdelivery.Command) error {
+		closeOnce(secondExecuted)
+		return nil
+	}}
+	parent, cancel := context.WithCancel(context.Background())
+	result := runWorker(New(&claimsStub{tasks: []applicationdelivery.Task{first, second}}, &commandsStub{}, testConfig()), parent)
+	awaitSignal(t, released)
+	awaitSignal(t, secondExecuted)
+	cancel()
+	if err := awaitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if got := first.executeCount(); got != 0 {
+		t.Fatalf("failed-renewal Execute() count = %d, want 0", got)
+	}
+}
+
+func TestWorkerRenewalPanicReleasesAndContinues(t *testing.T) {
+	panicCause := errors.New("renewal panic")
+	released := make(chan struct{})
+	secondExecuted := make(chan struct{})
+	first := &taskStub{
+		renew: func(context.Context, time.Duration) error { panic(panicCause) },
+		release: func(_ context.Context, cause error) error {
+			if !errors.Is(cause, panicCause) {
+				t.Errorf("Release() panic cause = %v, want %v", cause, panicCause)
+			}
+			closeOnce(released)
+			return nil
+		},
+	}
+	second := &taskStub{execute: func(context.Context, applicationdelivery.Command) error {
+		closeOnce(secondExecuted)
+		return nil
+	}}
+	parent, cancel := context.WithCancel(context.Background())
+	result := runWorker(New(&claimsStub{tasks: []applicationdelivery.Task{first, second}}, &commandsStub{}, testConfig()), parent)
+	awaitSignal(t, released)
+	awaitSignal(t, secondExecuted)
+	cancel()
+	if err := awaitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWorkerRenewalReleaseFailureIsFatal(t *testing.T) {
+	renewalFailure := errors.New("renewal failed")
+	releaseFailure := errors.New("release failed")
+	task := &taskStub{
+		renew:   func(context.Context, time.Duration) error { return renewalFailure },
+		release: func(context.Context, error) error { return releaseFailure },
+	}
+	err := runAndAwait(t, New(&claimsStub{tasks: []applicationdelivery.Task{task}}, &commandsStub{}, testConfig()))
+	if !errors.Is(err, renewalFailure) {
+		t.Fatalf("Run() error = %v, want renewal error %v", err, renewalFailure)
+	}
+	if !errors.Is(err, releaseFailure) {
+		t.Fatalf("Run() error = %v, want release error %v", err, releaseFailure)
+	}
+}
+
+func TestWorkerRenewalReleasePanicIsFatal(t *testing.T) {
+	renewalFailure := errors.New("renewal failed")
+	releasePanic := errors.New("release panic")
+	task := &taskStub{
+		renew: func(context.Context, time.Duration) error { return renewalFailure },
+		release: func(context.Context, error) error {
+			panic(releasePanic)
+		},
+	}
+	err := runAndAwait(t, New(&claimsStub{tasks: []applicationdelivery.Task{task}}, &commandsStub{}, testConfig()))
+	if !errors.Is(err, renewalFailure) {
+		t.Fatalf("Run() error = %v, want renewal error %v", err, renewalFailure)
+	}
+	if !errors.Is(err, releasePanic) {
+		t.Fatalf("Run() error = %v, want release panic %v", err, releasePanic)
+	}
+}
+
+func TestWorkerOutcomeFinalizationFailureIsFatalWithoutReleaseFailure(t *testing.T) {
+	finalizationFailure := errors.New("database finalization failed")
+	task := &taskStub{execute: func(context.Context, applicationdelivery.Command) error {
+		return errors.Join(applicationdelivery.ErrOutcomeFinalization, finalizationFailure)
+	}}
+	err := runAndAwait(t, New(&claimsStub{tasks: []applicationdelivery.Task{task}}, &commandsStub{}, testConfig()))
+	if !errors.Is(err, applicationdelivery.ErrOutcomeFinalization) {
+		t.Fatalf("Run() error = %v, want ErrOutcomeFinalization", err)
+	}
+	if !errors.Is(err, finalizationFailure) {
+		t.Fatalf("Run() error = %v, want finalization failure %v", err, finalizationFailure)
+	}
+}
+
 func TestWorkerExecutionErrorReleasesAndContinues(t *testing.T) {
 	executionFailure := errors.New("delivery execution failed")
 	firstReleased := make(chan struct{})
@@ -292,7 +433,7 @@ func TestWorkerExecutionRootDrainsAfterParentCancellation(t *testing.T) {
 	config := testConfig()
 	config.ExecutionTimeout = time.Second
 	config.LeaseSafetyMargin = time.Millisecond
-	config.LeaseDuration = 2 * time.Second
+	config.LeaseDuration = 4 * time.Second
 	type contextKey struct{}
 	type observation struct {
 		value any
@@ -613,6 +754,8 @@ func (commandStub) Execute(
 type taskStub struct {
 	mutex             sync.Mutex
 	route             applicationdelivery.Route
+	renew             func(context.Context, time.Duration) error
+	renewals          int
 	execute           func(context.Context, applicationdelivery.Command) error
 	release           func(context.Context, error) error
 	executions        int
@@ -624,6 +767,17 @@ type taskStub struct {
 
 func (stub *taskStub) Route() applicationdelivery.Route {
 	return stub.route
+}
+
+func (stub *taskStub) Renew(ctx context.Context, duration time.Duration) error {
+	stub.mutex.Lock()
+	stub.renewals++
+	renew := stub.renew
+	stub.mutex.Unlock()
+	if renew == nil {
+		return nil
+	}
+	return renew(ctx, duration)
 }
 
 func (stub *taskStub) Execute(ctx context.Context, command applicationdelivery.Command) error {
@@ -657,6 +811,12 @@ func (stub *taskStub) executeCount() int {
 	stub.mutex.Lock()
 	defer stub.mutex.Unlock()
 	return stub.executions
+}
+
+func (stub *taskStub) renewCount() int {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
+	return stub.renewals
 }
 
 func (stub *taskStub) releaseCount() int {
