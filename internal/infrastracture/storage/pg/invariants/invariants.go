@@ -27,12 +27,14 @@ const (
 type CheckName string
 
 const (
-	CheckStoppedMailingWithClaimableDelivery CheckName = "stopped_mailing_with_claimable_delivery"
-	CheckCancelledRunWithClaimableDelivery   CheckName = "cancelled_run_with_claimable_delivery"
-	CheckSendingDeliveryWithoutLease         CheckName = "sending_delivery_without_lease"
-	CheckExpiredSendingLease                 CheckName = "expired_sending_lease"
-	CheckRunStatusTimestampContradiction     CheckName = "run_status_timestamp_contradiction"
-	CheckMailingRunStatusContradiction       CheckName = "mailing_run_status_contradiction"
+	CheckStoppedMailingWithClaimableDelivery         CheckName = "stopped_mailing_with_claimable_delivery"
+	CheckCancelledRunWithClaimableDelivery           CheckName = "cancelled_run_with_claimable_delivery"
+	CheckSendingDeliveryWithoutLease                 CheckName = "sending_delivery_without_lease"
+	CheckExpiredSendingLease                         CheckName = "expired_sending_lease"
+	CheckRunStatusTimestampContradiction             CheckName = "run_status_timestamp_contradiction"
+	CheckMailingRunStatusContradiction               CheckName = "mailing_run_status_contradiction"
+	CheckSendingDeliveryWithStaleExecutionGeneration CheckName = "sending_delivery_with_stale_execution_generation"
+	CheckSendingDeliveryWithInactiveParent           CheckName = "sending_delivery_with_inactive_parent"
 )
 
 // Severity describes how a non-empty result should be interpreted.
@@ -237,6 +239,39 @@ var checks = [...]checkSpec{
 			           AND latest.status NOT IN ('queued', 'running'))
 			       OR (mailing.status = 'completed' AND latest.status <> 'completed')
 			       OR (mailing.status = 'failed' AND latest.status <> 'failed'))`,
+	},
+	{
+		name:     CheckSendingDeliveryWithStaleExecutionGeneration,
+		severity: SeverityError,
+		query: `
+			SELECT delivery.mailing_id, delivery.run_id, delivery.recipient_id
+			FROM mailing_deliveries AS delivery
+			JOIN mailing_runs AS run
+			  ON run.mailing_id = delivery.mailing_id
+			 AND run.id = delivery.run_id
+			WHERE delivery.status = 'sending'
+			  AND delivery.lease_execution_generation IS DISTINCT FROM run.execution_generation`,
+	},
+	{
+		name:             CheckSendingDeliveryWithInactiveParent,
+		severity:         SeverityError,
+		usesExpiredGrace: true,
+		query: `
+			SELECT delivery.mailing_id, delivery.run_id, delivery.recipient_id
+			FROM mailing_deliveries AS delivery
+			JOIN mailings AS mailing
+			  ON mailing.id = delivery.mailing_id
+			JOIN mailing_runs AS run
+			  ON run.mailing_id = delivery.mailing_id
+			 AND run.id = delivery.run_id
+			WHERE delivery.status = 'sending'
+			  AND delivery.lease_until IS NOT NULL
+			  AND CURRENT_TIMESTAMP - delivery.lease_until >
+			      ($2::double precision * INTERVAL '1 second')
+			  AND NOT (
+					(mailing.status = 'queued' AND run.status = 'queued')
+				 OR (mailing.status = 'running' AND run.status = 'running')
+				  )`,
 	},
 }
 
