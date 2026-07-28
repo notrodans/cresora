@@ -96,8 +96,8 @@ func (entity pgMailing) Queue(context context.Context) error {
 	var runID uuid.UUID
 	failure = transaction.QueryRow(
 		context,
-		`INSERT INTO mailing_runs (mailing_id, number, status)
-		 SELECT $1, COALESCE(MAX(number), 0) + 1, 'queued'
+		`INSERT INTO mailing_runs (mailing_id, number, status, execution_generation)
+		 SELECT $1, COALESCE(MAX(number), 0) + 1, 'queued', 1
 		 FROM mailing_runs WHERE mailing_id = $1 RETURNING id`,
 		entity.identity.UUID(),
 	).Scan(&runID)
@@ -158,46 +158,119 @@ func (entity pgMailing) Queue(context context.Context) error {
 
 func (entity pgMailing) Stop(context context.Context) error {
 	entity.validate(context, "stop")
-	query := `
-			UPDATE mailings
-			SET
-				status = 'stopped',
-				updated_at = CURRENT_TIMESTAMP
-			WHERE id = $1
-			  AND status IN (
-				'queued',
-				'running',
-				'paused'
-			  )`
+	transaction, failure := entity.database.Begin(context)
+	if failure != nil {
+		return fmt.Errorf("begin mailing %s stop transaction: %w", entity.identity.UUID(), failure)
+	}
+	defer func() { _ = transaction.Rollback(context) }()
+
+	query := `SELECT status::text FROM mailings WHERE id = $1`
 	arguments := []any{entity.identity.UUID()}
 	if operatorID, scoped := entity.operator(); scoped {
-		query += `
-			  AND operator_id = $2`
+		query += ` AND operator_id = $2`
 		arguments = append(arguments, operatorID)
 	}
-	result, failure := entity.database.Exec(
-		context,
-		query,
-		arguments...,
-	)
-	if failure != nil {
-		return fmt.Errorf(
-			"stop mailing %s: %w",
-			entity.identity.UUID(),
-			failure,
-		)
-	}
-	if result.RowsAffected() == 0 {
+	query += ` FOR UPDATE`
+	var status string
+	failure = transaction.QueryRow(context, query, arguments...).Scan(&status)
+	if errors.Is(failure, pgx.ErrNoRows) {
 		if _, scoped := entity.operator(); scoped {
 			return wrapLifecycleFailure(
-				fmt.Sprintf("stop mailing %s from missing, unauthorized, or invalid state", entity.identity.UUID()),
+				fmt.Sprintf("stop mailing %s from missing or unauthorized mailing", entity.identity.UUID()),
+				mailing.ErrNotFound,
+			)
+		}
+		return wrapLifecycleFailure(
+			fmt.Sprintf("stop mailing %s: mailing does not exist", entity.identity.UUID()),
+			mailing.ErrInvalidState,
+		)
+	}
+	if failure != nil {
+		return fmt.Errorf("lock mailing %s for stop: %w", entity.identity.UUID(), failure)
+	}
+	if status == "stopped" {
+		if failure = transaction.Commit(context); failure != nil {
+			return fmt.Errorf("commit repeated stop for mailing %s: %w", entity.identity.UUID(), failure)
+		}
+		return nil
+	}
+	if status != "queued" && status != "running" && status != "paused" {
+		if _, scoped := entity.operator(); scoped {
+			return wrapLifecycleFailure(
+				fmt.Sprintf("stop mailing %s from invalid status %q", entity.identity.UUID(), status),
 				mailing.ErrInvalidState,
 			)
 		}
 		return wrapLifecycleFailure(
-			fmt.Sprintf("stop mailing %s from invalid or missing state", entity.identity.UUID()),
+			fmt.Sprintf("stop mailing %s from invalid status %q", entity.identity.UUID(), status),
 			mailing.ErrInvalidState,
 		)
+	}
+
+	var runID uuid.UUID
+	failure = transaction.QueryRow(
+		context,
+		`SELECT id
+		 FROM mailing_runs
+		 WHERE mailing_id = $1
+		   AND status IN ('queued', 'running')
+		 ORDER BY number DESC, id DESC
+		 FOR UPDATE`,
+		entity.identity.UUID(),
+	).Scan(&runID)
+	if errors.Is(failure, pgx.ErrNoRows) {
+		return wrapLifecycleFailure(
+			fmt.Sprintf("stop mailing %s without an active run", entity.identity.UUID()),
+			mailing.ErrInvalidState,
+		)
+	}
+	if failure != nil {
+		return fmt.Errorf("lock active run for mailing %s stop: %w", entity.identity.UUID(), failure)
+	}
+	if _, failure = transaction.Exec(
+		context,
+		`UPDATE mailing_runs
+		 SET status = 'cancelled',
+		     execution_generation = execution_generation + 1,
+		     finished_at = CURRENT_TIMESTAMP
+		 WHERE mailing_id = $1
+		   AND id = $2
+		   AND status IN ('queued', 'running')`,
+		entity.identity.UUID(),
+		runID,
+	); failure != nil {
+		return fmt.Errorf("cancel active run %s for mailing %s: %w", runID, entity.identity.UUID(), failure)
+	}
+	if _, failure = transaction.Exec(
+		context,
+		`UPDATE mailing_deliveries
+		 SET status = 'skipped',
+		     skip_reason = 'mailing stopped',
+		     lease_until = NULL,
+		     lease_token = NULL,
+		     lease_execution_generation = NULL,
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE mailing_id = $1
+		   AND run_id = $2
+		   AND status = 'pending'`,
+		entity.identity.UUID(),
+		runID,
+	); failure != nil {
+		return fmt.Errorf("skip pending deliveries for mailing %s run %s: %w", entity.identity.UUID(), runID, failure)
+	}
+	update := `UPDATE mailings
+		SET status = 'stopped', updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1`
+	updateArguments := []any{entity.identity.UUID()}
+	if operatorID, scoped := entity.operator(); scoped {
+		update += ` AND operator_id = $2`
+		updateArguments = append(updateArguments, operatorID)
+	}
+	if _, failure = transaction.Exec(context, update, updateArguments...); failure != nil {
+		return fmt.Errorf("stop mailing %s: %w", entity.identity.UUID(), failure)
+	}
+	if failure = transaction.Commit(context); failure != nil {
+		return fmt.Errorf("commit mailing %s stop transaction: %w", entity.identity.UUID(), failure)
 	}
 	return nil
 }

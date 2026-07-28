@@ -62,8 +62,14 @@ func (UnimplementedHandler) QueueMailing(ctx context.Context, params QueueMailin
 
 // StopMailing implements stopMailing operation.
 //
-// Переводит рассылку в состояние `stopped`. Допустимые
-// исходные состояния: `queued`, `running`, `paused`.
+// Атомарно отменяет активный запуск и переводит
+// рассылку в состояние `stopped`. Ожидающие доставки
+// пропускаются и освобождают свои lease. Уже допущенные к
+// отправке доставки (`sending`) не изменяются, поэтому их
+// результат может быть сохранён после ответа. Повторная
+// остановка уже остановленной рассылки идемпотентно
+// возвращает `204`. Допустимые исходные состояния: `queued`,
+// `running`, `paused`, `stopped`.
 //
 // POST /mailings/{mailingID}/stop
 func (UnimplementedHandler) StopMailing(ctx context.Context, params StopMailingParams) (r StopMailingRes, _ error) {

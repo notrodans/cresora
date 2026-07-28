@@ -74,9 +74,9 @@ func TestPostgreSQLInvariants(t *testing.T) {
 
 	baselineCounts := resultCounts(baseline)
 	observedCounts := resultCounts(observed)
-	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckStoppedMailingWithClaimableDelivery, 1)
-	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckCancelledRunWithClaimableDelivery, 1)
-	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithoutLease, 1)
+	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckStoppedMailingWithClaimableDelivery, 0)
+	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckCancelledRunWithClaimableDelivery, 0)
+	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithoutLease, 0)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckExpiredSendingLease, 1)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckRunStatusTimestampContradiction, 1)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckMailingRunStatusContradiction, 4)
@@ -223,7 +223,8 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 		`UPDATE mailing_deliveries
 		 SET attempt_count = max_attempts,
 		     lease_token = $4,
-		     lease_until = CURRENT_TIMESTAMP + INTERVAL '1 hour'
+		     lease_until = CURRENT_TIMESTAMP + INTERVAL '1 hour',
+		     lease_execution_generation = 1
 		 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`,
 		stoppedMailing,
 		stoppedRun,
@@ -256,7 +257,7 @@ func createFixture(context context.Context, database *pgxpool.Pool) (fixture, er
 	if failure != nil {
 		return fixture, fmt.Errorf("insert no-lease run: %w", failure)
 	}
-	if failure = insertDelivery(context, database, noLeaseMailing, noLeaseRun, noLeaseRecipient, "sending", "no-lease"); failure != nil {
+	if failure = insertDelivery(context, database, noLeaseMailing, noLeaseRun, noLeaseRecipient, "pending", "no-lease"); failure != nil {
 		return fixture, fmt.Errorf("insert no-lease delivery: %w", failure)
 	}
 
@@ -293,10 +294,11 @@ func insertDelivery(
 	status, kind string,
 ) error {
 	query := `INSERT INTO mailing_deliveries
-		(mailing_id, run_id, recipient_id, status, ready_at, lease_token, lease_until)
+		(mailing_id, run_id, recipient_id, status, ready_at, lease_token, lease_until, lease_execution_generation)
 		VALUES ($1, $2, $3, $4, CASE WHEN $5 = 'future' THEN CURRENT_TIMESTAMP + INTERVAL '1 hour' ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute' END,
 		        CASE WHEN $5 = 'expired' THEN $6::uuid ELSE NULL END,
-		        CASE WHEN $5 = 'expired' THEN CURRENT_TIMESTAMP - INTERVAL '1 minute' ELSE NULL END)`
+		        CASE WHEN $5 = 'expired' THEN CURRENT_TIMESTAMP - INTERVAL '1 minute' ELSE NULL END,
+		        CASE WHEN $5 = 'expired' THEN 1 ELSE NULL END)`
 	_, failure := database.Exec(context, query, mailingID, runID, recipientID, status, kind, uuid.New())
 	return failure
 }
@@ -467,8 +469,14 @@ func applyInvariantMigrations(context context.Context, databaseURL string) error
 	if failure != nil {
 		return fmt.Errorf("create migration provider: %w", failure)
 	}
+	if _, failure = provider.Up(context); failure == nil {
+		return fmt.Errorf("apply migrations without delivery execution v2 acknowledgement")
+	}
+	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
+		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
+	}
 	if _, failure = provider.Up(context); failure != nil {
-		return fmt.Errorf("apply migrations: %w", failure)
+		return fmt.Errorf("apply acknowledged migrations: %w", failure)
 	}
 	return nil
 }

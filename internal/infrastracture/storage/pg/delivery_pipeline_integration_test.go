@@ -96,7 +96,7 @@ func TestPostgreSQLDeliveryPipeline(t *testing.T) {
 		}
 	})
 
-	t.Run("transient transport error retries with the stable random ID", func(t *testing.T) {
+	t.Run("transient transport error quarantines sending with the stable random ID", func(t *testing.T) {
 		item := fixture.deliveries[1]
 		if failure := setDeliveryReady(context, database, item, true); failure != nil {
 			t.Fatalf("ready retry delivery: %v", failure)
@@ -119,8 +119,8 @@ func TestPostgreSQLDeliveryPipeline(t *testing.T) {
 		}
 
 		state := readDeliveryState(t, context, database, item)
-		if state.status != "pending" {
-			t.Fatalf("transient-error delivery status = %q, want pending", state.status)
+		if state.status != "sending" {
+			t.Fatalf("transient-error delivery status = %q, want sending", state.status)
 		}
 		if state.attemptCount != 1 {
 			t.Fatalf("transient-error delivery attempt count = %d, want 1", state.attemptCount)
@@ -128,34 +128,15 @@ func TestPostgreSQLDeliveryPipeline(t *testing.T) {
 		if state.errorMessage == "" {
 			t.Fatal("transient-error delivery error message is empty")
 		}
-		if state.leaseToken != uuid.Nil {
-			t.Fatalf("transient-error delivery lease token = %s, want zero", state.leaseToken)
+		if state.leaseToken == uuid.Nil {
+			t.Fatal("transient-error delivery lease token is zero, want active quarantine lease")
 		}
 		if len(fake.Calls()) != 1 {
 			t.Fatalf("fake transient-error call count = %d, want 1", len(fake.Calls()))
 		}
-
-		if failure := setDeliveryReady(context, database, item, true); failure != nil {
-			t.Fatalf("ready retry attempt: %v", failure)
-		}
-		task, claimFailure = claims.Claim(context)
-		if claimFailure != nil {
-			t.Fatalf("claim retry attempt: %v", claimFailure)
-		}
-		if executeFailure := task.Execute(context, command); executeFailure != nil {
-			t.Fatalf("execute retry attempt: %v", executeFailure)
-		}
-		state = readDeliveryState(t, context, database, item)
-		if state.status != "sent" {
-			t.Fatalf("retried delivery status = %q, want sent", state.status)
-		}
-		calls := fake.Calls()
-		if len(calls) != 2 || calls[0].RandomID != item.randomID || calls[1].RandomID != item.randomID {
-			t.Fatalf("retry random IDs = %#v, want two calls with %d", calls, item.randomID)
-		}
 	})
 
-	t.Run("permanent transport error terminalizes exhausted delivery", func(t *testing.T) {
+	t.Run("permanent transport error quarantines exhausted delivery", func(t *testing.T) {
 		item := fixture.deliveries[2]
 		if failure := setDeliveryReady(context, database, item, true); failure != nil {
 			t.Fatalf("ready exhausted delivery: %v", failure)
@@ -183,14 +164,17 @@ func TestPostgreSQLDeliveryPipeline(t *testing.T) {
 		}
 
 		state := readDeliveryState(t, context, database, item)
-		if state.status != "failed" {
-			t.Fatalf("exhausted delivery status = %q, want failed", state.status)
+		if state.status != "sending" {
+			t.Fatalf("exhausted delivery status = %q, want sending", state.status)
 		}
 		if state.attemptCount != 1 {
 			t.Fatalf("exhausted delivery attempt count = %d, want 1", state.attemptCount)
 		}
 		if state.errorMessage == "" {
 			t.Fatal("exhausted delivery error message is empty")
+		}
+		if state.leaseToken == uuid.Nil {
+			t.Fatal("exhausted delivery lease token is zero, want active quarantine lease")
 		}
 		if len(fake.Calls()) != 1 {
 			t.Fatalf("fake exhausted call count = %d, want 1", len(fake.Calls()))
@@ -227,11 +211,11 @@ func TestPostgreSQLDeliveryPipeline(t *testing.T) {
 		}
 
 		state := readDeliveryState(t, context, database, item)
-		if state.status != "sending" {
-			t.Fatalf("stale delivery status = %q, want sending", state.status)
+		if state.status != "pending" {
+			t.Fatalf("stale delivery status = %q, want pending", state.status)
 		}
-		if state.attemptCount != 1 {
-			t.Fatalf("stale delivery attempt count = %d, want 1", state.attemptCount)
+		if state.attemptCount != 0 {
+			t.Fatalf("stale delivery attempt count = %d, want 0", state.attemptCount)
 		}
 	})
 }
@@ -429,8 +413,14 @@ func applyDeliveryPipelineMigrations(context stdcontext.Context, databaseURL str
 	if failure != nil {
 		return fmt.Errorf("create migration provider: %w", failure)
 	}
+	if _, failure = provider.Up(context); failure == nil {
+		return fmt.Errorf("apply migrations without delivery execution v2 acknowledgement")
+	}
+	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
+		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
+	}
 	if _, failure = provider.Up(context); failure != nil {
-		return fmt.Errorf("apply migrations: %w", failure)
+		return fmt.Errorf("apply acknowledged migrations: %w", failure)
 	}
 	return nil
 }

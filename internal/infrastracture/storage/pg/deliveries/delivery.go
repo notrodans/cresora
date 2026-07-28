@@ -40,19 +40,32 @@ func (entity persistentDelivery) Dispatch(
 	var random int64
 	failure := entity.database.QueryRow(
 		context,
-		`SELECT mailing.message_text, telegram.random_id
-		 FROM mailing_deliveries AS delivery
-		 JOIN mailings AS mailing
-		   ON mailing.id = delivery.mailing_id
-		 JOIN telegram_mailing_deliveries AS telegram
-		   ON telegram.mailing_id = delivery.mailing_id
-		  AND telegram.run_id = delivery.run_id
-		  AND telegram.recipient_id = delivery.recipient_id
+		`UPDATE mailing_deliveries AS delivery
+		 SET status = 'sending',
+		     started_at = CURRENT_TIMESTAMP,
+		     attempt_count = delivery.attempt_count + 1,
+		     updated_at = CURRENT_TIMESTAMP
+		 FROM mailings AS mailing,
+		      mailing_runs AS run,
+		      telegram_mailing_deliveries AS telegram
 		 WHERE delivery.mailing_id = $1
 		   AND delivery.run_id = $2
 		   AND delivery.recipient_id = $3
-		   AND delivery.status = 'sending'
-		   AND delivery.lease_token = $4`,
+		   AND mailing.id = delivery.mailing_id
+		   AND run.mailing_id = delivery.mailing_id
+		   AND run.id = delivery.run_id
+		   AND telegram.mailing_id = delivery.mailing_id
+		   AND telegram.run_id = delivery.run_id
+		   AND telegram.recipient_id = delivery.recipient_id
+		   AND delivery.status = 'pending'
+		   AND delivery.lease_token = $4
+		   AND delivery.lease_until > CURRENT_TIMESTAMP
+		   AND delivery.lease_execution_generation = run.execution_generation
+		   AND (
+		         (mailing.status = 'queued' AND run.status = 'queued')
+		      OR (mailing.status = 'running' AND run.status = 'running')
+		   )
+		 RETURNING mailing.message_text, telegram.random_id`,
 		entity.identity.Mailing().UUID(),
 		entity.identity.Run().UUID(),
 		entity.identity.Recipient().UUID(),
@@ -62,7 +75,7 @@ func (entity persistentDelivery) Dispatch(
 		return errStale
 	}
 	if failure != nil {
-		return fmt.Errorf("load claimed mailing delivery: %w", failure)
+		return fmt.Errorf("admit mailing delivery: %w", failure)
 	}
 	failure = port.Send(
 		context,
@@ -71,8 +84,8 @@ func (entity persistentDelivery) Dispatch(
 		random,
 	)
 	if failure != nil {
-		if record := entity.reject(context, failure); record != nil {
-			return fmt.Errorf("record failed mailing delivery after %v: %w", failure, record)
+		if record := entity.quarantine(context, failure); record != nil {
+			return fmt.Errorf("quarantine mailing delivery after %v: %w", failure, record)
 		}
 		return nil
 	}
@@ -83,6 +96,7 @@ func (entity persistentDelivery) Dispatch(
 		     sent_at = CURRENT_TIMESTAMP,
 		     lease_until = NULL,
 		     lease_token = NULL,
+		     lease_execution_generation = NULL,
 		     error_message = NULL,
 		     updated_at = CURRENT_TIMESTAMP
 		 WHERE mailing_id = $1
@@ -104,24 +118,11 @@ func (entity persistentDelivery) Dispatch(
 	return nil
 }
 
-func (entity persistentDelivery) reject(context context.Context, cause error) error {
+func (entity persistentDelivery) quarantine(context context.Context, cause error) error {
 	result, failure := entity.database.Exec(
 		context,
 		`UPDATE mailing_deliveries
-		 SET status = CASE
-		         WHEN attempt_count >= max_attempts THEN 'failed'::mailing_delivery_status_type
-		         ELSE 'pending'::mailing_delivery_status_type
-		     END,
-		     ready_at = CASE
-		         WHEN attempt_count >= max_attempts THEN ready_at
-		         ELSE CURRENT_TIMESTAMP + LEAST(
-		             INTERVAL '5 minutes',
-		             INTERVAL '5 seconds' * power(2, GREATEST(attempt_count - 1, 0))
-		         )
-		     END,
-		     lease_until = NULL,
-		     lease_token = NULL,
-		     error_message = $5,
+		 SET error_message = $5,
 		     updated_at = CURRENT_TIMESTAMP
 		 WHERE mailing_id = $1
 		   AND run_id = $2
@@ -135,7 +136,7 @@ func (entity persistentDelivery) reject(context context.Context, cause error) er
 		cause.Error(),
 	)
 	if failure != nil {
-		return fmt.Errorf("record mailing delivery failure: %w", failure)
+		return fmt.Errorf("quarantine mailing delivery failure: %w", failure)
 	}
 	if result.RowsAffected() == 0 {
 		return errStale

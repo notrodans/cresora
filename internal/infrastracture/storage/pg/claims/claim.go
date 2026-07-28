@@ -51,16 +51,16 @@ func (task claimed) Release(context context.Context, cause error) error {
 	_, failure := task.database.Exec(
 		context,
 		`UPDATE mailing_deliveries
-		 SET status = 'pending',
-		     ready_at = CURRENT_TIMESTAMP + INTERVAL '5 seconds',
+		 SET ready_at = CURRENT_TIMESTAMP + INTERVAL '5 seconds',
 		     lease_until = NULL,
 		     lease_token = NULL,
+		     lease_execution_generation = NULL,
 		     error_message = $5,
 		     updated_at = CURRENT_TIMESTAMP
 		 WHERE mailing_id = $1
 		   AND run_id = $2
 		   AND recipient_id = $3
-		   AND status = 'sending'
+		   AND status = 'pending'
 		   AND lease_token = $4`,
 		task.identity.Mailing().UUID(),
 		task.identity.Run().UUID(),
