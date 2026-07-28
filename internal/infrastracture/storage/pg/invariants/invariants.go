@@ -253,8 +253,9 @@ var checks = [...]checkSpec{
 			  AND delivery.lease_execution_generation IS DISTINCT FROM run.execution_generation`,
 	},
 	{
-		name:     CheckSendingDeliveryWithInactiveParent,
-		severity: SeverityError,
+		name:             CheckSendingDeliveryWithInactiveParent,
+		severity:         SeverityError,
+		usesExpiredGrace: true,
 		query: `
 			SELECT delivery.mailing_id, delivery.run_id, delivery.recipient_id
 			FROM mailing_deliveries AS delivery
@@ -264,6 +265,9 @@ var checks = [...]checkSpec{
 			  ON run.mailing_id = delivery.mailing_id
 			 AND run.id = delivery.run_id
 			WHERE delivery.status = 'sending'
+			  AND delivery.lease_until IS NOT NULL
+			  AND CURRENT_TIMESTAMP - delivery.lease_until >
+			      ($2::double precision * INTERVAL '1 second')
 			  AND NOT (
 					(mailing.status = 'queued' AND run.status = 'queued')
 				 OR (mailing.status = 'running' AND run.status = 'running')

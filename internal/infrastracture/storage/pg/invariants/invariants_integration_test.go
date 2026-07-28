@@ -89,9 +89,38 @@ func TestPostgreSQLInvariants(t *testing.T) {
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckRunStatusTimestampContradiction, 1)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckMailingRunStatusContradiction, 4)
 	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithStaleExecutionGeneration, 1)
-	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithInactiveParent, 1)
 	assertSample(t, observed, invariants.CheckSendingDeliveryWithStaleExecutionGeneration, fixture.generationMismatch)
-	assertSample(t, observed, invariants.CheckSendingDeliveryWithInactiveParent, fixture.inactiveParent)
+	assertCountDelta(t, baselineCounts, observedCounts, invariants.CheckSendingDeliveryWithInactiveParent, 0)
+
+	if _, failure = database.Exec(
+		ctx,
+		`UPDATE mailing_deliveries
+		 SET lease_until = CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+		 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`,
+		fixture.inactiveParent.MailingID,
+		fixture.inactiveParent.RunID,
+		fixture.inactiveParent.RecipientID,
+	); failure != nil {
+		t.Fatalf("expire inactive-parent lease beyond grace: %v", failure)
+	}
+	agedBeforeState, failure := fixtureState(ctx, database, fixture.mailingIDs)
+	if failure != nil {
+		t.Fatalf("snapshot fixture before aged-parent check: %v", failure)
+	}
+	agedObserved, failure := checker.Check(ctx)
+	if failure != nil {
+		t.Fatalf("run aged-parent invariant check: %v", failure)
+	}
+	agedAfterState, failure := fixtureState(ctx, database, fixture.mailingIDs)
+	if failure != nil {
+		t.Fatalf("snapshot fixture after aged-parent check: %v", failure)
+	}
+	if agedBeforeState != agedAfterState {
+		t.Fatalf("aged-parent checker changed fixture state: before=%q after=%q", agedBeforeState, agedAfterState)
+	}
+	agedCounts := resultCounts(agedObserved)
+	assertCountDelta(t, baselineCounts, agedCounts, invariants.CheckSendingDeliveryWithInactiveParent, 1)
+	assertSample(t, agedObserved, invariants.CheckSendingDeliveryWithInactiveParent, fixture.inactiveParent)
 
 	for _, result := range observed.Results {
 		if len(result.Sample) > invariants.DefaultSampleLimit {

@@ -137,13 +137,22 @@ func TestDeliveryFenceChecksOnlyInspectSendingDeliveries(t *testing.T) {
 				t.Fatalf("fence query %q does not require sending status", fenceCheck.query)
 			}
 			if name == CheckSendingDeliveryWithStaleExecutionGeneration {
+				if fenceCheck.usesExpiredGrace {
+					t.Fatal("generation fence query unexpectedly uses the expired lease grace period")
+				}
 				if !strings.Contains(fenceCheck.query, "delivery.lease_execution_generation IS DISTINCT FROM run.execution_generation") {
 					t.Fatalf("generation fence query %q does not compare delivery and run generations", fenceCheck.query)
 				}
 			} else {
+				if !fenceCheck.usesExpiredGrace {
+					t.Fatal("parent fence query does not use the configured expired lease grace period")
+				}
 				for _, predicate := range []string{
 					"mailing.status = 'queued' AND run.status = 'queued'",
 					"mailing.status = 'running' AND run.status = 'running'",
+					"delivery.lease_until IS NOT NULL",
+					"CURRENT_TIMESTAMP - delivery.lease_until",
+					"$2::double precision",
 				} {
 					if !strings.Contains(fenceCheck.query, predicate) {
 						t.Fatalf("parent fence query %q lacks admissible pair %q", fenceCheck.query, predicate)
