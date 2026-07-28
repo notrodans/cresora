@@ -44,3 +44,17 @@ func LoggerFrom(ctx context.Context) *slog.Logger {
 	}
 	return logger
 }
+
+// LoggerOr returns the request logger from context when one is available and
+// otherwise returns fallback. A typed nil logger in context is treated as
+// unavailable as well.
+func LoggerOr(ctx context.Context, fallback *slog.Logger) *slog.Logger {
+	if ctx == nil {
+		return fallback
+	}
+	logger, ok := ctx.Value(LoggerKey{}).(*slog.Logger)
+	if ok && logger != nil {
+		return logger
+	}
+	return fallback
+}
