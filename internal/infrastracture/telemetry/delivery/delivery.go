@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	"github.com/notrodans/nebula-go/internal/domain/mailing"
 	"github.com/notrodans/nebula-go/internal/domain/message"
 	"github.com/notrodans/nebula-go/internal/domain/recipient"
 )
@@ -19,6 +20,9 @@ const (
 	ClaimDurationMetricName = "delivery.claim.duration"
 	// SendDurationMetricName is the histogram name for Port.Send latency.
 	SendDurationMetricName = "delivery.send.duration"
+	// CommandDurationMetricName is the histogram name for delivery command
+	// execution latency.
+	CommandDurationMetricName = "delivery.command.duration"
 
 	outcomeAttributeKey = "outcome"
 
@@ -29,6 +33,13 @@ const (
 	sendOutcomeSuccess  = "success"
 	sendOutcomeError    = "error"
 	sendOutcomeCanceled = "canceled"
+	sendOutcomeDeadline = "deadline_exceeded"
+
+	commandOutcomeCompleted        = "completed"
+	commandOutcomeError            = "error"
+	commandOutcomeCanceled         = "canceled"
+	commandOutcomeDeadlineExceeded = "deadline_exceeded"
+	commandOutcomePanic            = "panic"
 )
 
 // NewClaims decorates delegate with claim duration measurements. A nil meter
@@ -63,6 +74,23 @@ func NewPort(delegate applicationdelivery.Port, meter metric.Meter) applicationd
 			meter,
 			SendDurationMetricName,
 			"Time spent sending a delivery message",
+		),
+	}
+}
+
+// NewCommand decorates delegate with command execution duration and bounded
+// outcome measurements. A panic is recorded and re-raised unchanged.
+func NewCommand(delegate applicationdelivery.Command, meter metric.Meter) applicationdelivery.Command {
+	if delegate == nil || meter == nil {
+		return delegate
+	}
+
+	return command{
+		delegate: delegate,
+		duration: newHistogram(
+			meter,
+			CommandDurationMetricName,
+			"Time spent executing a delivery command",
 		),
 	}
 }
@@ -109,13 +137,52 @@ func (port port) Send(
 	outcome := sendOutcomeSuccess
 	if err != nil {
 		outcome = sendOutcomeError
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.DeadlineExceeded) {
+			outcome = sendOutcomeDeadline
+		} else if errors.Is(err, context.Canceled) {
 			outcome = sendOutcomeCanceled
 		}
 	}
 	record(port.duration, ctx, started, outcome)
 
 	return err
+}
+
+type command struct {
+	delegate applicationdelivery.Command
+	duration metric.Float64Histogram
+}
+
+var _ applicationdelivery.Command = command{}
+
+func (command command) Execute(
+	ctx context.Context,
+	mailingID mailing.ID,
+	runID mailing.RunID,
+	recipientID recipient.ID,
+	token applicationdelivery.Token,
+) (err error) {
+	started := time.Now()
+	outcome := commandOutcomeCompleted
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			record(command.duration, ctx, started, commandOutcomePanic)
+			panic(recovered)
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				outcome = commandOutcomeDeadlineExceeded
+			case errors.Is(err, context.Canceled):
+				outcome = commandOutcomeCanceled
+			default:
+				outcome = commandOutcomeError
+			}
+		}
+		record(command.duration, ctx, started, outcome)
+	}()
+
+	return command.delegate.Execute(ctx, mailingID, runID, recipientID, token)
 }
 
 func newHistogram(meter metric.Meter, name, description string) metric.Float64Histogram {
