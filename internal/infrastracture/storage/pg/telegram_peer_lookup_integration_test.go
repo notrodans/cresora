@@ -430,7 +430,7 @@ func applyIntegrationMigrations(context context.Context, databaseURL string) err
 	if !ok {
 		return errors.New("locate integration test source")
 	}
-	migrationsPath := filepath.Join(filepath.Dir(filename), "../../../migrations")
+	migrationsPath := filepath.Join(filepath.Dir(filename), "../../../../migrations")
 	provider, failure := goose.NewProvider(
 		goose.DialectPostgres,
 		database,
