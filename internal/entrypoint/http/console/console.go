@@ -36,6 +36,7 @@ type Handler struct {
 	createDraft  commands.CreateDraft
 	queue        commands.Queue
 	dashboardReq requests.Dashboard
+	logger       *slogger.Logger
 	tmpl         *template.Template
 	publicOrigin *url.URL
 }
@@ -48,16 +49,19 @@ type Handler struct {
 // constructor. It only adapts the service to the three ports; Handler itself
 // depends exclusively on those ports.
 func New(first any, arguments ...any) chi.Router {
-	createDraft, queue, dashboard, publicOrigin := newDependencies(first, arguments...)
+	createDraft, queue, dashboard, publicOrigin, logger := newDependencies(first, arguments...)
 	router := chi.NewRouter()
-	Register(router, createDraft, queue, dashboard, publicOrigin)
+	Register(router, createDraft, queue, dashboard, publicOrigin, logger)
 	return router
 }
 
 // Register adds the mailing console routes to an existing chi router.
-func Register(router chi.Router, createDraft commands.CreateDraft, queue commands.Queue, dashboard requests.Dashboard, publicOrigin string) {
+func Register(router chi.Router, createDraft commands.CreateDraft, queue commands.Queue, dashboard requests.Dashboard, publicOrigin string, logger *slogger.Logger) {
 	if router == nil {
 		panic("register mailing console routes on nil router")
+	}
+	if logger == nil {
+		panic("register mailing console routes without logger")
 	}
 	origin, failure := parsePublicOrigin(publicOrigin)
 	if failure != nil {
@@ -67,7 +71,14 @@ func Register(router chi.Router, createDraft commands.CreateDraft, queue command
 		"contains":    contains,
 		"statusLabel": statusLabel,
 	}).ParseFS(assets, "templates/index.html"))
-	handler := &Handler{createDraft: createDraft, queue: queue, dashboardReq: dashboard, tmpl: tmpl, publicOrigin: origin}
+	handler := &Handler{
+		createDraft:  createDraft,
+		queue:        queue,
+		dashboardReq: dashboard,
+		logger:       logger,
+		tmpl:         tmpl,
+		publicOrigin: origin,
+	}
 	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		handler.dashboard(w, r, r.URL.Query().Get("notice"))
 	})
@@ -81,7 +92,7 @@ func Register(router chi.Router, createDraft commands.CreateDraft, queue command
 	})
 }
 
-func newDependencies(first any, arguments ...any) (commands.CreateDraft, commands.Queue, requests.Dashboard, string) {
+func newDependencies(first any, arguments ...any) (commands.CreateDraft, commands.Queue, requests.Dashboard, string, *slogger.Logger) {
 	if len(arguments) == 1 || len(arguments) == 2 {
 		publicOrigin, ok := arguments[0].(string)
 		if !ok {
@@ -93,7 +104,14 @@ func newDependencies(first any, arguments ...any) (commands.CreateDraft, command
 		if !createOK || !queueOK || !dashboardOK {
 			panic("create mailing console handler without CQS ports")
 		}
-		return legacyCreateDraftCommand{operation: legacyCreateDraft}, legacyQueueCommand{operation: legacyQueue}, legacyDashboardRequest{operation: legacyDashboard}, publicOrigin
+		logger := slogger.Default()
+		if len(arguments) == 2 {
+			logger, ok = arguments[1].(*slogger.Logger)
+			if !ok {
+				panic("create mailing console handler without logger")
+			}
+		}
+		return legacyCreateDraftCommand{operation: legacyCreateDraft}, legacyQueueCommand{operation: legacyQueue}, legacyDashboardRequest{operation: legacyDashboard}, publicOrigin, logger
 	}
 	if len(arguments) != 3 && len(arguments) != 4 {
 		panic("create mailing console handler with invalid arguments")
@@ -114,7 +132,14 @@ func newDependencies(first any, arguments ...any) (commands.CreateDraft, command
 	if !ok {
 		panic("create mailing console handler without create draft command")
 	}
-	return createDraft, queue, dashboard, publicOrigin
+	logger := slogger.Default()
+	if len(arguments) == 4 {
+		logger, ok = arguments[3].(*slogger.Logger)
+		if !ok {
+			panic("create mailing console handler without logger")
+		}
+	}
+	return createDraft, queue, dashboard, publicOrigin, logger
 }
 
 // These adapters keep the old New(service, origin[, logger]) form source
@@ -202,7 +227,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		FieldErrors: make(map[string]string),
 	}
 
-	logger := slog.LoggerFrom(r.Context()).With(
+	logger := slog.LoggerOr(r.Context(), h.logger).With(
 		slogger.String("operation", "mailing.create_draft"),
 		slogger.String("account_id", form.AccountID),
 	)

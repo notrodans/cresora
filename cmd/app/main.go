@@ -127,7 +127,7 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		accountAuthentication.RefreshQR,
 		accountAuthentication.Status,
 	)
-	console.Register(router, createDraft, queueMailing, dashboard, cfg.PublicOrigin.String())
+	console.Register(router, createDraft, queueMailing, dashboard, cfg.PublicOrigin.String(), log)
 
 	// Инициализируем HTTP сервер
 	server := &http.Server{
