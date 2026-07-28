@@ -40,7 +40,7 @@ func (claims claims) Claim(context context.Context) (delivery.Task, error) {
 		panic("claim PostgreSQL delivery with invalid lease")
 	}
 	token := uuid.New()
-	seconds := int64(claims.lease / time.Second)
+	seconds := claims.lease.Seconds()
 	var mailingID uuid.UUID
 	var runID uuid.UUID
 	var recipientID uuid.UUID
@@ -50,39 +50,46 @@ func (claims claims) Claim(context context.Context) (delivery.Task, error) {
 		`WITH candidate AS (
 		    SELECT delivery.mailing_id,
 		           delivery.run_id,
-		           delivery.recipient_id
+		           delivery.recipient_id,
+		           run.execution_generation
 		    FROM mailing_deliveries AS delivery
-		    WHERE (
-		            delivery.status = 'pending'
-		        AND delivery.ready_at <= CURRENT_TIMESTAMP
-		    ) OR (
-		            delivery.status = 'sending'
-		        AND delivery.lease_until < CURRENT_TIMESTAMP
-		    )
+		    JOIN mailings AS mailing
+		      ON mailing.id = delivery.mailing_id
+		    JOIN mailing_runs AS run
+		      ON run.mailing_id = delivery.mailing_id
+		     AND run.id = delivery.run_id
+		    JOIN telegram_mailing_routes AS route
+		      ON route.mailing_id = delivery.mailing_id
+		    WHERE delivery.status = 'pending'
+		      AND delivery.ready_at <= CURRENT_TIMESTAMP
+		      AND delivery.attempt_count < delivery.max_attempts
+		      AND (delivery.lease_until IS NULL OR delivery.lease_until < CURRENT_TIMESTAMP)
+		      AND (
+		            (mailing.status = 'queued' AND run.status = 'queued')
+		         OR (mailing.status = 'running' AND run.status = 'running')
+		      )
 		    ORDER BY delivery.ready_at,
 		             delivery.mailing_id,
 		             delivery.run_id,
 		             delivery.recipient_id
-		    FOR UPDATE SKIP LOCKED
+		    FOR UPDATE OF mailing, run, delivery SKIP LOCKED
 		    LIMIT 1
 		)
 		UPDATE mailing_deliveries AS delivery
-		SET status = 'sending',
-		    started_at = COALESCE(delivery.started_at, CURRENT_TIMESTAMP),
-		    lease_until = CURRENT_TIMESTAMP + ($1 * INTERVAL '1 second'),
+		SET lease_until = CURRENT_TIMESTAMP + ($1::double precision * INTERVAL '1 second'),
 		    lease_token = $2,
-		    attempt_count = delivery.attempt_count + 1,
+		    lease_execution_generation = candidate.execution_generation,
 		    updated_at = CURRENT_TIMESTAMP
 		FROM candidate
-		JOIN telegram_mailing_routes AS route
-		  ON route.mailing_id = candidate.mailing_id
 		WHERE delivery.mailing_id = candidate.mailing_id
 		  AND delivery.run_id = candidate.run_id
 		  AND delivery.recipient_id = candidate.recipient_id
 		RETURNING delivery.mailing_id,
 		          delivery.run_id,
 		          delivery.recipient_id,
-		          route.account_id`,
+		          (SELECT route.account_id
+		             FROM telegram_mailing_routes AS route
+		            WHERE route.mailing_id = delivery.mailing_id)`,
 		seconds,
 		token,
 	).Scan(&mailingID, &runID, &recipientID, &accountID)

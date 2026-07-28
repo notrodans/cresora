@@ -88,6 +88,38 @@ func TestExpiredLeaseWarningQueryUsesStrictGraceComparison(t *testing.T) {
 	}
 }
 
+func TestClaimabilityChecksOnlyEligiblePendingDeliveries(t *testing.T) {
+	for _, name := range []CheckName{
+		CheckStoppedMailingWithClaimableDelivery,
+		CheckCancelledRunWithClaimableDelivery,
+	} {
+		t.Run(string(name), func(t *testing.T) {
+			var claimabilityCheck checkSpec
+			for _, check := range checks {
+				if check.name == name {
+					claimabilityCheck = check
+					break
+				}
+			}
+			if !strings.Contains(claimabilityCheck.query, "delivery.status = 'pending'") {
+				t.Fatalf("claimability query %q does not require pending status", claimabilityCheck.query)
+			}
+			if strings.Contains(claimabilityCheck.query, "delivery.status = 'sending'") {
+				t.Fatalf("claimability query %q treats sending as claimable", claimabilityCheck.query)
+			}
+			for _, predicate := range []string{
+				"delivery.ready_at <= CURRENT_TIMESTAMP",
+				"delivery.attempt_count < delivery.max_attempts",
+				"delivery.lease_until IS NULL OR delivery.lease_until < CURRENT_TIMESTAMP",
+			} {
+				if !strings.Contains(claimabilityCheck.query, predicate) {
+					t.Fatalf("claimability query %q lacks predicate %q", claimabilityCheck.query, predicate)
+				}
+			}
+		})
+	}
+}
+
 func TestCheckNamesAndSeveritiesAreStable(t *testing.T) {
 	want := []struct {
 		name     CheckName
