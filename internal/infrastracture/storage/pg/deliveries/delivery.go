@@ -38,6 +38,7 @@ func (entity persistentDelivery) Dispatch(
 	}
 	var body string
 	var random int64
+	var admittedAttempt int
 	failure := entity.database.QueryRow(
 		executionContext,
 		`UPDATE mailing_deliveries AS delivery
@@ -61,16 +62,17 @@ func (entity persistentDelivery) Dispatch(
 		   AND delivery.lease_token = $4
 		   AND delivery.lease_until > CURRENT_TIMESTAMP
 		   AND delivery.lease_execution_generation = run.execution_generation
+		   AND delivery.attempt_count < delivery.max_attempts
 		   AND (
 		         (mailing.status = 'queued' AND run.status = 'queued')
 		      OR (mailing.status = 'running' AND run.status = 'running')
 		   )
-		 RETURNING mailing.message_text, telegram.random_id`,
+		 RETURNING mailing.message_text, telegram.random_id, delivery.attempt_count`,
 		entity.identity.Mailing().UUID(),
 		entity.identity.Run().UUID(),
 		entity.identity.Recipient().UUID(),
 		entity.token.UUID(),
-	).Scan(&body, &random)
+	).Scan(&body, &random, &admittedAttempt)
 	if errors.Is(failure, pgx.ErrNoRows) {
 		return errStale
 	}
@@ -101,35 +103,79 @@ func (entity persistentDelivery) Dispatch(
 	}
 	result, failure := entity.database.Exec(
 		finalizationContext,
-		`UPDATE mailing_deliveries
+		`UPDATE mailing_deliveries AS delivery
 		 SET status = 'sent',
 		     sent_at = CURRENT_TIMESTAMP,
 		     lease_until = NULL,
 		     lease_token = NULL,
 		     lease_execution_generation = NULL,
+		     skip_reason = NULL,
 		     error_message = NULL,
 		     updated_at = CURRENT_TIMESTAMP
-		 WHERE mailing_id = $1
-		   AND run_id = $2
-		   AND recipient_id = $3
-		   AND status = 'sending'
-		   AND lease_token = $4`,
+		 FROM telegram_mailing_deliveries AS telegram
+		 WHERE delivery.mailing_id = $1
+		   AND delivery.run_id = $2
+		   AND delivery.recipient_id = $3
+		   AND telegram.mailing_id = delivery.mailing_id
+		   AND telegram.run_id = delivery.run_id
+		   AND telegram.recipient_id = delivery.recipient_id
+		   AND telegram.random_id = $4
+		   AND delivery.attempt_count >= $5
+		   AND delivery.started_at IS NOT NULL
+		   AND delivery.status IN ('pending', 'sending', 'unknown', 'failed', 'skipped')`,
 		entity.identity.Mailing().UUID(),
 		entity.identity.Run().UUID(),
 		entity.identity.Recipient().UUID(),
-		entity.token.UUID(),
+		random,
+		admittedAttempt,
 	)
 	if failure != nil {
 		return fmt.Errorf("%w: mark mailing delivery sent: %w", application.ErrOutcomeFinalization, failure)
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %w", application.ErrOutcomeFinalization, errStale)
+		var (
+			status         string
+			persistedID    int64
+			persistedCount int
+			started        bool
+		)
+		failure = entity.database.QueryRow(
+			finalizationContext,
+			`SELECT delivery.status::text,
+			        telegram.random_id,
+			        delivery.attempt_count,
+			        delivery.started_at IS NOT NULL
+			 FROM mailing_deliveries AS delivery
+			 JOIN telegram_mailing_deliveries AS telegram
+			   ON telegram.mailing_id = delivery.mailing_id
+			  AND telegram.run_id = delivery.run_id
+			  AND telegram.recipient_id = delivery.recipient_id
+			 WHERE delivery.mailing_id = $1
+			   AND delivery.run_id = $2
+			   AND delivery.recipient_id = $3`,
+			entity.identity.Mailing().UUID(),
+			entity.identity.Run().UUID(),
+			entity.identity.Recipient().UUID(),
+		).Scan(&status, &persistedID, &persistedCount, &started)
+		if failure != nil {
+			return fmt.Errorf("%w: verify already-sent mailing delivery: %w", application.ErrOutcomeFinalization, failure)
+		}
+		if status != "sent" || persistedID != random || persistedCount < admittedAttempt || !started {
+			return fmt.Errorf(
+				"%w: verify already-sent mailing delivery proof (status=%s random_id=%d attempt_count=%d started=%t)",
+				application.ErrOutcomeFinalization,
+				status,
+				persistedID,
+				persistedCount,
+				started,
+			)
+		}
 	}
 	return nil
 }
 
 func (entity persistentDelivery) quarantine(context context.Context, cause error) error {
-	result, failure := entity.database.Exec(
+	_, failure := entity.database.Exec(
 		context,
 		`UPDATE mailing_deliveries
 		 SET error_message = $5,
@@ -148,8 +194,7 @@ func (entity persistentDelivery) quarantine(context context.Context, cause error
 	if failure != nil {
 		return fmt.Errorf("quarantine mailing delivery failure: %w", failure)
 	}
-	if result.RowsAffected() == 0 {
-		return errStale
-	}
+	// A stale failure is deliberately a no-op. The lease may have been reaped,
+	// replaced by a newer attempt, or finalized by a late success.
 	return nil
 }

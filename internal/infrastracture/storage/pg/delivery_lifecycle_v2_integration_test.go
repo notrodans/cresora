@@ -123,18 +123,43 @@ func TestDeliveryExecutionV2MigrationCutover(t *testing.T) {
 	if _, failure = database.Exec(ctx, `INSERT INTO mailing_deliveries (mailing_id, run_id, recipient_id) VALUES ($1, $2, $3)`, draftID, v2RunID, draftRecipientID); failure != nil {
 		t.Fatalf("insert v2 constraint fixture delivery: %v", failure)
 	}
+	if _, failure = database.Exec(ctx, `INSERT INTO telegram_mailing_deliveries (mailing_id, run_id, recipient_id, random_id) VALUES ($1, $2, $3, nextval('mailing_delivery_random_id_seq'))`, draftID, v2RunID, draftRecipientID); failure != nil {
+		t.Fatalf("insert v2 Telegram constraint fixture delivery: %v", failure)
+	}
+	_, failure = database.Exec(ctx, `UPDATE telegram_mailing_deliveries SET random_id = random_id + 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
+	assertConstraintViolation(t, failure, "ck_telegram_mailing_deliveries_random_id_immutable")
 	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = NULL WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
 	assertConstraintViolation(t, failure, "ck_mailing_deliveries_lease")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
+	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = CURRENT_TIMESTAMP WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
 	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_lease")
 	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sent', sent_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
+	assertConstraintViolation(t, failure, "ck_mailing_deliveries_terminal_lease")
+	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
+	assertConstraintViolation(t, failure, "ck_mailing_deliveries_unknown_evidence")
+	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown', attempt_count = 1, started_at = CURRENT_TIMESTAMP, error_message = 'expired sending lease' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
+		t.Fatalf("insert valid unknown delivery: %v", failure)
+	}
+	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 0, started_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
+	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_evidence")
+	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = NULL, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
+	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_evidence")
+	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'pending', attempt_count = 0, started_at = NULL, error_message = NULL, lease_token = NULL, lease_until = NULL, lease_execution_generation = NULL WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
+		t.Fatalf("persist valid pending delivery: %v", failure)
+	}
+	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New()); failure != nil {
+		t.Fatalf("persist valid sending delivery: %v", failure)
+	}
+	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown', error_message = 'expired sending lease', lease_token = NULL, lease_until = NULL, lease_execution_generation = NULL WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
+		t.Fatalf("persist valid unknown delivery: %v", failure)
+	}
+	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
 	assertConstraintViolation(t, failure, "ck_mailing_deliveries_terminal_lease")
 	var constraintStatus string
 	if failure = database.QueryRow(ctx, `SELECT status::text FROM mailing_deliveries WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID).Scan(&constraintStatus); failure != nil {
 		t.Fatalf("read v2 constraint fixture delivery: %v", failure)
 	}
-	if constraintStatus != "pending" {
-		t.Fatalf("constraint fixture status after rejected updates = %q, want pending", constraintStatus)
+	if constraintStatus != "unknown" {
+		t.Fatalf("constraint fixture status after rejected updates = %q, want unknown", constraintStatus)
 	}
 	if _, failure = provider.Down(ctx); failure == nil {
 		t.Fatal("v2 migration Down returned nil, want irreversible migration failure")
@@ -496,7 +521,7 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 			t.Fatalf("reclaim released delivery: %v", claimFailure)
 		}
 		claimedState := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
-		if _, failure := database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', started_at = CURRENT_TIMESTAMP WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
+		if _, failure := database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = CURRENT_TIMESTAMP WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
 			t.Fatalf("make delivery sending: %v", failure)
 		}
 		if failure := task.Release(ctx, errors.New("must not demote")); failure != nil {
@@ -899,6 +924,19 @@ func createLifecycleDelivery(t *testing.T, context context.Context, database *pg
 	}
 	if failure := pgmailings.NewMailings(database).Mailing(mailing.Identity(mailingID)).Queue(context); failure != nil {
 		t.Fatalf("queue lifecycle mailing: %v", failure)
+	}
+	// Keep rows from earlier subtests out of the next claim. The lifecycle
+	// matrix intentionally leaves leases behind, while Claim correctly
+	// reclaims expired pending leases; isolate each fixture without changing
+	// that production behavior.
+	if _, failure := database.Exec(context, `UPDATE mailing_deliveries AS delivery
+		SET ready_at = CURRENT_TIMESTAMP + INTERVAL '1 hour'
+		FROM mailings AS mailing
+		WHERE delivery.mailing_id = mailing.id
+		  AND mailing.operator_id = $1
+		  AND delivery.mailing_id <> $2
+		  AND delivery.status = 'pending'`, operatorID, mailingID); failure != nil {
+		t.Fatalf("hold prior lifecycle pending deliveries: %v", failure)
 	}
 	if count > 1 {
 		if _, failure := database.Exec(context, `UPDATE mailing_deliveries SET ready_at = CURRENT_TIMESTAMP + INTERVAL '1 hour' WHERE mailing_id = $1 AND recipient_id <> $2`, mailingID, recipientIDs[0]); failure != nil {

@@ -42,7 +42,9 @@ func (token Token) UUID() uuid.UUID {
 	return uuid.UUID(token)
 }
 
-// Sends one domain message through an outer port
+// Sends one domain message through an outer port. randomID is the persisted
+// Telegram idempotency key for the logical delivery and must be reused for
+// every admitted retry.
 type Port interface {
 	Send(context.Context, recipient.Recipient, message.Message, int64) error
 }
@@ -79,4 +81,17 @@ type Task interface {
 // Claims persistent delivery tasks
 type Claims interface {
 	Claim(context.Context) (Task, error)
+}
+
+// ReapResult reports the bounded set of expired sending deliveries handled by
+// one reaper pass.
+type ReapResult struct {
+	Retried int
+	Unknown int
+}
+
+// Reaper reclaims expired sending delivery leases without contacting a
+// transport.
+type Reaper interface {
+	Reap(context.Context) (ReapResult, error)
 }
