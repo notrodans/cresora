@@ -282,6 +282,150 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("renewal fence matrix", func(t *testing.T) {
+		t.Run("valid queued pair", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim delivery: %v", failure)
+			}
+			before := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
+			if failure = task.Renew(ctx, 250*time.Millisecond); failure != nil {
+				t.Fatalf("renew delivery lease: %v", failure)
+			}
+			after := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
+			if after.status != "pending" || after.attempts != before.attempts || after.started != before.started || after.leaseToken != before.leaseToken || after.leaseGeneration != before.leaseGeneration {
+				t.Fatalf("renewed delivery state = %+v, want only lease expiry changed from %+v", after, before)
+			}
+			var remainingSeconds float64
+			if failure = database.QueryRow(ctx, `SELECT EXTRACT(EPOCH FROM (lease_until - clock_timestamp())) FROM mailing_deliveries WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID).Scan(&remainingSeconds); failure != nil {
+				t.Fatalf("read renewed lease duration: %v", failure)
+			}
+			if remainingSeconds <= 0 || remainingSeconds >= 1 {
+				t.Fatalf("renewed lease duration = %0.6f seconds, want between zero and one second", remainingSeconds)
+			}
+		})
+
+		t.Run("valid running pair", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			if _, failure := database.Exec(ctx, `UPDATE mailings SET status = 'running' WHERE id = $1`, item.mailingID); failure != nil {
+				t.Fatalf("set mailing running: %v", failure)
+			}
+			if _, failure := database.Exec(ctx, `UPDATE mailing_runs SET status = 'running', started_at = clock_timestamp() WHERE mailing_id = $1 AND id = $2`, item.mailingID, item.runID); failure != nil {
+				t.Fatalf("set run running: %v", failure)
+			}
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim running delivery: %v", failure)
+			}
+			if failure = task.Renew(ctx, 250*time.Millisecond); failure != nil {
+				t.Fatalf("renew running delivery lease: %v", failure)
+			}
+		})
+
+		t.Run("stale token", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim delivery: %v", failure)
+			}
+			if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET lease_token = $4 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID, uuid.New()); failure != nil {
+				t.Fatalf("replace lease token: %v", failure)
+			}
+			if failure = task.Renew(ctx, 250*time.Millisecond); !errors.Is(failure, applicationdelivery.ErrLeaseLost) {
+				t.Fatalf("renew stale token error = %v, want ErrLeaseLost", failure)
+			}
+		})
+
+		t.Run("expired lease", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim delivery: %v", failure)
+			}
+			if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET lease_until = clock_timestamp() - INTERVAL '1 second' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
+				t.Fatalf("expire lease: %v", failure)
+			}
+			if failure = task.Renew(ctx, 250*time.Millisecond); !errors.Is(failure, applicationdelivery.ErrLeaseLost) {
+				t.Fatalf("renew expired lease error = %v, want ErrLeaseLost", failure)
+			}
+		})
+
+		t.Run("stopped parent", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim delivery: %v", failure)
+			}
+			if failure = pgmailings.NewMailings(database).Mailing(mailing.Identity(item.mailingID)).Stop(ctx); failure != nil {
+				t.Fatalf("stop mailing: %v", failure)
+			}
+			if failure = task.Renew(ctx, 250*time.Millisecond); !errors.Is(failure, applicationdelivery.ErrLeaseLost) {
+				t.Fatalf("renew stopped delivery error = %v, want ErrLeaseLost", failure)
+			}
+		})
+
+		t.Run("generation mismatch", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim delivery: %v", failure)
+			}
+			if _, failure = database.Exec(ctx, `UPDATE mailing_runs SET execution_generation = execution_generation + 1 WHERE mailing_id = $1 AND id = $2`, item.mailingID, item.runID); failure != nil {
+				t.Fatalf("advance execution generation: %v", failure)
+			}
+			if failure = task.Renew(ctx, 250*time.Millisecond); !errors.Is(failure, applicationdelivery.ErrLeaseLost) {
+				t.Fatalf("renew generation-mismatched delivery error = %v, want ErrLeaseLost", failure)
+			}
+		})
+
+		t.Run("sending delivery", func(t *testing.T) {
+			item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+			task, failure := claims.Claim(ctx)
+			if failure != nil {
+				t.Fatalf("claim delivery: %v", failure)
+			}
+			if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', started_at = clock_timestamp(), attempt_count = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
+				t.Fatalf("make delivery sending: %v", failure)
+			}
+			if failure = task.Renew(ctx, 250*time.Millisecond); !errors.Is(failure, applicationdelivery.ErrLeaseLost) {
+				t.Fatalf("renew sending delivery error = %v, want ErrLeaseLost", failure)
+			}
+		})
+	})
+
+	t.Run("renewal waits behind the mailing lock", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		task, failure := claims.Claim(ctx)
+		if failure != nil {
+			t.Fatalf("claim delivery: %v", failure)
+		}
+		lockContext, cancelLock := context.WithTimeout(ctx, time.Second)
+		defer cancelLock()
+		transaction, failure := database.Begin(lockContext)
+		if failure != nil {
+			t.Fatalf("begin lock transaction: %v", failure)
+		}
+		t.Cleanup(func() { _ = transaction.Rollback(context.Background()) })
+		var locked int
+		if failure = transaction.QueryRow(lockContext, `SELECT 1 FROM mailings WHERE id = $1 FOR UPDATE`, item.mailingID).Scan(&locked); failure != nil {
+			t.Fatalf("lock mailing: %v", failure)
+		}
+
+		renewContext, cancelRenew := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancelRenew()
+		renewalDone := make(chan error, 1)
+		go func() { renewalDone <- task.Renew(renewContext, 250*time.Millisecond) }()
+		select {
+		case failure = <-renewalDone:
+			if !errors.Is(failure, context.DeadlineExceeded) {
+				t.Fatalf("renewal while mailing is locked = %v, want context deadline", failure)
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for locked renewal: %v", ctx.Err())
+		}
+	})
+
 	t.Run("final fence rejects without calling transport", func(t *testing.T) {
 		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
 		if _, failure := database.Exec(ctx, `UPDATE mailing_deliveries SET ready_at = CURRENT_TIMESTAMP WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
@@ -377,6 +521,120 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 		state := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
 		if state.status != "sending" || state.attempts != 1 || state.errorMessage == "" || state.leaseToken == uuid.Nil {
 			t.Fatalf("unknown outcome state = %+v", state)
+		}
+	})
+
+	t.Run("successful outcome finalizes after execution context cancellation", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		task, failure := claims.Claim(ctx)
+		if failure != nil {
+			t.Fatalf("claim delivery: %v", failure)
+		}
+		port := newUncancellablePort(nil)
+		executionContext, cancelExecution := context.WithCancel(ctx)
+		dispatchDone := make(chan error, 1)
+		go func() {
+			dispatchDone <- task.Execute(executionContext, applicationdelivery.New(deliveries, port))
+		}()
+		select {
+		case <-port.entered:
+		case <-ctx.Done():
+			t.Fatalf("wait for admitted send: %v", ctx.Err())
+		}
+		cancelExecution()
+		close(port.release)
+		select {
+		case failure = <-dispatchDone:
+			if failure != nil {
+				t.Fatalf("finalize successful delivery after cancellation: %v", failure)
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for canceled successful delivery: %v", ctx.Err())
+		}
+		state := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
+		if state.status != "sent" || state.leaseToken != uuid.Nil || state.leaseUntil.Valid {
+			t.Fatalf("successful delivery after context cancellation = %+v", state)
+		}
+	})
+
+	t.Run("quarantine finalizes after execution context cancellation", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		task, failure := claims.Claim(ctx)
+		if failure != nil {
+			t.Fatalf("claim delivery: %v", failure)
+		}
+		sendFailure := errors.New("transport outcome unknown")
+		port := newUncancellablePort(sendFailure)
+		executionContext, cancelExecution := context.WithCancel(ctx)
+		dispatchDone := make(chan error, 1)
+		go func() {
+			dispatchDone <- task.Execute(executionContext, applicationdelivery.New(deliveries, port))
+		}()
+		select {
+		case <-port.entered:
+		case <-ctx.Done():
+			t.Fatalf("wait for admitted send: %v", ctx.Err())
+		}
+		cancelExecution()
+		close(port.release)
+		select {
+		case failure = <-dispatchDone:
+			if failure != nil {
+				t.Fatalf("quarantine delivery after cancellation: %v", failure)
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for canceled quarantined delivery: %v", ctx.Err())
+		}
+		state := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
+		if state.status != "sending" || state.errorMessage == "" || state.leaseToken == uuid.Nil {
+			t.Fatalf("quarantined delivery after context cancellation = %+v", state)
+		}
+	})
+
+	t.Run("outcome finalization timeout preserves sending and claim exclusion", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		task, failure := claims.Claim(ctx)
+		if failure != nil {
+			t.Fatalf("claim delivery: %v", failure)
+		}
+		port := newUncancellablePort(nil)
+		dispatchDone := make(chan error, 1)
+		go func() {
+			dispatchDone <- task.Execute(ctx, applicationdelivery.New(deliveries, port))
+		}()
+		select {
+		case <-port.entered:
+		case <-ctx.Done():
+			t.Fatalf("wait for admitted send: %v", ctx.Err())
+		}
+
+		lockContext, cancelLock := context.WithTimeout(ctx, time.Second)
+		transaction, failure := database.Begin(lockContext)
+		cancelLock()
+		if failure != nil {
+			t.Fatalf("begin finalization lock transaction: %v", failure)
+		}
+		t.Cleanup(func() { _ = transaction.Rollback(context.Background()) })
+		var locked int
+		if failure = transaction.QueryRow(ctx, `SELECT 1 FROM mailing_deliveries WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3 FOR UPDATE`, item.mailingID, item.runID, item.recipientID).Scan(&locked); failure != nil {
+			t.Fatalf("lock delivery for finalization timeout: %v", failure)
+		}
+		close(port.release)
+
+		select {
+		case failure = <-dispatchDone:
+			if !errors.Is(failure, applicationdelivery.ErrOutcomeFinalization) {
+				t.Fatalf("finalization timeout error = %v, want ErrOutcomeFinalization", failure)
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for finalization timeout: %v", ctx.Err())
+		}
+		state := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
+		if state.status != "sending" || state.leaseToken == uuid.Nil {
+			t.Fatalf("delivery after finalization timeout = %+v, want sending with lease", state)
+		}
+		if _, failure = claims.Claim(ctx); !errors.Is(failure, applicationdelivery.ErrEmpty) {
+			t.Fatalf("claim after finalization timeout error = %v, want ErrEmpty", failure)
 		}
 	})
 
@@ -709,4 +967,25 @@ func (port *blockingPort) Send(context context.Context, _ recipient.Recipient, _
 	case <-context.Done():
 		return fmt.Errorf("blocking transport: %w", context.Err())
 	}
+}
+
+type uncancellablePort struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	failure error
+}
+
+func newUncancellablePort(failure error) *uncancellablePort {
+	return &uncancellablePort{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		failure: failure,
+	}
+}
+
+func (port *uncancellablePort) Send(context.Context, recipient.Recipient, message.Message, int64) error {
+	port.once.Do(func() { close(port.entered) })
+	<-port.release
+	return port.failure
 }

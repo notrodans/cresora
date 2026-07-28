@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -11,7 +12,13 @@ import (
 	"github.com/notrodans/nebula-go/internal/domain/recipient"
 )
 
-var ErrEmpty = errors.New("no ready mailing deliveries")
+var (
+	ErrEmpty               = errors.New("no ready mailing deliveries")
+	ErrLeaseLost           = errors.New("delivery lease lost")
+	ErrOutcomeFinalization = errors.New("delivery outcome finalization failed")
+)
+
+const OutcomeFinalizationTimeout = 2 * time.Second
 
 // Identifies an execution lane such as an account
 type Route uuid.UUID
@@ -64,6 +71,7 @@ type Command interface {
 // Represents one claimed background task
 type Task interface {
 	Route() Route
+	Renew(context.Context, time.Duration) error
 	Execute(context.Context, Command) error
 	Release(context.Context, error) error
 }

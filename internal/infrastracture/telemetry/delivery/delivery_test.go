@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -224,6 +225,10 @@ type taskStub struct{}
 
 func (taskStub) Route() applicationdelivery.Route {
 	return applicationdelivery.Route{}
+}
+
+func (taskStub) Renew(context.Context, time.Duration) error {
+	return nil
 }
 
 func (taskStub) Execute(context.Context, applicationdelivery.Command) error {

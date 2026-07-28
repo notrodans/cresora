@@ -60,7 +60,7 @@ func Defaults() Config {
 }
 
 // LeaseSafetyDuration calculates the minimum lease bound for one execution
-// deadline and its safety margin.
+// deadline, outcome finalization, and its safety margin.
 func (config Config) LeaseSafetyDuration() (time.Duration, error) {
 	if config.ExecutionTimeout <= 0 {
 		return 0, fmt.Errorf("%w: execution timeout must be positive", ErrInvalidConfig)
@@ -68,10 +68,14 @@ func (config Config) LeaseSafetyDuration() (time.Duration, error) {
 	if config.LeaseSafetyMargin <= 0 {
 		return 0, fmt.Errorf("%w: lease safety margin must be positive", ErrInvalidConfig)
 	}
-	if config.ExecutionTimeout > maxDuration-config.LeaseSafetyMargin {
-		return 0, fmt.Errorf("%w: execution timeout and lease safety margin overflow", ErrInvalidConfig)
+	if config.ExecutionTimeout > maxDuration-applicationdelivery.OutcomeFinalizationTimeout {
+		return 0, fmt.Errorf("%w: execution timeout and outcome finalization timeout overflow", ErrInvalidConfig)
 	}
-	return config.ExecutionTimeout + config.LeaseSafetyMargin, nil
+	withoutMargin := config.ExecutionTimeout + applicationdelivery.OutcomeFinalizationTimeout
+	if withoutMargin > maxDuration-config.LeaseSafetyMargin {
+		return 0, fmt.Errorf("%w: execution timeout, outcome finalization timeout, and lease safety margin overflow", ErrInvalidConfig)
+	}
+	return withoutMargin + config.LeaseSafetyMargin, nil
 }
 
 // Validate checks all worker durations and the arithmetic used by its lease
@@ -344,6 +348,19 @@ func (worker *Worker) coordinate(
 			return
 		}
 
+		renewalFailure := safeRenew(task, claimContext, worker.config.LeaseDuration)
+		if renewalFailure != nil {
+			releaseFailure := worker.release(task, renewalFailure, cleanup)
+			<-slots
+			if releaseFailure != nil {
+				reportFatal(errors.Join(
+					fmt.Errorf("renew delivery lease: %w", renewalFailure),
+					releaseFailure,
+				))
+			}
+			continue
+		}
+
 		if !active.add() {
 			worker.releaseLate(task, claimContext, cleanup, reportFatal, recordFailure)
 			<-slots
@@ -390,12 +407,33 @@ func (worker *Worker) execute(
 	if executeFailure == nil {
 		return
 	}
-	if releaseFailure := worker.release(task, executeFailure, cleanup); releaseFailure != nil {
+	releaseFailure := worker.release(task, executeFailure, cleanup)
+	if errors.Is(executeFailure, applicationdelivery.ErrOutcomeFinalization) {
+		reportFatal(errors.Join(
+			fmt.Errorf("execute delivery task: %w", executeFailure),
+			releaseFailure,
+		))
+		return
+	}
+	if releaseFailure != nil {
 		reportFatal(errors.Join(
 			fmt.Errorf("execute delivery task: %w", executeFailure),
 			releaseFailure,
 		))
 	}
+}
+
+func safeRenew(
+	task applicationdelivery.Task,
+	context context.Context,
+	duration time.Duration,
+) (failure error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			failure = panicFailure("delivery task renewal", recovered)
+		}
+	}()
+	return task.Renew(context, duration)
 }
 
 func (worker *Worker) release(
