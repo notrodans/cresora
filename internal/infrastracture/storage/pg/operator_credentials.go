@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	operatorcredentials "github.com/notrodans/nebula-go/internal/application/operatorcredentials"
+	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
 )
 
 type operatorCredentialDatabase interface {
@@ -72,4 +74,44 @@ func (store *OperatorCredentialStore) BootstrapOrReset(
 		return operatorcredentials.Operator{}, fmt.Errorf("write operator credential: %w", failure)
 	}
 	return operator, nil
+}
+
+// FindCredential returns only the credential projection required for an
+// Argon2 verification. A missing row is intentionally distinguishable only to
+// the application service, which turns it into a generic login failure.
+func (store *OperatorCredentialStore) FindCredential(
+	context context.Context,
+	username string,
+) (operatorsessions.Credential, error) {
+	if context == nil {
+		return operatorsessions.Credential{}, errors.New("find operator credential: context is required")
+	}
+	if store == nil || store.database == nil {
+		return operatorsessions.Credential{}, errors.New("find operator credential: database is required")
+	}
+	if username == "" || strings.TrimSpace(username) != username {
+		return operatorsessions.Credential{}, operatorsessions.ErrCredentialNotFound
+	}
+
+	var (
+		credential operatorsessions.Credential
+		hash       pgtype.Text
+	)
+	failure := store.database.QueryRow(
+		context,
+		`SELECT id, username, password_hash, enabled
+		 FROM operators
+		 WHERE username = $1`,
+		username,
+	).Scan(&credential.OperatorID, &credential.Username, &hash, &credential.Enabled)
+	if errors.Is(failure, pgx.ErrNoRows) {
+		return operatorsessions.Credential{}, operatorsessions.ErrCredentialNotFound
+	}
+	if failure != nil {
+		return operatorsessions.Credential{}, errors.New("read operator credential")
+	}
+	if hash.Valid {
+		credential.PasswordHash = hash.String
+	}
+	return credential, nil
 }

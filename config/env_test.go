@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,94 @@ func TestValidateTelegramSessionConfigurationRejectsInvalidKeyID(t *testing.T) {
 			t.Fatalf("error %q contains key ID value", err)
 		}
 	}
+}
+
+func TestValidateWebConfigurationRequiresHTTPSInProduction(t *testing.T) {
+	if err := validateWebConfiguration(Config{Env: Production, PublicOrigin: mustURL(t, "http://example.test")}); err == nil {
+		t.Fatal("accepted HTTP production origin")
+	}
+	if err := validateWebConfiguration(Config{Env: Production, PublicOrigin: mustURL(t, "https://example.test")}); err != nil {
+		t.Fatalf("rejected HTTPS production origin: %v", err)
+	}
+	if err := validateWebConfiguration(Config{Env: Staging, PublicOrigin: mustURL(t, "http://example.test")}); err == nil {
+		t.Fatal("accepted HTTP staging origin")
+	}
+	if err := validateWebConfiguration(Config{Env: Staging, PublicOrigin: mustURL(t, "https://example.test")}); err != nil {
+		t.Fatalf("rejected HTTPS staging origin: %v", err)
+	}
+}
+
+func TestValidateWebConfigurationAllowsHTTPOnlyForLocalDevelopmentAndTesting(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       EnvKind
+		origin    string
+		wantError bool
+	}{
+		{name: "development localhost", env: Development, origin: "http://localhost:8080"},
+		{name: "testing localhost", env: Testing, origin: "http://localhost:8080"},
+		{name: "development IPv4 loopback", env: Development, origin: "http://127.0.0.1:8080"},
+		{name: "testing IPv6 loopback", env: Testing, origin: "http://[::1]:8080"},
+		{name: "development nonlocal host", env: Development, origin: "http://dev.example.com:8080", wantError: true},
+		{name: "testing nonlocal host", env: Testing, origin: "http://dev.example.com", wantError: true},
+		{name: "development HTTPS nonlocal host", env: Development, origin: "https://dev.example.com"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateWebConfiguration(Config{Env: test.env, PublicOrigin: mustURL(t, test.origin)})
+			if test.wantError && err == nil {
+				t.Fatalf("accepted insecure nonlocal origin %q", test.origin)
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("rejected origin %q: %v", test.origin, err)
+			}
+		})
+	}
+}
+
+func TestSessionCookieModeIsExplicit(t *testing.T) {
+	if got := (Config{Env: Production}).SessionCookieName(); got != ProductionSessionCookie {
+		t.Fatalf("production cookie = %q, want %q", got, ProductionSessionCookie)
+	}
+	if got := (Config{Env: Staging}).SessionCookieName(); got != ProductionSessionCookie {
+		t.Fatalf("staging cookie = %q, want %q", got, ProductionSessionCookie)
+	}
+	if got := (Config{Env: Development, PublicOrigin: mustURL(t, "http://localhost:8080")}).SessionCookieName(); got != DevelopmentSessionCookie {
+		t.Fatalf("development cookie = %q, want %q", got, DevelopmentSessionCookie)
+	}
+	if got := (Config{Env: Development, PublicOrigin: mustURL(t, "https://localhost:8080")}).SessionCookieName(); got != ProductionSessionCookie {
+		t.Fatalf("HTTPS development cookie = %q, want %q", got, ProductionSessionCookie)
+	}
+	if !(Config{Env: Testing, PublicOrigin: mustURL(t, "http://localhost:8080")}).SessionCookieAllowsInsecureLocal() {
+		t.Fatal("testing HTTP mode did not explicitly allow local insecure cookies")
+	}
+	for _, origin := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"} {
+		cfg := Config{Env: Development, PublicOrigin: mustURL(t, origin)}
+		if !cfg.SessionCookieAllowsInsecureLocal() || cfg.SessionCookieSecure() || cfg.SessionCookieName() != DevelopmentSessionCookie {
+			t.Fatalf("local development cookie mode for %q: allow=%t secure=%t name=%q", origin, cfg.SessionCookieAllowsInsecureLocal(), cfg.SessionCookieSecure(), cfg.SessionCookieName())
+		}
+	}
+	for _, env := range []EnvKind{Production, Staging} {
+		cfg := Config{Env: env, PublicOrigin: mustURL(t, "https://example.test:8443")}
+		if cfg.SessionCookieAllowsInsecureLocal() || !cfg.SessionCookieSecure() || cfg.SessionCookieName() != ProductionSessionCookie {
+			t.Fatalf("secure %s cookie mode: allow=%t secure=%t name=%q", env, cfg.SessionCookieAllowsInsecureLocal(), cfg.SessionCookieSecure(), cfg.SessionCookieName())
+		}
+	}
+	if cfg := (Config{Env: Development, PublicOrigin: mustURL(t, "http://dev.example.com:8080")}); cfg.SessionCookieAllowsInsecureLocal() || !cfg.SessionCookieSecure() || cfg.SessionCookieName() != ProductionSessionCookie {
+		t.Fatalf("nonlocal development HTTP cookie mode: allow=%t secure=%t name=%q", cfg.SessionCookieAllowsInsecureLocal(), cfg.SessionCookieSecure(), cfg.SessionCookieName())
+	}
+	if (Config{Env: Staging, PublicOrigin: mustURL(t, "https://example.test")}).SessionCookieAllowsInsecureLocal() {
+		t.Fatal("staging received local insecure cookie escape hatch")
+	}
+}
+
+func mustURL(t *testing.T, value string) url.URL {
+	t.Helper()
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+	return *parsed
 }
 
 func setRequiredEnvironment(t *testing.T) {

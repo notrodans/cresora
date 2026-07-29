@@ -2,6 +2,7 @@ package operatoraccounts
 
 import (
 	"context"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -599,6 +600,199 @@ func TestOperatorAccountHTTPCreatesOneFlowCookiePerRequest(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected exactly one session flow cookie, got %d cookies: %v", count, response.Result().Cookies())
 	}
+}
+
+func TestOperatorAccountRouteIsRegisteredBehindPrincipalAndDisabledWithoutLiveAuth(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	authenticated := newTestActorProvider(actor)
+	handler := NewWithOptions(
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		authenticated,
+		"https://example.test",
+		RouteOptions{Mode: RouteDisabled, Cookie: SecureCookieConfig()},
+	)
+
+	// A registered authenticated route must not fall through to 404, and the
+	// disabled composition must not call a nil command port or panic.
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "https://example.test/operator-accounts/authenticate", nil))
+	if get.Code != http.StatusServiceUnavailable || !strings.Contains(get.Body.String(), "СЕРВИС ВРЕМЕННО НЕДОСТУПЕН") || !strings.Contains(get.Body.String(), `href="/"`) {
+		t.Fatalf("disabled authenticated GET: status=%d body=%q", get.Code, get.Body.String())
+	}
+	post := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "https://example.test/operator-accounts/authenticate/phone", strings.NewReader("phone=%2B15551230001"))
+	request.Header.Set("Origin", "https://example.test")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(post, request)
+	if post.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled authenticated POST: status=%d body=%q", post.Code, post.Body.String())
+	}
+
+	unauthenticated := principal.ProviderFunc(func(*http.Request) (application.Actor, error) {
+		return application.Actor{}, principal.ErrUnavailable
+	})
+	unauthedHandler := NewWithOptions(nil, nil, nil, nil, nil, unauthenticated, "https://example.test", RouteOptions{Mode: RouteDisabled, Cookie: SecureCookieConfig()})
+	unauthenticatedResponse := httptest.NewRecorder()
+	unauthedHandler.ServeHTTP(unauthenticatedResponse, httptest.NewRequest(http.MethodGet, "https://example.test/operator-accounts/authenticate", nil))
+	if unauthenticatedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated route: status=%d body=%q", unauthenticatedResponse.Code, unauthenticatedResponse.Body.String())
+	}
+}
+
+func TestDisabledOperatorAccountRendersUnavailableTemplateContract(t *testing.T) {
+	handler := &handler{
+		disabled: true,
+		tmpl:     template.Must(template.New("authenticate.html").Parse("{{.Unavailable}}|{{.UnavailableMessage}}|{{.ReturnToConsole}}|{{.ErrorFocus}}")),
+	}
+	response := httptest.NewRecorder()
+	handler.unavailable(response)
+
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "true|"+unavailableMessage+"|/|true" {
+		t.Fatalf("unavailable template contract: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestOperatorAccountProductionAndStagingCompositionsCannotRunMockFixedCode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		env  DeploymentEnvironment
+	}{
+		{name: "production", env: EnvironmentProduction},
+		{name: "staging", env: EnvironmentStaging},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			actor := application.Actor{OperatorID: uuid.New()}
+			provider := newTestActorProvider(actor)
+			mock := authmock.New()
+			handler := NewWithOptions(
+				mock.StartPhone,
+				mock.VerifyPhone,
+				mock.StartQR,
+				mock.RefreshQR,
+				mock.Status,
+				provider,
+				"https://example.test",
+				RouteOptions{Mode: RouteDisabled, Environment: test.env, Cookie: SecureCookieConfig()},
+			)
+			request := httptest.NewRequest(http.MethodPost, "https://example.test/operator-accounts/authenticate/phone/code", strings.NewReader("code="+authmock.MockPhoneCode))
+			request.Header.Set("Origin", "https://example.test")
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), authmock.MockPhoneCode) {
+				t.Fatalf("%s mock fixed-code flow executed or leaked: status=%d body=%q", test.name, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestOperatorAccountDevelopmentTestMockModeIsExplicit(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	mock := authmock.New()
+	handler := NewWithOptions(
+		mock.StartPhone,
+		mock.VerifyPhone,
+		mock.StartQR,
+		mock.RefreshQR,
+		mock.Status,
+		provider,
+		"https://example.test",
+		RouteOptions{Mode: RouteDevelopmentTestMock, Environment: EnvironmentDevelopment, Cookie: SecureCookieConfig(), AllowDevelopmentTestMock: true},
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://example.test/operator-accounts/authenticate", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("explicit development/test mock route: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestOperatorAccountDevelopmentTestMockRequiresExplicitOptIn(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	mock := authmock.New()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("development/test mock route registered without explicit opt-in")
+		}
+	}()
+	NewWithOptions(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, "https://example.test", RouteOptions{Mode: RouteDevelopmentTestMock, Cookie: SecureCookieConfig()})
+}
+
+func TestOperatorAccountCookiesFollowDeploymentPolicy(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	mock := authmock.New()
+
+	tests := []struct {
+		name        string
+		origin      string
+		cookie      CookieConfig
+		secure      bool
+		csrfName    string
+		sessionName string
+	}{
+		{name: "secure HTTPS", origin: "https://example.test", cookie: SecureCookieConfig(), secure: true, csrfName: productionCSRFCookie, sessionName: productionSessionCookie},
+		{name: "explicit local HTTP exception", origin: "http://localhost:8080", cookie: LocalInsecureCookieConfig(), secure: false, csrfName: localCSRFCookie, sessionName: localSessionCookie},
+		{name: "nonlocal HTTP remains secure", origin: "http://dev.example.test", cookie: SecureCookieConfig(), secure: true, csrfName: productionCSRFCookie, sessionName: productionSessionCookie},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewWithOptions(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, test.origin, RouteOptions{Mode: RouteDevelopmentTestMock, Environment: EnvironmentTesting, Cookie: test.cookie, AllowDevelopmentTestMock: true})
+			request := httptest.NewRequest(http.MethodGet, test.origin+"/operator-accounts/authenticate", nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("authenticate GET: status=%d body=%q", response.Code, response.Body.String())
+			}
+			cookies := response.Result().Cookies()
+			assertOperatorCookie(t, cookies, test.csrfName, test.secure)
+			assertOperatorCookie(t, cookies, test.sessionName, test.secure)
+		})
+	}
+}
+
+func TestOperatorAccountCookiePolicyRejectsImplicitInsecureAndWrongHostSettings(t *testing.T) {
+	for _, cookie := range []CookieConfig{
+		{CSRFCookieName: localCSRFCookie, SessionCookieName: localSessionCookie},
+		{CSRFCookieName: localCSRFCookie, SessionCookieName: localSessionCookie, AllowInsecureLocal: false},
+		{CSRFCookieName: productionCSRFCookie, SessionCookieName: productionSessionCookie, Secure: true, AllowInsecureLocal: true},
+		{CSRFCookieName: "custom_csrf", SessionCookieName: "custom_session", Secure: true},
+	} {
+		if err := ValidateCookieConfig(cookie); err == nil {
+			t.Fatalf("accepted invalid operator cookie policy: %#v", cookie)
+		}
+	}
+	if err := ValidateCookieConfig(LocalInsecureCookieConfig()); err != nil {
+		t.Fatalf("rejected explicit local operator cookie policy: %v", err)
+	}
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	mock := authmock.New()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("registered insecure operator cookies for a nonlocal HTTP origin")
+		}
+	}()
+	NewWithOptions(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, "http://dev.example.test", RouteOptions{Mode: RouteDevelopmentTestMock, Environment: EnvironmentDevelopment, Cookie: LocalInsecureCookieConfig(), AllowDevelopmentTestMock: true})
+}
+
+func assertOperatorCookie(t *testing.T, cookies []*http.Cookie, name string, secure bool) {
+	t.Helper()
+	for _, cookie := range cookies {
+		if cookie.Name != name || cookie.MaxAge <= 0 {
+			continue
+		}
+		if cookie.Secure != secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.Domain != "" || cookie.SameSite != http.SameSiteLaxMode {
+			t.Fatalf("unexpected %s cookie: %#v", name, cookie)
+		}
+		return
+	}
+	t.Fatalf("cookie %q was not set: %v", name, cookies)
 }
 
 type blockingStatus struct {

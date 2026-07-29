@@ -17,9 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/notrodans/nebula-go/config"
-	application "github.com/notrodans/nebula-go/internal/application"
 	mailingconsolecommands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
-	operatoraccountauthmock "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/mock"
+	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
 	mailingconsolerequests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
 	mailingconsole "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	backgroundjobs "github.com/notrodans/nebula-go/internal/entrypoint/background"
@@ -27,9 +26,9 @@ import (
 	"github.com/notrodans/nebula-go/internal/entrypoint/background/delivery/actor"
 	deliveryreaper "github.com/notrodans/nebula-go/internal/entrypoint/background/deliveryreaper"
 	deliveryreconciler "github.com/notrodans/nebula-go/internal/entrypoint/background/deliveryreconciler"
+	"github.com/notrodans/nebula-go/internal/entrypoint/http/authentication"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/console"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/operatoraccounts"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
 	"github.com/notrodans/nebula-go/internal/infrastracture/logger/slog"
 	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg"
 	claims "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/claims"
@@ -120,18 +119,21 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 
 	// Создаём сервис для работы с таблицами рассылок.
 	service := mailingconsole.NewService(mailings.NewMailingConsole(database), mailings.NewMailings(database))
-	staticActor := application.Actor{OperatorID: cfg.OperatorID}
-	principalProvider := principal.Static(cfg.OperatorID)
-	if failure = service.VerifyOperator(rootContext, staticActor); failure != nil {
-		return fmt.Errorf("verify configured operator: %w", failure)
+	credentialStore := pg.NewOperatorCredentialStore(database)
+	sessionStore := pg.NewOperatorWebSessionStore(database)
+	authenticationService := operatorsessions.NewService(credentialStore, sessionStore)
+	cookieConfig := authentication.CookieConfig{
+		Name:               cfg.SessionCookieName(),
+		Secure:             cfg.SessionCookieSecure(),
+		AllowInsecureLocal: cfg.SessionCookieAllowsInsecureLocal(),
 	}
+	sessionProvider := authentication.NewSessionProvider(authenticationService, cookieConfig)
 	// Команда для создания драфта рассылки
 	createDraft := mailingconsolecommands.NewCreateDraft(&service)
 	// Команда для помещения рассылки в очередь
 	queueMailing := mailingconsolecommands.NewQueue(&service)
 	// Запрос борды
 	dashboard := mailingconsolerequests.NewDashboard(&service)
-	accountAuthentication := operatoraccountauthmock.New()
 
 	loggerMiddleware := func(next http.Handler) http.Handler {
 		return logging(log, next)
@@ -140,16 +142,27 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	router := chi.NewRouter()
 	router.Use(loggerMiddleware)
 	router.Use(middleware.Recoverer)
-	operatoraccounts.Register(
+	authentication.Register(router, authenticationService, sessionProvider, cfg.PublicOrigin.String(), cookieConfig)
+	// Telegram account sign-in remains unavailable until live Telegram
+	// adapters are composed. Never wire the deterministic in-memory mock here:
+	// this disabled route preserves the endpoint surface and returns a generic
+	// 503 after principal authentication in every deployment environment.
+	operatoraccounts.RegisterWithOptions(
 		router,
-		accountAuthentication.StartPhone,
-		accountAuthentication.VerifyPhone,
-		accountAuthentication.StartQR,
-		accountAuthentication.RefreshQR,
-		accountAuthentication.Status,
-		principalProvider,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		sessionProvider,
+		cfg.PublicOrigin.String(),
+		operatoraccounts.RouteOptions{
+			Mode:        operatoraccounts.RouteDisabled,
+			Environment: operatoraccounts.DeploymentEnvironment(cfg.Env),
+			Cookie:      operatoraccounts.NewCookieConfig(cfg.SessionCookieSecure(), cfg.SessionCookieAllowsInsecureLocal()),
+		},
 	)
-	console.Register(router, createDraft, queueMailing, dashboard, principalProvider, cfg.PublicOrigin.String(), log)
+	console.Register(router, createDraft, queueMailing, dashboard, sessionProvider, cfg.PublicOrigin.String(), log)
 
 	// Инициализируем HTTP сервер
 	server := &http.Server{
