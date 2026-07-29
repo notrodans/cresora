@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSessionEncryptionKeyUnmarshalText(t *testing.T) {
@@ -57,6 +58,37 @@ func TestLoadFromAllowsTelegramSessionConfigurationToBeAbsent(t *testing.T) {
 	}
 	if config.TelegramSessionEncryptionKey.Configured() {
 		t.Fatal("expected absent Telegram session key to remain unconfigured")
+	}
+	if config.DeliveryReaperInterval != DefaultDeliveryReaperInterval {
+		t.Fatalf("delivery reaper interval = %s, want default %s", config.DeliveryReaperInterval, DefaultDeliveryReaperInterval)
+	}
+}
+
+func TestLoadFromValidatesDeliveryReaperInterval(t *testing.T) {
+	for _, value := range []string{"0s", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(DeliveryReaperIntervalEnv, value)
+
+			_, err := loadFrom(t.TempDir())
+			if err == nil {
+				t.Fatal("load configuration succeeded, want invalid reaper interval")
+			}
+			if !strings.Contains(err.Error(), DeliveryReaperIntervalEnv) {
+				t.Fatalf("error %q does not name %s", err, DeliveryReaperIntervalEnv)
+			}
+		})
+	}
+}
+
+func TestValidateDeliveryReaperConfiguration(t *testing.T) {
+	if err := validateDeliveryReaperConfiguration(Config{DeliveryReaperInterval: time.Second}); err != nil {
+		t.Fatalf("validate positive delivery reaper interval: %v", err)
+	}
+	for _, interval := range []time.Duration{0, -time.Second} {
+		if err := validateDeliveryReaperConfiguration(Config{DeliveryReaperInterval: interval}); err == nil {
+			t.Fatalf("validate interval %s succeeded, want error", interval)
+		}
 	}
 }
 

@@ -21,8 +21,10 @@ import (
 	operatoraccountauthmock "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/mock"
 	mailingconsolerequests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
 	mailingconsole "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
-	background "github.com/notrodans/nebula-go/internal/entrypoint/background/delivery"
+	backgroundjobs "github.com/notrodans/nebula-go/internal/entrypoint/background"
+	deliverybackground "github.com/notrodans/nebula-go/internal/entrypoint/background/delivery"
 	"github.com/notrodans/nebula-go/internal/entrypoint/background/delivery/actor"
+	deliveryreaper "github.com/notrodans/nebula-go/internal/entrypoint/background/deliveryreaper"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/console"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/nebula-go/internal/infrastracture/logger/slog"
@@ -30,6 +32,7 @@ import (
 	claims "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/claims"
 	deliveries "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/deliveries"
 	mailings "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/mailings"
+	pgreaper "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/reaper"
 	telegramaccount "github.com/notrodans/nebula-go/internal/transport/telegram/account"
 )
 
@@ -99,6 +102,14 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	}
 	defer database.Close()
 
+	// Lease recovery is transport-free and therefore runs in every mode,
+	// including WEB_ONLY. The PostgreSQL adapter retains its own batch, grace,
+	// and retry defaults; only the polling interval is application config.
+	deliveryRecovery := pgreaper.New(database, pgreaper.Config{})
+	reaperLoop := deliveryreaper.New(deliveryRecovery, deliveryreaper.Config{
+		Interval: cfg.DeliveryReaperInterval,
+	})
+
 	// Создаём сервис для работы с таблицами рассылок.
 	service := mailingconsole.NewService(cfg.OperatorID, mailings.NewMailingConsole(database), mailings.NewMailings(database))
 	if failure = service.VerifyOperator(rootContext); failure != nil {
@@ -157,7 +168,16 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		}()
 	}
 
-	return monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors)
+	reaperErrors := make(chan error, 1)
+	reaperSupervisor := backgroundjobs.NewRunner(
+		[]backgroundjobs.Job{reaperLoop.Run},
+		lifecycleWaitTimeout,
+	)
+	go func() {
+		reaperErrors <- reaperSupervisor.Run(rootContext)
+	}()
+
+	return monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, reaperErrors)
 }
 
 // APIs и Targets — это адаптеры уровня приложения вокруг существующего
@@ -171,7 +191,7 @@ func run(context context.Context, database *pgxpool.Pool, apis APIs, targets Tar
 	factory := actor.NewFactory(commands, 4, 32)
 	supervisor := actor.NewSupervisor(context, factory)
 	claims := claims.NewClaims(database, 5*time.Minute)
-	pump := background.New(claims, supervisor, 4, 250*time.Millisecond)
+	pump := deliverybackground.New(claims, supervisor, 4, 250*time.Millisecond)
 
 	failure := pump.Run(context)
 	actorFailure := supervisor.Wait()
@@ -193,13 +213,20 @@ type serveFunction func() error
 
 var lifecycleWaitTimeout = 10 * time.Second
 
+var errReaperErrorsClosed = errors.New("delivery reaper supervision channel closed unexpectedly")
+
 func monitorRuntime(
 	root context.Context,
 	cancel context.CancelFunc,
 	server serverController,
 	serve serveFunction,
 	workerErrors <-chan error,
+	backgroundErrors ...<-chan error,
 ) error {
+	var reaperErrors <-chan error
+	if len(backgroundErrors) > 0 {
+		reaperErrors = backgroundErrors[0]
+	}
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- serve()
@@ -212,6 +239,7 @@ func monitorRuntime(
 			cancel()
 			shutdownFailure := shutdownServer(server)
 			workerFailure := waitWorker(workerErrors)
+			reaperFailure := waitReaper(reaperErrors)
 			if failure != nil {
 				return failure
 			}
@@ -221,15 +249,22 @@ func monitorRuntime(
 			if workerFailure != nil {
 				return fmt.Errorf("delivery worker stopped: %w", workerFailure)
 			}
+			if reaperFailure != nil && !errors.Is(reaperFailure, root.Err()) {
+				return fmt.Errorf("delivery reaper stopped: %w", reaperFailure)
+			}
 			return errors.New("mailing console server stopped unexpectedly")
 		case failure := <-workerErrors:
 			shutdownRequested := root.Err() != nil
 			cancel()
 			shutdownFailure := shutdownServer(server)
 			serverFailure := waitServer(serverErrors)
+			reaperFailure := waitReaper(reaperErrors)
 			if shutdownRequested && (failure == nil || errors.Is(failure, root.Err())) {
 				if shutdownFailure != nil {
 					return shutdownFailure
+				}
+				if reaperFailure != nil && !errors.Is(reaperFailure, root.Err()) {
+					return fmt.Errorf("delivery reaper stopped: %w", reaperFailure)
 				}
 				return serverFailure
 			}
@@ -243,7 +278,12 @@ func monitorRuntime(
 				return serverFailure
 			}
 			return fmt.Errorf("delivery worker stopped: %w", failure)
-		case <-root.Done():
+		case failure, open := <-reaperErrors:
+			if !open {
+				failure = errReaperErrorsClosed
+			}
+			shutdownRequested := root.Err() != nil
+			cancel()
 			shutdownFailure := shutdownServer(server)
 			serverFailure := waitServer(serverErrors)
 			workerFailure := waitWorker(workerErrors)
@@ -255,6 +295,33 @@ func monitorRuntime(
 			}
 			if workerFailure != nil && !errors.Is(workerFailure, root.Err()) {
 				return fmt.Errorf("delivery worker stopped: %w", workerFailure)
+			}
+			if failure == nil {
+				if shutdownRequested {
+					return nil
+				}
+				return errors.New("delivery reaper stopped unexpectedly")
+			}
+			if shutdownRequested && errors.Is(failure, root.Err()) {
+				return nil
+			}
+			return fmt.Errorf("delivery reaper stopped: %w", failure)
+		case <-root.Done():
+			shutdownFailure := shutdownServer(server)
+			serverFailure := waitServer(serverErrors)
+			workerFailure := waitWorker(workerErrors)
+			reaperFailure := waitReaper(reaperErrors)
+			if shutdownFailure != nil {
+				return shutdownFailure
+			}
+			if serverFailure != nil {
+				return serverFailure
+			}
+			if workerFailure != nil && !errors.Is(workerFailure, root.Err()) {
+				return fmt.Errorf("delivery worker stopped: %w", workerFailure)
+			}
+			if reaperFailure != nil && !errors.Is(reaperFailure, root.Err()) {
+				return fmt.Errorf("delivery reaper stopped: %w", reaperFailure)
 			}
 			return nil
 		}
@@ -288,6 +355,21 @@ func waitWorker(workerErrors <-chan error) error {
 		return failure
 	case <-time.After(lifecycleWaitTimeout):
 		return errors.New("delivery worker shutdown timed out")
+	}
+}
+
+func waitReaper(reaperErrors <-chan error) error {
+	if reaperErrors == nil {
+		return nil
+	}
+	select {
+	case failure, open := <-reaperErrors:
+		if !open {
+			return errReaperErrorsClosed
+		}
+		return failure
+	case <-time.After(lifecycleWaitTimeout):
+		return errors.New("delivery reaper shutdown timed out")
 	}
 }
 
