@@ -14,8 +14,9 @@ type SessionScope struct {
 	AccountID  uuid.UUID
 }
 
-// Session is the result of loading an owned account. Present is false when
-// the account is owned by the operator but has not authenticated yet.
+// Session is the result of loading an owned account. Bytes is opaque and is
+// meaningful only when Present is true; Present is false when the account is
+// owned by the operator but has not authenticated yet.
 type Session struct {
 	Bytes   []byte
 	Present bool
