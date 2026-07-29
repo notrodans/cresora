@@ -369,8 +369,8 @@ func insertDelivery(
 	status, kind string,
 ) error {
 	query := `INSERT INTO mailing_deliveries
-		(mailing_id, run_id, recipient_id, status, ready_at, lease_token, lease_until, lease_execution_generation)
-		VALUES ($1, $2, $3, $4, CASE WHEN $5 = 'future' THEN CURRENT_TIMESTAMP + INTERVAL '1 hour' ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute' END,
+		(mailing_id, run_id, recipient_id, status, attempt_count, started_at, ready_at, lease_token, lease_until, lease_execution_generation)
+		VALUES ($1, $2, $3, $4, CASE WHEN $4::mailing_delivery_status_type = 'sending'::mailing_delivery_status_type THEN 1 ELSE 0 END, CASE WHEN $4::mailing_delivery_status_type = 'sending'::mailing_delivery_status_type THEN CURRENT_TIMESTAMP ELSE NULL END, CASE WHEN $5 = 'future' THEN CURRENT_TIMESTAMP + INTERVAL '1 hour' ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute' END,
 		        CASE WHEN $5 IN ('expired', 'leased') THEN $6::uuid ELSE NULL END,
 		        CASE WHEN $5 = 'expired' THEN CURRENT_TIMESTAMP - INTERVAL '1 minute'
 		             WHEN $5 = 'leased' THEN CURRENT_TIMESTAMP + INTERVAL '1 hour'

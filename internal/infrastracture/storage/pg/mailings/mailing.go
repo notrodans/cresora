@@ -93,6 +93,29 @@ func (entity pgMailing) Queue(context context.Context) error {
 			mailing.ErrInvalidState,
 		)
 	}
+	var unresolved bool
+	failure = transaction.QueryRow(
+		context,
+		`SELECT EXISTS (
+			SELECT 1
+			FROM mailing_deliveries AS delivery
+			WHERE delivery.mailing_id = $1
+			  AND (
+				       delivery.status IN ('sending', 'unknown')
+				    OR (delivery.status = 'pending' AND delivery.attempt_count > 0)
+				  )
+		)`,
+		entity.identity.UUID(),
+	).Scan(&unresolved)
+	if failure != nil {
+		return fmt.Errorf("check unresolved deliveries for mailing %s queue: %w", entity.identity.UUID(), failure)
+	}
+	if unresolved {
+		return wrapLifecycleFailure(
+			fmt.Sprintf("queue mailing %s with unresolved delivery outcomes", entity.identity.UUID()),
+			mailing.ErrUnresolvedDeliveryOutcomes,
+		)
+	}
 	var runID uuid.UUID
 	failure = transaction.QueryRow(
 		context,
@@ -244,8 +267,12 @@ func (entity pgMailing) Stop(context context.Context) error {
 	if _, failure = transaction.Exec(
 		context,
 		`UPDATE mailing_deliveries
-		 SET status = 'skipped',
-		     skip_reason = 'mailing stopped',
+		 SET status = CASE WHEN attempt_count = 0 THEN 'skipped' ELSE 'unknown' END::mailing_delivery_status_type,
+		     skip_reason = CASE WHEN attempt_count = 0 THEN 'mailing stopped' ELSE NULL END,
+		     error_message = CASE
+		         WHEN attempt_count = 0 THEN error_message
+		         ELSE COALESCE(NULLIF(btrim(error_message), ''), 'mailing stopped with retry-pending delivery')
+		     END,
 		     lease_until = NULL,
 		     lease_token = NULL,
 		     lease_execution_generation = NULL,
