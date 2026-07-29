@@ -214,6 +214,47 @@ func TestNewClientCapturesCredentialsAndOnlySessionStorageOption(t *testing.T) {
 	}
 }
 
+func TestNewClientWithConnectionStateCapturesOnlyDedicatedObserver(t *testing.T) {
+	store := &sessionStoreStub{}
+	scope := validScope()
+	var capturedOptions gotdtelegram.Options
+	previous := newClient
+	newClient = func(_ int, _ string, options gotdtelegram.Options) *gotdtelegram.Client {
+		capturedOptions = options
+		return nil
+	}
+	t.Cleanup(func() { newClient = previous })
+
+	var states []gotdtelegram.ConnectionState
+	observer := func(state gotdtelegram.ConnectionState) {
+		states = append(states, state)
+	}
+	client, err := New(store).NewClientWithConnectionState(scope, 456, "app-hash", observer)
+	if err != nil {
+		t.Fatalf("NewClientWithConnectionState() error = %v", err)
+	}
+	if client != nil {
+		t.Fatal("test constructor returned an unexpected client")
+	}
+	storage, ok := capturedOptions.SessionStorage.(*scopedSessionStorage)
+	if !ok || storage == nil {
+		t.Fatalf("SessionStorage = %T, want non-nil *scopedSessionStorage", capturedOptions.SessionStorage)
+	}
+	if capturedOptions.OnConnectionState == nil {
+		t.Fatal("OnConnectionState was not captured")
+	}
+	optionsWithoutObserver := capturedOptions
+	optionsWithoutObserver.OnConnectionState = nil
+	if !reflect.DeepEqual(optionsWithoutObserver, gotdtelegram.Options{SessionStorage: storage}) {
+		t.Fatalf("options contain fields other than session storage and observer: %+v", capturedOptions)
+	}
+
+	capturedOptions.OnConnectionState(gotdtelegram.ConnectionStateReady)
+	if !reflect.DeepEqual(states, []gotdtelegram.ConnectionState{gotdtelegram.ConnectionStateReady}) {
+		t.Fatalf("observed states = %v, want ready callback", states)
+	}
+}
+
 func TestScopedSessionStorageLoad(t *testing.T) {
 	data := []byte("opaque gotd session")
 	tests := []struct {
