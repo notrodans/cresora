@@ -3,11 +3,12 @@ package operatoraccountauth
 import (
 	"context"
 
+	applicationroot "github.com/notrodans/nebula-go/internal/application"
 	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
 )
 
 // Status returns the operator account list and any in-progress authentication
 // challenges.
 type Status interface {
-	Execute(context.Context) (application.Status, error)
+	Execute(context.Context, applicationroot.Actor) (application.Status, error)
 }

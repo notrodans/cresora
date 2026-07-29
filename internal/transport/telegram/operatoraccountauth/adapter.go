@@ -11,6 +11,7 @@ import (
 	"github.com/gotd/td/telegram/auth/qrlogin"
 
 	"github.com/google/uuid"
+	applicationroot "github.com/notrodans/nebula-go/internal/application"
 	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
 )
 
@@ -46,6 +47,7 @@ func NewAdapter(client *telegram.Client, appID int, appHash string) Adapter {
 // auth.Client.SendCode call here and map its response to PhoneChallenge.
 func (adapter Adapter) StartPhone(
 	context.Context,
+	applicationroot.Actor,
 	string,
 ) (application.PhoneChallenge, error) {
 	panic("TODO: use auth.Client.SendCode and map its delivery to PhoneChallenge")
@@ -55,6 +57,7 @@ func (adapter Adapter) StartPhone(
 // auth.Client.SignIn here, then map the authorized Telegram user to Account.
 func (adapter Adapter) VerifyPhone(
 	context.Context,
+	applicationroot.Actor,
 	uuid.UUID,
 	string,
 ) (application.Account, error) {
@@ -63,7 +66,7 @@ func (adapter Adapter) VerifyPhone(
 
 // StartQR is the future QR authentication entry point. Wire qrlogin.NewQR,
 // followed by token export, here.
-func (adapter Adapter) StartQR(context.Context) (application.QRChallenge, error) {
+func (adapter Adapter) StartQR(context.Context, applicationroot.Actor) (application.QRChallenge, error) {
 	panic("TODO: use qrlogin.NewQR and QR token export to build QRChallenge")
 }
 
@@ -71,6 +74,7 @@ func (adapter Adapter) StartQR(context.Context) (application.QRChallenge, error)
 // and expiry mapping here.
 func (adapter Adapter) RefreshQR(
 	context.Context,
+	applicationroot.Actor,
 	uuid.UUID,
 ) (application.QRChallenge, error) {
 	panic("TODO: use qrlogin QR token export/import to refresh QRChallenge")
@@ -78,6 +82,6 @@ func (adapter Adapter) RefreshQR(
 
 // Status is the future account projection endpoint. It intentionally does not
 // read persistence in this scaffold.
-func (adapter Adapter) Status(context.Context) (application.Status, error) {
+func (adapter Adapter) Status(context.Context, applicationroot.Actor) (application.Status, error) {
 	panic("TODO: load operator_accounts display rows and in-progress auth challenges")
 }

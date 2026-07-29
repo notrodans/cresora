@@ -4,12 +4,13 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	application "github.com/notrodans/nebula-go/internal/application"
 	mailingconsole "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 )
 
 // Queue places a mailing in the send queue.
 type Queue interface {
-	Execute(context.Context, uuid.UUID) error
+	Execute(context.Context, application.Actor, uuid.UUID) error
 }
 
 type queueCommand struct {
@@ -21,6 +22,6 @@ func NewQueue(service *mailingconsole.Service) Queue {
 	return &queueCommand{service: service}
 }
 
-func (command *queueCommand) Execute(context context.Context, mailingID uuid.UUID) error {
-	return command.service.Queue(context, mailingID)
+func (command *queueCommand) Execute(context context.Context, actor application.Actor, mailingID uuid.UUID) error {
+	return command.service.Queue(context, actor, mailingID)
 }

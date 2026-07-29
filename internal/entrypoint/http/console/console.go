@@ -19,10 +19,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	applicationactor "github.com/notrodans/nebula-go/internal/application"
 	commands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
 	requests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
 	application "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
 	"github.com/notrodans/nebula-go/internal/infrastracture/logger/slog"
 )
 
@@ -42,26 +44,30 @@ type Handler struct {
 }
 
 // New returns an independent chi router for the operator-scoped mailing
-// console. Its arguments are a CreateDraft command, Queue command, Dashboard
-// request, public origin, and optional logger.
+// console. The modern form is:
 //
-// The two-argument service form is retained for callers of the pre-CQS
-// constructor. It only adapts the service to the three ports; Handler itself
-// depends exclusively on those ports.
+//	New(createDraft, queue, dashboard, provider, publicOrigin[, logger])
+//
+// A service form is retained for transport-level callers:
+//
+//	New(service, provider, publicOrigin[, logger])
 func New(first any, arguments ...any) chi.Router {
-	createDraft, queue, dashboard, publicOrigin, logger := newDependencies(first, arguments...)
+	createDraft, queue, dashboard, provider, publicOrigin, logger := newDependencies(first, arguments...)
 	router := chi.NewRouter()
-	Register(router, createDraft, queue, dashboard, publicOrigin, logger)
+	Register(router, createDraft, queue, dashboard, provider, publicOrigin, logger)
 	return router
 }
 
 // Register adds the mailing console routes to an existing chi router.
-func Register(router chi.Router, createDraft commands.CreateDraft, queue commands.Queue, dashboard requests.Dashboard, publicOrigin string, logger *slogger.Logger) {
+func Register(router chi.Router, createDraft commands.CreateDraft, queue commands.Queue, dashboard requests.Dashboard, provider principal.Provider, publicOrigin string, logger *slogger.Logger) {
 	if router == nil {
 		panic("register mailing console routes on nil router")
 	}
 	if logger == nil {
 		panic("register mailing console routes without logger")
+	}
+	if provider == nil {
+		panic("register mailing console routes without principal provider")
 	}
 	origin, failure := parsePublicOrigin(publicOrigin)
 	if failure != nil {
@@ -79,11 +85,12 @@ func Register(router chi.Router, createDraft commands.CreateDraft, queue command
 		tmpl:         tmpl,
 		publicOrigin: origin,
 	}
-	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+	protected := router.With(principal.Middleware(provider))
+	protected.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		handler.dashboard(w, r, r.URL.Query().Get("notice"))
 	})
-	router.Post("/mailings", handler.create)
-	router.Post("/mailings/{mailingID}/queue", handler.queueMailing)
+	protected.Post("/mailings", handler.create)
+	protected.Post("/mailings/{mailingID}/queue", handler.queueMailing)
 	router.Get("/style.css", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, assets, "style.css")
 	})
@@ -92,93 +99,106 @@ func Register(router chi.Router, createDraft commands.CreateDraft, queue command
 	})
 }
 
-func newDependencies(first any, arguments ...any) (commands.CreateDraft, commands.Queue, requests.Dashboard, string, *slogger.Logger) {
-	if len(arguments) == 1 || len(arguments) == 2 {
-		publicOrigin, ok := arguments[0].(string)
+func newDependencies(first any, arguments ...any) (commands.CreateDraft, commands.Queue, requests.Dashboard, principal.Provider, string, *slogger.Logger) {
+	var (
+		createDraft  commands.CreateDraft
+		queue        commands.Queue
+		dashboard    requests.Dashboard
+		provider     principal.Provider
+		publicOrigin string
+		logger       = slogger.Default()
+		ok           bool
+	)
+	if len(arguments) == 2 || len(arguments) == 3 {
+		legacy, serviceOK := first.(*application.Service)
+		if !serviceOK {
+			panic("create mailing console handler without service")
+		}
+		provider, ok = arguments[0].(principal.Provider)
+		if !ok {
+			panic("create mailing console handler without principal provider")
+		}
+		publicOrigin, ok = arguments[1].(string)
 		if !ok {
 			panic("create mailing console handler without public origin")
 		}
-		legacyCreateDraft, createOK := first.(legacyCreateDraftOperation)
-		legacyQueue, queueOK := first.(legacyQueueOperation)
-		legacyDashboard, dashboardOK := first.(legacyDashboardOperation)
-		if !createOK || !queueOK || !dashboardOK {
-			panic("create mailing console handler without CQS ports")
-		}
-		logger := slogger.Default()
-		if len(arguments) == 2 {
-			logger, ok = arguments[1].(*slogger.Logger)
+		if len(arguments) == 3 {
+			logger, ok = arguments[2].(*slogger.Logger)
 			if !ok {
 				panic("create mailing console handler without logger")
 			}
 		}
-		return legacyCreateDraftCommand{operation: legacyCreateDraft}, legacyQueueCommand{operation: legacyQueue}, legacyDashboardRequest{operation: legacyDashboard}, publicOrigin, logger
+		return legacyCreateDraftCommand{operation: legacy}, legacyQueueCommand{operation: legacy}, legacyDashboardRequest{operation: legacy}, provider, publicOrigin, logger
 	}
-	if len(arguments) != 3 && len(arguments) != 4 {
+	if len(arguments) != 4 && len(arguments) != 5 {
 		panic("create mailing console handler with invalid arguments")
 	}
-	queue, ok := arguments[0].(commands.Queue)
+	queue, ok = arguments[0].(commands.Queue)
 	if !ok {
 		panic("create mailing console handler without queue command")
 	}
-	dashboard, ok := arguments[1].(requests.Dashboard)
+	dashboard, ok = arguments[1].(requests.Dashboard)
 	if !ok {
 		panic("create mailing console handler without dashboard request")
 	}
-	publicOrigin, ok := arguments[2].(string)
+	provider, ok = arguments[2].(principal.Provider)
+	if !ok {
+		panic("create mailing console handler without principal provider")
+	}
+	publicOrigin, ok = arguments[3].(string)
 	if !ok {
 		panic("create mailing console handler without public origin")
 	}
-	createDraft, ok := first.(commands.CreateDraft)
-	if !ok {
-		panic("create mailing console handler without create draft command")
-	}
-	logger := slogger.Default()
-	if len(arguments) == 4 {
-		logger, ok = arguments[3].(*slogger.Logger)
+	if len(arguments) == 5 {
+		logger, ok = arguments[4].(*slogger.Logger)
 		if !ok {
 			panic("create mailing console handler without logger")
 		}
 	}
-	return createDraft, queue, dashboard, publicOrigin, logger
+	createDraft, ok = first.(commands.CreateDraft)
+	if !ok {
+		panic("create mailing console handler without create draft command")
+	}
+	return createDraft, queue, dashboard, provider, publicOrigin, logger
 }
 
-// These adapters keep the old New(service, origin[, logger]) form source
-// compatible while new composition roots use Register with explicit CQS
-// ports. They are intentionally outside Handler, which only knows the ports.
+// These adapters keep the service form of New useful for transport-level
+// callers while new composition roots use Register with explicit CQS ports.
+// They are intentionally outside Handler, which only knows the ports.
 type legacyCreateDraftOperation interface {
-	CreateDraft(context.Context, application.CreateDraftInput) (mailing.ID, error)
+	CreateDraft(context.Context, applicationactor.Actor, application.CreateDraftInput) (mailing.ID, error)
 }
 
 type legacyQueueOperation interface {
-	Queue(context.Context, uuid.UUID) error
+	Queue(context.Context, applicationactor.Actor, uuid.UUID) error
 }
 
 type legacyDashboardOperation interface {
-	Dashboard(context.Context) (application.Dashboard, error)
+	Dashboard(context.Context, applicationactor.Actor) (application.Dashboard, error)
 }
 
 type legacyCreateDraftCommand struct {
 	operation legacyCreateDraftOperation
 }
 
-func (command legacyCreateDraftCommand) Execute(context context.Context, input application.CreateDraftInput) (mailing.ID, error) {
-	return command.operation.CreateDraft(context, input)
+func (command legacyCreateDraftCommand) Execute(context context.Context, actor applicationactor.Actor, input application.CreateDraftInput) (mailing.ID, error) {
+	return command.operation.CreateDraft(context, actor, input)
 }
 
 type legacyQueueCommand struct {
 	operation legacyQueueOperation
 }
 
-func (command legacyQueueCommand) Execute(context context.Context, mailingID uuid.UUID) error {
-	return command.operation.Queue(context, mailingID)
+func (command legacyQueueCommand) Execute(context context.Context, actor applicationactor.Actor, mailingID uuid.UUID) error {
+	return command.operation.Queue(context, actor, mailingID)
 }
 
 type legacyDashboardRequest struct {
 	operation legacyDashboardOperation
 }
 
-func (request legacyDashboardRequest) Execute(context context.Context) (application.Dashboard, error) {
-	return request.operation.Dashboard(context)
+func (request legacyDashboardRequest) Execute(context context.Context, actor applicationactor.Actor) (application.Dashboard, error) {
+	return request.operation.Dashboard(context, actor)
 }
 
 type pageData struct {
@@ -197,8 +217,12 @@ type formData struct {
 }
 
 func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request, notice string) {
+	actor, ok := requestActor(w, r)
+	if !ok {
+		return
+	}
 	token := h.csrfToken(w, r)
-	dashboard, err := h.dashboardReq.Execute(r.Context())
+	dashboard, err := h.dashboardReq.Execute(r.Context(), actor)
 	if err != nil {
 		http.Error(w, "Не удалось загрузить данные консоли.", http.StatusInternalServerError)
 		return
@@ -213,6 +237,10 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request, notice strin
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	actor, ok := requestActor(w, r)
+	if !ok {
+		return
+	}
 	values, accepted := h.parsePost(w, r)
 	if !accepted {
 		return
@@ -263,7 +291,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	draft, err := h.createDraft.Execute(r.Context(), input)
+	draft, err := h.createDraft.Execute(r.Context(), actor, input)
 	if err != nil {
 		logger.ErrorContext(
 			r.Context(),
@@ -285,6 +313,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) queueMailing(w http.ResponseWriter, r *http.Request) {
+	actor, ok := requestActor(w, r)
+	if !ok {
+		return
+	}
 	if _, accepted := h.parsePost(w, r); !accepted {
 		return
 	}
@@ -293,7 +325,7 @@ func (h *Handler) queueMailing(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Не удалось загрузить данные консоли.", http.StatusBadRequest)
 		return
 	}
-	if err = h.queue.Execute(r.Context(), id); err != nil {
+	if err = h.queue.Execute(r.Context(), actor, id); err != nil {
 		status, message := serviceError(err)
 		http.Error(w, message, status)
 		return
@@ -302,7 +334,11 @@ func (h *Handler) queueMailing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f formData, message string, status int) {
-	d, err := h.dashboardReq.Execute(r.Context())
+	actor, ok := requestActor(w, r)
+	if !ok {
+		return
+	}
+	d, err := h.dashboardReq.Execute(r.Context(), actor)
 	if err != nil {
 		http.Error(w, "Не удалось загрузить данные консоли.", http.StatusInternalServerError)
 		return
@@ -314,6 +350,14 @@ func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f formData,
 		pageData
 		CSRF string
 	}{pageData: pageData{Dashboard: d, Form: f, Error: message}, CSRF: token})
+}
+
+func requestActor(w http.ResponseWriter, r *http.Request) (applicationactor.Actor, bool) {
+	actor, ok := principal.FromContext(r.Context())
+	if !ok {
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+	}
+	return actor, ok
 }
 
 func (h *Handler) renderServiceError(w http.ResponseWriter, r *http.Request, f formData, err error) {

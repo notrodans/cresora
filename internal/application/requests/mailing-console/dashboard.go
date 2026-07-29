@@ -3,12 +3,13 @@ package mailingconsole
 import (
 	"context"
 
+	application "github.com/notrodans/nebula-go/internal/application"
 	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 )
 
 // Dashboard loads the operator's mailing console dashboard.
 type Dashboard interface {
-	Execute(context.Context) (mailingconsole.Dashboard, error)
+	Execute(context.Context, application.Actor) (mailingconsole.Dashboard, error)
 }
 
 type dashboardRequest struct {
@@ -20,6 +21,6 @@ func NewDashboard(service *mailingconsole.Service) Dashboard {
 	return &dashboardRequest{service: service}
 }
 
-func (request *dashboardRequest) Execute(context context.Context) (mailingconsole.Dashboard, error) {
-	return request.service.Dashboard(context)
+func (request *dashboardRequest) Execute(context context.Context, actor application.Actor) (mailingconsole.Dashboard, error) {
+	return request.service.Dashboard(context, actor)
 }

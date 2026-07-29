@@ -1,0 +1,649 @@
+package operatoraccounts
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	application "github.com/notrodans/nebula-go/internal/application"
+	commands "github.com/notrodans/nebula-go/internal/application/commands/operator-account-auth"
+	common "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
+	authmock "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/mock"
+	requests "github.com/notrodans/nebula-go/internal/application/requests/operator-account-auth"
+	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
+)
+
+type testActorProvider struct {
+	actor atomic.Value
+}
+
+func newTestActorProvider(actor application.Actor) *testActorProvider {
+	provider := &testActorProvider{}
+	provider.actor.Store(actor)
+	return provider
+}
+
+func (provider *testActorProvider) Provide(*http.Request) (application.Actor, error) {
+	return provider.actor.Load().(application.Actor), nil
+}
+
+type cookieJar struct {
+	mu      sync.Mutex
+	cookies map[string]*http.Cookie
+}
+
+func newCookieJar() *cookieJar {
+	return &cookieJar{cookies: make(map[string]*http.Cookie)}
+}
+
+func (jar *cookieJar) add(response *http.Response) {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+	for _, cookie := range response.Cookies() {
+		jar.cookies[cookie.Name] = cookie
+	}
+}
+
+func (jar *cookieJar) request(request *http.Request) {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+	for _, cookie := range jar.cookies {
+		request.AddCookie(cookie)
+	}
+}
+
+func (jar *cookieJar) csrf() string {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+	return jar.cookies[csrfCookie].Value
+}
+
+func operatorRequest(t *testing.T, handler http.Handler, jar *cookieJar, method, path string, values url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	var body *strings.Reader
+	if values == nil {
+		body = strings.NewReader("")
+	} else {
+		body = strings.NewReader(values.Encode())
+	}
+	request := httptest.NewRequest(method, "http://example.test"+path, body)
+	if values != nil {
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if method == http.MethodPost {
+		request.Header.Set("Origin", "http://example.test")
+	}
+	jar.request(request)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	jar.add(response.Result())
+	return response
+}
+
+func operatorPage(t *testing.T, handler http.Handler, jar *cookieJar) string {
+	t.Helper()
+	response := operatorRequest(t, handler, jar, http.MethodGet, "/operator-accounts/authenticate", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("authenticate page: expected 200, got %d", response.Code)
+	}
+	return response.Body.String()
+}
+
+func operatorPost(t *testing.T, handler http.Handler, jar *cookieJar, path string, values url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	values.Set("csrf_token", jar.csrf())
+	return operatorRequest(t, handler, jar, http.MethodPost, path, values)
+}
+
+func newMockOperatorHandler(provider principal.Provider) http.Handler {
+	mock := authmock.New()
+	return New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider)
+}
+
+func TestOperatorAccountHTTPScopesBrowserFlowByActor(t *testing.T) {
+	actorA := application.Actor{OperatorID: uuid.New()}
+	actorB := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actorA)
+	handler := newMockOperatorHandler(provider)
+	jar := newCookieJar()
+
+	operatorPage(t, handler, jar)
+	phoneA := "+15551230001"
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {phoneA}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor A phone start: expected redirect, got %d", response.Code)
+	}
+	if page := operatorPage(t, handler, jar); !phoneInputVisible(page, phoneA) {
+		t.Fatalf("actor A phone challenge was not rendered: %s", page)
+	}
+
+	// Reuse the same browser cookie under a different trusted actor. The
+	// browser cookie is only a flow key and must not select actor A's state.
+	provider.actor.Store(actorB)
+	if page := operatorPage(t, handler, jar); phoneInputVisible(page, phoneA) || strings.Contains(page, `class="qr"`) {
+		t.Fatalf("actor B received actor A browser state: %s", page)
+	}
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone/code", url.Values{"code": {authmock.MockPhoneCode}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor B foreign phone verify: expected redirect, got %d", response.Code)
+	}
+	phoneB := "+15551230002"
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {phoneB}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor B phone start: expected redirect, got %d", response.Code)
+	}
+
+	provider.actor.Store(actorA)
+	if page := operatorPage(t, handler, jar); !phoneInputVisible(page, phoneA) || phoneInputVisible(page, phoneB) {
+		t.Fatalf("actor A phone state was not isolated from actor B: %s", page)
+	}
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone/code", url.Values{"code": {authmock.MockPhoneCode}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor A phone verification: expected redirect, got %d", response.Code)
+	}
+	if page := operatorPage(t, handler, jar); phoneInputVisible(page, phoneA) || strings.Contains(page, `name="code"`) {
+		t.Fatalf("status-none did not clear actor A phone cache: %s", page)
+	}
+
+	provider.actor.Store(actorB)
+	if page := operatorPage(t, handler, jar); !phoneInputVisible(page, phoneB) || phoneInputVisible(page, phoneA) {
+		t.Fatalf("actor B phone state was lost or contaminated: %s", page)
+	}
+}
+
+func phoneInputVisible(page, phone string) bool {
+	return strings.Contains(page, `value="&#43;`+strings.TrimPrefix(phone, "+")+`"`)
+}
+
+func TestOperatorAccountHTTPScopesQRAndClearsStatusNone(t *testing.T) {
+	actorA := application.Actor{OperatorID: uuid.New()}
+	actorB := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actorA)
+	mock := authmock.New()
+	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr", url.Values{}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor A QR start: expected redirect, got %d", response.Code)
+	}
+	if page := operatorPage(t, handler, jar); !strings.Contains(page, `class="qr"`) {
+		t.Fatal("actor A QR challenge was not rendered")
+	}
+
+	provider.actor.Store(actorB)
+	if page := operatorPage(t, handler, jar); strings.Contains(page, `class="qr"`) {
+		t.Fatal("actor B rendered actor A QR challenge")
+	}
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor B foreign QR refresh: expected redirect, got %d", response.Code)
+	}
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr", url.Values{}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor B QR start: expected redirect, got %d", response.Code)
+	}
+	pageB := operatorPage(t, handler, jar)
+	if !strings.Contains(pageB, `class="qr"`) {
+		t.Fatal("actor B QR challenge was not rendered")
+	}
+
+	provider.actor.Store(actorA)
+	pageA := operatorPage(t, handler, jar)
+	if !strings.Contains(pageA, `class="qr"`) {
+		t.Fatal("actor A QR challenge was not restored for its actor-scoped flow")
+	}
+	provider.actor.Store(actorB)
+	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{}); response.Code != http.StatusSeeOther {
+		t.Fatalf("actor B QR refresh: expected redirect, got %d", response.Code)
+	}
+
+	// A status response without a challenge is authoritative and must remove
+	// the browser's cached QR fields rather than leave a stale image visible.
+	provider.actor.Store(actorA)
+	if page := operatorPage(t, handler, jar); !strings.Contains(page, `class="qr"`) {
+		t.Fatal("actor A QR challenge unexpectedly disappeared before status-none check")
+	}
+	statusNone := &fixedStatus{}
+	handler = New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, statusNone, provider)
+	if page := operatorPage(t, handler, jar); strings.Contains(page, `class="qr"`) {
+		t.Fatal("status-none did not clear stale QR browser cache")
+	}
+}
+
+type fixedStatus struct {
+	status common.Status
+}
+
+func (status *fixedStatus) Execute(context.Context, application.Actor) (common.Status, error) {
+	return status.status, nil
+}
+
+func TestOperatorAccountHTTPUnknownQRResponsesAreEquivalent(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	mock := authmock.New()
+	status := &fixedStatus{}
+	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, status, provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	status.status = common.Status{QRChallenge: &common.QRChallenge{
+		RequestID: uuid.New(), URL: "tg://login?token=foreign", ExpiresAt: time.Now().Add(time.Minute),
+	}}
+	operatorPage(t, handler, jar)
+	foreign := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{})
+	if foreign.Code != http.StatusSeeOther {
+		t.Fatalf("foreign QR refresh: expected redirect, got %d", foreign.Code)
+	}
+
+	status.status = common.Status{QRChallenge: &common.QRChallenge{
+		RequestID: uuid.New(), URL: "tg://login?token=random", ExpiresAt: time.Now().Add(time.Minute),
+	}}
+	operatorPage(t, handler, jar)
+	random := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{})
+	if random.Code != foreign.Code || random.Header().Get("Location") != foreign.Header().Get("Location") {
+		t.Fatalf("foreign and random QR responses differ: foreign=%d/%q random=%d/%q", foreign.Code, foreign.Header().Get("Location"), random.Code, random.Header().Get("Location"))
+	}
+}
+
+func TestOperatorAccountHTTPForeignRealChallengesStayActorScoped(t *testing.T) {
+	store := authmock.NewStore()
+	actorA := application.Actor{OperatorID: uuid.New()}
+	actorB := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actorA)
+	status := &fixedStatus{}
+	handler := New(
+		authmock.NewStartPhone(store),
+		authmock.NewVerifyPhone(store),
+		authmock.NewStartQR(store),
+		authmock.NewRefreshQR(store),
+		status,
+		provider,
+	)
+
+	phoneA, failure := authmock.NewStartPhone(store).Execute(context.Background(), actorA, "+15551230031")
+	if failure != nil {
+		t.Fatalf("create actor A phone challenge: %v", failure)
+	}
+	phoneB, failure := authmock.NewStartPhone(store).Execute(context.Background(), actorB, "+15551230032")
+	if failure != nil {
+		t.Fatalf("create actor B phone challenge: %v", failure)
+	}
+	qrA, failure := authmock.NewStartQR(store).Execute(context.Background(), actorA)
+	if failure != nil {
+		t.Fatalf("create actor A QR challenge: %v", failure)
+	}
+	qrB, failure := authmock.NewStartQR(store).Execute(context.Background(), actorB)
+	if failure != nil {
+		t.Fatalf("create actor B QR challenge: %v", failure)
+	}
+
+	assertForeignPhoneHTTP(t, handler, provider, status, actorA, phoneB)
+	assertForeignPhoneHTTP(t, handler, provider, status, actorB, phoneA)
+	assertForeignQRHTTP(t, handler, provider, status, actorA, qrB)
+	assertForeignQRHTTP(t, handler, provider, status, actorB, qrA)
+
+	statusReader := authmock.NewStatus(store)
+	statusA, failure := statusReader.Execute(context.Background(), actorA)
+	if failure != nil {
+		t.Fatalf("load actor A status: %v", failure)
+	}
+	statusB, failure := statusReader.Execute(context.Background(), actorB)
+	if failure != nil {
+		t.Fatalf("load actor B status: %v", failure)
+	}
+	if statusA.PhoneChallenge == nil || statusA.PhoneChallenge.RequestID != phoneA.RequestID {
+		t.Fatalf("actor A phone challenge was consumed or replaced: %+v", statusA.PhoneChallenge)
+	}
+	if statusB.PhoneChallenge == nil || statusB.PhoneChallenge.RequestID != phoneB.RequestID {
+		t.Fatalf("actor B phone challenge was consumed or replaced: %+v", statusB.PhoneChallenge)
+	}
+	if statusA.QRChallenge == nil || statusA.QRChallenge.RequestID != qrA.RequestID {
+		t.Fatalf("actor A QR challenge was consumed or replaced: %+v", statusA.QRChallenge)
+	}
+	if statusB.QRChallenge == nil || statusB.QRChallenge.RequestID != qrB.RequestID {
+		t.Fatalf("actor B QR challenge was consumed or replaced: %+v", statusB.QRChallenge)
+	}
+	if len(statusA.Accounts) != len(statusB.Accounts) {
+		t.Fatalf("actor account counts differ: A=%d B=%d", len(statusA.Accounts), len(statusB.Accounts))
+	}
+	for index := range statusA.Accounts {
+		if statusA.Accounts[index].ID == statusB.Accounts[index].ID {
+			t.Fatalf("actor account %d leaked the same fixture ID: %s", index, statusA.Accounts[index].ID)
+		}
+	}
+}
+
+func assertForeignPhoneHTTP(t *testing.T, handler http.Handler, provider *testActorProvider, status *fixedStatus, actor application.Actor, foreign common.PhoneChallenge) {
+	t.Helper()
+	provider.actor.Store(actor)
+	jar := newCookieJar()
+	status.status = common.Status{}
+	operatorPage(t, handler, jar)
+	foreignCopy := foreign
+	status.status = common.Status{PhoneChallenge: &foreignCopy}
+	operatorPage(t, handler, jar)
+	status.status = common.Status{}
+	foreignResponse := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone/code", url.Values{"code": {authmock.MockPhoneCode}})
+
+	randomCopy := foreign
+	randomCopy.RequestID = uuid.New()
+	status.status = common.Status{PhoneChallenge: &randomCopy}
+	operatorPage(t, handler, jar)
+	status.status = common.Status{}
+	randomResponse := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone/code", url.Values{"code": {authmock.MockPhoneCode}})
+	if foreignResponse.Code != randomResponse.Code || foreignResponse.Header().Get("Location") != randomResponse.Header().Get("Location") {
+		t.Fatalf("foreign and random phone responses differ for actor %s: foreign=%d/%q random=%d/%q", actor.OperatorID, foreignResponse.Code, foreignResponse.Header().Get("Location"), randomResponse.Code, randomResponse.Header().Get("Location"))
+	}
+}
+
+func assertForeignQRHTTP(t *testing.T, handler http.Handler, provider *testActorProvider, status *fixedStatus, actor application.Actor, foreign common.QRChallenge) {
+	t.Helper()
+	provider.actor.Store(actor)
+	jar := newCookieJar()
+	status.status = common.Status{}
+	operatorPage(t, handler, jar)
+	foreignCopy := foreign
+	status.status = common.Status{QRChallenge: &foreignCopy}
+	operatorPage(t, handler, jar)
+	status.status = common.Status{}
+	foreignResponse := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{})
+
+	randomCopy := foreign
+	randomCopy.RequestID = uuid.New()
+	status.status = common.Status{QRChallenge: &randomCopy}
+	operatorPage(t, handler, jar)
+	status.status = common.Status{}
+	randomResponse := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{})
+	if foreignResponse.Code != randomResponse.Code || foreignResponse.Header().Get("Location") != randomResponse.Header().Get("Location") {
+		t.Fatalf("foreign and random QR responses differ for actor %s: foreign=%d/%q random=%d/%q", actor.OperatorID, foreignResponse.Code, foreignResponse.Header().Get("Location"), randomResponse.Code, randomResponse.Header().Get("Location"))
+	}
+}
+
+func TestOperatorAccountHTTPConcurrentRequests(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	handler := newMockOperatorHandler(provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	var wait sync.WaitGroup
+	for index := 0; index < 32; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			local := newCookieJar()
+			jar.mu.Lock()
+			for name, cookie := range jar.cookies {
+				local.cookies[name] = cookie
+			}
+			jar.mu.Unlock()
+			if index%2 == 0 {
+				operatorPage(t, handler, local)
+				return
+			}
+			operatorPost(t, handler, local, "/operator-accounts/authenticate/phone", url.Values{"phone": {"+1555123" + strings.Repeat("0", index%3+1)}})
+		}(index)
+	}
+	wait.Wait()
+}
+
+func TestOperatorAccountHTTPSerializesStaleGETAndPhoneVerify(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	store := authmock.NewStore()
+	startPhone := authmock.NewStartPhone(store)
+	challenge, failure := startPhone.Execute(context.Background(), actor, "+15551230021")
+	if failure != nil {
+		t.Fatalf("create phone challenge: %v", failure)
+	}
+	status := &blockingStatus{
+		delegate:  authmock.NewStatus(store),
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	verify := &observingVerify{delegate: authmock.NewVerifyPhone(store), entered: make(chan struct{})}
+	handler := New(startPhone, verify, authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	staleGET := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		staleGET <- operatorRequest(t, handler, jar, http.MethodGet, "/operator-accounts/authenticate", nil)
+	}()
+	waitForSignal(t, status.entered, "stale GET status")
+
+	verifyDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		verifyDone <- operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone/code", url.Values{"code": {authmock.MockPhoneCode}})
+	}()
+	select {
+	case <-verify.entered:
+		t.Fatal("phone verification reached the backend while stale GET was blocked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(status.release)
+	if response := <-staleGET; response.Code != http.StatusOK {
+		t.Fatalf("stale GET: expected 200, got %d", response.Code)
+	}
+	waitForSignal(t, verify.entered, "phone verification")
+	if response := <-verifyDone; response.Code != http.StatusSeeOther {
+		t.Fatalf("phone verification: expected redirect, got %d", response.Code)
+	}
+
+	page := operatorPage(t, handler, jar)
+	if phoneInputVisible(page, challenge.Phone) || strings.Contains(page, `name="code"`) {
+		t.Fatalf("consumed phone challenge was restored by stale GET: %s", page)
+	}
+}
+
+func TestOperatorAccountHTTPSerializesStaleGETAndPhoneStart(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	store := authmock.NewStore()
+	status := &blockingStatus{
+		delegate:  authmock.NewStatus(store),
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	staleGET := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		staleGET <- operatorRequest(t, handler, jar, http.MethodGet, "/operator-accounts/authenticate", nil)
+	}()
+	waitForSignal(t, status.entered, "stale GET status")
+
+	startDone := make(chan *httptest.ResponseRecorder, 1)
+	phone := "+15551230022"
+	go func() {
+		startDone <- operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {phone}})
+	}()
+	select {
+	case response := <-startDone:
+		t.Fatalf("phone start completed while stale GET was blocked: %d", response.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(status.release)
+	if response := <-staleGET; response.Code != http.StatusOK {
+		t.Fatalf("stale GET: expected 200, got %d", response.Code)
+	}
+	if response := <-startDone; response.Code != http.StatusSeeOther {
+		t.Fatalf("phone start: expected redirect, got %d", response.Code)
+	}
+	page := operatorPage(t, handler, jar)
+	if !phoneInputVisible(page, phone) {
+		t.Fatalf("new phone challenge was cleared by stale GET: %s", page)
+	}
+}
+
+func TestOperatorAccountHTTPSerializesStaleGETAndQRStart(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	store := authmock.NewStore()
+	status := &blockingStatus{
+		delegate:  authmock.NewStatus(store),
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	staleGET := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		staleGET <- operatorRequest(t, handler, jar, http.MethodGet, "/operator-accounts/authenticate", nil)
+	}()
+	waitForSignal(t, status.entered, "stale GET status")
+
+	startDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		startDone <- operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr", url.Values{})
+	}()
+	select {
+	case response := <-startDone:
+		t.Fatalf("QR start completed while stale GET was blocked: %d", response.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(status.release)
+	if response := <-staleGET; response.Code != http.StatusOK {
+		t.Fatalf("stale GET: expected 200, got %d", response.Code)
+	}
+	if response := <-startDone; response.Code != http.StatusSeeOther {
+		t.Fatalf("QR start: expected redirect, got %d", response.Code)
+	}
+	page := operatorPage(t, handler, jar)
+	if !strings.Contains(page, `class="qr"`) {
+		t.Fatalf("new QR challenge was cleared by stale GET: %s", page)
+	}
+}
+
+func TestOperatorAccountHTTPSerializesStaleGETAndQRRefresh(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	store := authmock.NewStore()
+	startQR := authmock.NewStartQR(store)
+	oldChallenge, failure := startQR.Execute(context.Background(), actor)
+	if failure != nil {
+		t.Fatalf("create QR challenge: %v", failure)
+	}
+	status := &blockingStatus{
+		delegate:  authmock.NewStatus(store),
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), startQR, authmock.NewRefreshQR(store), status, provider)
+	jar := newCookieJar()
+	operatorPage(t, handler, jar)
+
+	staleGET := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		staleGET <- operatorRequest(t, handler, jar, http.MethodGet, "/operator-accounts/authenticate", nil)
+	}()
+	waitForSignal(t, status.entered, "stale GET status")
+
+	refreshDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		refreshDone <- operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr/refresh", url.Values{})
+	}()
+	select {
+	case response := <-refreshDone:
+		t.Fatalf("QR refresh completed while stale GET was blocked: %d", response.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(status.release)
+	if response := <-staleGET; response.Code != http.StatusOK {
+		t.Fatalf("stale GET: expected 200, got %d", response.Code)
+	}
+	if response := <-refreshDone; response.Code != http.StatusSeeOther {
+		t.Fatalf("QR refresh: expected redirect, got %d", response.Code)
+	}
+
+	current, failure := authmock.NewStatus(store).Execute(context.Background(), actor)
+	if failure != nil {
+		t.Fatalf("load refreshed QR status: %v", failure)
+	}
+	if current.QRChallenge == nil || current.QRChallenge.RequestID != oldChallenge.RequestID || current.QRChallenge.URL == oldChallenge.URL {
+		t.Fatalf("QR refresh state was lost or stale GET won: old=%+v current=%+v", oldChallenge, current.QRChallenge)
+	}
+	if page := operatorPage(t, handler, jar); !strings.Contains(page, `class="qr"`) {
+		t.Fatal("refreshed QR challenge was not rendered")
+	}
+}
+
+func TestOperatorAccountHTTPCreatesOneFlowCookiePerRequest(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	provider := newTestActorProvider(actor)
+	mock := authmock.New()
+	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider)
+	response := operatorRequest(t, handler, newCookieJar(), http.MethodGet, "/operator-accounts/authenticate", nil)
+
+	count := 0
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == sessionCookie {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one session flow cookie, got %d cookies: %v", count, response.Result().Cookies())
+	}
+}
+
+type blockingStatus struct {
+	delegate  requests.Status
+	blockCall int
+	entered   chan struct{}
+	release   chan struct{}
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (status *blockingStatus) Execute(ctx context.Context, actor application.Actor) (common.Status, error) {
+	current, failure := status.delegate.Execute(ctx, actor)
+	status.mu.Lock()
+	status.calls++
+	call := status.calls
+	status.mu.Unlock()
+	if call == status.blockCall {
+		close(status.entered)
+		select {
+		case <-status.release:
+		case <-ctx.Done():
+			return common.Status{}, ctx.Err()
+		}
+	}
+	return current, failure
+}
+
+type observingVerify struct {
+	delegate commands.VerifyPhone
+	entered  chan struct{}
+	once     sync.Once
+}
+
+func (verify *observingVerify) Execute(ctx context.Context, actor application.Actor, requestID uuid.UUID, code string) (common.Account, error) {
+	verify.once.Do(func() { close(verify.entered) })
+	return verify.delegate.Execute(ctx, actor, requestID, code)
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	application "github.com/notrodans/nebula-go/internal/application"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
 )
 
@@ -87,12 +88,65 @@ func (row *fakeMailing) Stop(context.Context) error {
 	return nil
 }
 
+type multiOperatorConsole struct {
+	dashboards map[uuid.UUID]Dashboard
+}
+
+func (projection *multiOperatorConsole) OperatorExists(_ context.Context, operatorID uuid.UUID) (bool, error) {
+	_, exists := projection.dashboards[operatorID]
+	return exists, nil
+}
+
+func (projection *multiOperatorConsole) Dashboard(_ context.Context, operatorID uuid.UUID) ([]Account, []SharedDialog, []PrivateDialog, []MailingSummary, error) {
+	dashboard, exists := projection.dashboards[operatorID]
+	if !exists {
+		return nil, nil, nil, nil, ErrNotFound
+	}
+	return dashboard.Accounts, dashboard.SharedDialogs, dashboard.PrivateDialogs, dashboard.Mailings, nil
+}
+
+type multiOperatorMailings struct {
+	operators map[uuid.UUID]*multiOperatorMailing
+}
+
+type multiOperatorMailing struct {
+	accountID uuid.UUID
+	mailingID uuid.UUID
+	row       *fakeMailing
+}
+
+func (table *multiOperatorMailings) OwnedBy(operatorID uuid.UUID) OperatorMailings {
+	operator := table.operators[operatorID]
+	if operator == nil {
+		return nil
+	}
+	return operatorMailingsFixture{operator: operator}
+}
+
+type operatorMailingsFixture struct {
+	operator *multiOperatorMailing
+}
+
+func (table operatorMailingsFixture) CreateDraft(_ context.Context, input CreateDraftInput) (mailing.ID, error) {
+	if input.AccountID != table.operator.accountID {
+		return mailing.ID{}, ErrNotFound
+	}
+	return mailing.Identity(table.operator.mailingID), nil
+}
+
+func (table operatorMailingsFixture) Mailing(identity mailing.ID) mailing.Mailing {
+	if identity.UUID() != table.operator.mailingID {
+		return &fakeMailing{queueFailure: mailing.ErrNotFound}
+	}
+	return table.operator.row
+}
+
 func newServiceFixture(operatorID uuid.UUID) (*fakeConsole, *fakeMailings, *fakeOperatorMailings, *fakeMailing, Service) {
 	projection := &fakeConsole{}
 	row := &fakeMailing{}
 	scoped := &fakeOperatorMailings{row: row}
 	table := &fakeMailings{scoped: scoped}
-	service := NewService(operatorID, projection, table)
+	service := NewService(projection, table)
 	return projection, table, scoped, row, service
 }
 
@@ -228,13 +282,14 @@ func TestServiceValidatesCreateDraftInput(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, table, scoped, _, service := newServiceFixture(uuid.New())
-			_, failure := service.CreateDraft(context.Background(), test.input)
+			operatorID := uuid.New()
+			_, table, scoped, _, service := newServiceFixture(operatorID)
+			_, failure := service.CreateDraft(context.Background(), application.Actor{OperatorID: operatorID}, test.input)
 			if !errors.Is(failure, ErrInvalidInput) {
 				t.Fatalf("expected invalid input error, got %v", failure)
 			}
-			if table.ownedByCalls != 1 || scoped.draftCalls != 0 {
-				t.Fatal("expected invalid input to stop before scoped draft creation")
+			if table.ownedByCalls != 0 || scoped.draftCalls != 0 {
+				t.Fatal("expected invalid input to stop before scoped table selection")
 			}
 		})
 	}
@@ -248,7 +303,7 @@ func TestServiceBindsOperatorAndCreatesDraftThroughScopedTable(t *testing.T) {
 	_, table, scoped, _, service := newServiceFixture(operatorID)
 	scoped.draftID = draftID
 
-	actual, failure := service.CreateDraft(context.Background(), CreateDraftInput{
+	actual, failure := service.CreateDraft(context.Background(), application.Actor{OperatorID: operatorID}, CreateDraftInput{
 		Name:            "  draft name  ",
 		MessageText:     "  сообщение  ",
 		AccountID:       accountID,
@@ -261,7 +316,7 @@ func TestServiceBindsOperatorAndCreatesDraftThroughScopedTable(t *testing.T) {
 		t.Fatalf("expected draft %s, got %s", draftID.UUID(), actual.UUID())
 	}
 	if table.ownedByCalls != 1 || table.ownedByOperatorID != operatorID {
-		t.Fatalf("expected OwnedBy(%s) once, got %d calls for %s", operatorID, table.ownedByCalls, table.ownedByOperatorID)
+		t.Fatalf("expected OwnedBy(%s) once per draft operation, got %d calls for %s", operatorID, table.ownedByCalls, table.ownedByOperatorID)
 	}
 	if scoped.draftCalls != 1 {
 		t.Fatalf("expected one scoped draft call, got %d", scoped.draftCalls)
@@ -279,15 +334,60 @@ func TestServiceDashboardUsesConsoleProjection(t *testing.T) {
 	projection.dashboardPrivate = []PrivateDialog{{AccountID: uuid.New()}}
 	projection.dashboardMailings = []MailingSummary{{ID: uuid.New()}}
 
-	dashboard, failure := service.Dashboard(context.Background())
+	dashboard, failure := service.Dashboard(context.Background(), application.Actor{OperatorID: operatorID})
 	if failure != nil {
 		t.Fatalf("load dashboard: %v", failure)
 	}
-	if table.ownedByCalls != 1 || projection.dashboardCalls != 1 || projection.dashboardOperator != operatorID {
-		t.Fatalf("expected one operator-bound projection call, got OwnedBy %d and Dashboard %d for %s", table.ownedByCalls, projection.dashboardCalls, projection.dashboardOperator)
+	if table.ownedByCalls != 0 || projection.dashboardCalls != 1 || projection.dashboardOperator != operatorID {
+		t.Fatalf("expected one operator-bound projection call without mailing selection, got OwnedBy %d and Dashboard %d for %s", table.ownedByCalls, projection.dashboardCalls, projection.dashboardOperator)
 	}
 	if len(dashboard.Accounts) != 1 || len(dashboard.SharedDialogs) != 1 || len(dashboard.PrivateDialogs) != 1 || len(dashboard.Mailings) != 1 {
 		t.Fatalf("unexpected dashboard data: %#v", dashboard)
+	}
+}
+
+func TestServiceIsolatesTwoActorsAcrossConsoleOperations(t *testing.T) {
+	operatorA, operatorB := uuid.New(), uuid.New()
+	accountA, accountB := uuid.New(), uuid.New()
+	draftA, draftB := uuid.New(), uuid.New()
+	consoleProjection := &multiOperatorConsole{dashboards: map[uuid.UUID]Dashboard{
+		operatorA: {Accounts: []Account{{ID: accountA}}, Mailings: []MailingSummary{{ID: draftA}}},
+		operatorB: {Accounts: []Account{{ID: accountB}}, Mailings: []MailingSummary{{ID: draftB}}},
+	}}
+	mailingTable := &multiOperatorMailings{operators: map[uuid.UUID]*multiOperatorMailing{
+		operatorA: {accountID: accountA, mailingID: draftA, row: &fakeMailing{}},
+		operatorB: {accountID: accountB, mailingID: draftB, row: &fakeMailing{}},
+	}}
+	service := NewService(consoleProjection, mailingTable)
+	actorA := application.Actor{OperatorID: operatorA}
+	actorB := application.Actor{OperatorID: operatorB}
+
+	dashboardA, failure := service.Dashboard(context.Background(), actorA)
+	if failure != nil || len(dashboardA.Accounts) != 1 || dashboardA.Accounts[0].ID != accountA {
+		t.Fatalf("operator A dashboard: %v %#v", failure, dashboardA)
+	}
+	dashboardB, failure := service.Dashboard(context.Background(), actorB)
+	if failure != nil || len(dashboardB.Accounts) != 1 || dashboardB.Accounts[0].ID != accountB {
+		t.Fatalf("operator B dashboard: %v %#v", failure, dashboardB)
+	}
+
+	validDraft := CreateDraftInput{Name: "draft", MessageText: "message", AccountID: accountA, SharedDialogIDs: []uuid.UUID{uuid.New()}}
+	if _, failure = service.CreateDraft(context.Background(), actorA, validDraft); failure != nil {
+		t.Fatalf("operator A create draft: %v", failure)
+	}
+	validDraft.AccountID = accountB
+	if _, failure = service.CreateDraft(context.Background(), actorA, validDraft); !errors.Is(failure, ErrNotFound) {
+		t.Fatalf("foreign account create: expected not found, got %v", failure)
+	}
+	if failure = service.Queue(context.Background(), actorA, draftB); !errors.Is(failure, ErrNotFound) {
+		t.Fatalf("foreign queue: expected not found, got %v", failure)
+	}
+	randomDraft := uuid.New()
+	if randomFailure := service.Queue(context.Background(), actorA, randomDraft); !errors.Is(randomFailure, ErrNotFound) {
+		t.Fatalf("random queue: expected not found, got %v", randomFailure)
+	}
+	if failure = service.Queue(context.Background(), actorB, draftB); failure != nil {
+		t.Fatalf("operator B queue: %v", failure)
 	}
 }
 
@@ -300,7 +400,7 @@ func TestServicePreservesConsoleSentinels(t *testing.T) {
 	t.Run("dashboard", func(t *testing.T) {
 		projection, _, _, _, service := newServiceFixture(operatorID)
 		projection.dashboardFailure = ErrNotFound
-		_, failure := service.Dashboard(context.Background())
+		_, failure := service.Dashboard(context.Background(), application.Actor{OperatorID: operatorID})
 		if !errors.Is(failure, ErrNotFound) {
 			t.Fatalf("expected not found sentinel, got %v", failure)
 		}
@@ -308,7 +408,7 @@ func TestServicePreservesConsoleSentinels(t *testing.T) {
 	t.Run("create draft", func(t *testing.T) {
 		_, _, scoped, _, service := newServiceFixture(operatorID)
 		scoped.draftFailure = ErrInvalidState
-		_, failure := service.CreateDraft(context.Background(), validInput)
+		_, failure := service.CreateDraft(context.Background(), application.Actor{OperatorID: operatorID}, validInput)
 		if !errors.Is(failure, ErrInvalidState) {
 			t.Fatalf("expected invalid state sentinel, got %v", failure)
 		}
@@ -328,7 +428,7 @@ func TestServicePreservesConsoleSentinels(t *testing.T) {
 				_, _, scoped, row, service := newServiceFixture(operatorID)
 				row.queueFailure = test.domain
 				mailingID := uuid.New()
-				failure := service.Queue(context.Background(), mailingID)
+				failure := service.Queue(context.Background(), application.Actor{OperatorID: operatorID}, mailingID)
 				if !errors.Is(failure, test.console) {
 					t.Fatalf("expected console sentinel %v, got %v", test.console, failure)
 				}
@@ -342,7 +442,7 @@ func TestServicePreservesConsoleSentinels(t *testing.T) {
 
 func TestServiceQueueRejectsZeroMailing(t *testing.T) {
 	_, _, scoped, row, service := newServiceFixture(uuid.New())
-	if failure := service.Queue(context.Background(), uuid.Nil); !errors.Is(failure, ErrInvalidInput) {
+	if failure := service.Queue(context.Background(), application.Actor{OperatorID: uuid.New()}, uuid.Nil); !errors.Is(failure, ErrInvalidInput) {
 		t.Fatalf("expected invalid input error, got %v", failure)
 	}
 	if scoped.mailingCalls != 0 || row.queueCalls != 0 {
@@ -354,18 +454,18 @@ func TestServiceVerifiesConfiguredOperator(t *testing.T) {
 	operatorID := uuid.New()
 	projection, _, _, _, service := newServiceFixture(operatorID)
 	projection.operatorExists = true
-	if failure := service.VerifyOperator(context.Background()); failure != nil {
+	if failure := service.VerifyOperator(context.Background(), application.Actor{OperatorID: operatorID}); failure != nil {
 		t.Fatalf("verify existing operator: %v", failure)
 	}
 	if projection.operatorCalls != 1 || projection.operatorID != operatorID {
 		t.Fatalf("expected operator verification for %s", operatorID)
 	}
 	projection.operatorExists = false
-	if failure := service.VerifyOperator(context.Background()); !errors.Is(failure, ErrNotFound) {
+	if failure := service.VerifyOperator(context.Background(), application.Actor{OperatorID: operatorID}); !errors.Is(failure, ErrNotFound) {
 		t.Fatalf("expected missing operator error, got %v", failure)
 	}
 	projection.operatorFailure = ErrInvalidState
-	if failure := service.VerifyOperator(context.Background()); !errors.Is(failure, ErrInvalidState) {
+	if failure := service.VerifyOperator(context.Background(), application.Actor{OperatorID: operatorID}); !errors.Is(failure, ErrInvalidState) {
 		t.Fatalf("expected operator projection error, got %v", failure)
 	}
 }
@@ -375,19 +475,16 @@ func TestServiceGuardsContextAndCollaborators(t *testing.T) {
 	projection := &fakeConsole{}
 	table := &fakeMailings{scoped: &fakeOperatorMailings{row: &fakeMailing{}}}
 	assertPanics(t, func() {
-		NewService(uuid.Nil, projection, table)
-	})
-	assertPanics(t, func() {
-		NewService(operatorID, nil, table)
-	})
-	assertPanics(t, func() {
-		NewService(operatorID, projection, nil)
+		NewService(projection, nil)
 	})
 
-	service := NewService(operatorID, projection, table)
+	service := NewService(projection, table)
 	assertPanics(t, func() {
-		_, _ = service.Dashboard(nil)
+		_, _ = service.Dashboard(nil, application.Actor{OperatorID: operatorID})
 	})
+	if _, failure := service.Dashboard(context.Background(), application.Actor{}); !errors.Is(failure, ErrInvalidInput) {
+		t.Fatalf("expected missing actor to be rejected, got %v", failure)
+	}
 }
 
 func repeatedRune(value rune, count int) string {
