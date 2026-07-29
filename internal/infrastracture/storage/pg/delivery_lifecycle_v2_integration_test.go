@@ -44,7 +44,7 @@ func TestDeliveryExecutionV2MigrationCutover(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("prepare pre-v2 schema: %v", failure)
 	}
-	operatorID, accountID, failure := createLifecycleAccount(ctx, database)
+	operatorID, accountID, failure := createPreV2LifecycleAccount(ctx, database)
 	if failure != nil {
 		t.Fatalf("create cutover account: %v", failure)
 	}
@@ -1025,6 +1025,20 @@ type lifecycleDelivery struct {
 func createLifecycleAccount(context context.Context, database *pgxpool.Pool) (uuid.UUID, uuid.UUID, error) {
 	operatorID := uuid.New()
 	accountID := uuid.New()
+	if _, failure := database.Exec(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "lifecycle-"+operatorID.String()); failure != nil {
+		return uuid.Nil, uuid.Nil, failure
+	}
+	if _, failure := database.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id) VALUES ($1, $2, $3, $4, $5, 1)`, accountID, operatorID, "+19990000009", "lifecycle_"+accountID.String()[:8], "Lifecycle Test"); failure != nil {
+		return uuid.Nil, uuid.Nil, failure
+	}
+	return operatorID, accountID, nil
+}
+
+func createPreV2LifecycleAccount(context context.Context, database *pgxpool.Pool) (uuid.UUID, uuid.UUID, error) {
+	operatorID := uuid.New()
+	accountID := uuid.New()
+	// This fixture targets the schema before 20260729000300_secure_operator_credentials,
+	// where operators.password is required. Post-cutover fixtures stay password-free.
 	if _, failure := database.Exec(context, `INSERT INTO operators (id, username, password) VALUES ($1, $2, $3)`, operatorID, "lifecycle-"+operatorID.String(), "test-password"); failure != nil {
 		return uuid.Nil, uuid.Nil, failure
 	}

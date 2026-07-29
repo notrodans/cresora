@@ -227,7 +227,7 @@ func createTelegramPeerLookupFixture(
 		return nil
 	}
 	if failure = exec(
-		`INSERT INTO operators (id, username, password) VALUES ($1, $2, 'fixture-password')`,
+		`INSERT INTO operators (id, username) VALUES ($1, $2)`,
 		fixture.operatorID,
 		"fixture-"+fixture.operatorID.String()[:8],
 	); failure != nil {

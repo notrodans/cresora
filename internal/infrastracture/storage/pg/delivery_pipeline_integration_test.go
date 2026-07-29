@@ -412,10 +412,9 @@ func createDeliveryPipelineFixture(
 	fixture := deliveryPipelineFixture{operatorID: uuid.New()}
 	if _, failure := database.Exec(
 		context,
-		`INSERT INTO operators (id, username, password) VALUES ($1, $2, $3)`,
+		`INSERT INTO operators (id, username) VALUES ($1, $2)`,
 		fixture.operatorID,
 		"delivery-pipeline-"+fixture.operatorID.String(),
-		"test-password",
 	); failure != nil {
 		return fixture, fmt.Errorf("insert operator: %w", failure)
 	}
