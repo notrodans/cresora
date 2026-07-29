@@ -170,7 +170,7 @@ func TestPostgreSQLDeliveryReaper(t *testing.T) {
 	})
 }
 
-func TestPostgreSQLDeliveryRetryUsesStableRandomID(t *testing.T) {
+func TestPostgreSQLUnknownOutcomeIsNotClaimable(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not set")
@@ -206,38 +206,20 @@ func TestPostgreSQLDeliveryRetryUsesStableRandomID(t *testing.T) {
 	command := applicationdelivery.New(deliveries, fake)
 	task, claimFailure := claims.Claim(context)
 	if claimFailure != nil {
-		t.Fatalf("claim first retry attempt: %v", claimFailure)
+		t.Fatalf("claim unknown attempt: %v", claimFailure)
 	}
 	if failure = task.Execute(context, command); failure != nil {
-		t.Fatalf("execute first unknown attempt: %v", failure)
+		t.Fatalf("execute unknown attempt: %v", failure)
 	}
-	first := readRandomAndState(t, context, database, item.pipelineDelivery)
-	if first.state.status != "sending" || first.state.attempts != 1 {
-		t.Fatalf("first unknown state = %+v", first.state)
+	state := readLifecycleDeliveryState(t, context, database, item.pipelineDelivery)
+	if state.status != "unknown" || state.attempts != 1 || state.leaseToken != uuid.Nil || state.leaseUntil.Valid {
+		t.Fatalf("unknown outcome state = %+v", state)
 	}
-	if _, failure = database.Exec(context, `UPDATE mailing_deliveries SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
-		t.Fatalf("expire first retry attempt: %v", failure)
+	if _, claimFailure := claims.Claim(context); !errors.Is(claimFailure, applicationdelivery.ErrEmpty) {
+		t.Fatalf("claim after unknown outcome = %v, want ErrEmpty", claimFailure)
 	}
-	result, reapFailure := pgreaper.New(database, pgreaper.Config{BatchSize: 1, ExpiredLeaseGrace: 0, RetryDelay: 0}).Reap(context)
-	if reapFailure != nil || result.Retried != 1 {
-		t.Fatalf("reap first retry attempt = %+v/%v", result, reapFailure)
-	}
-	secondTask, claimFailure := claims.Claim(context)
-	if claimFailure != nil {
-		t.Fatalf("claim idempotent retry: %v", claimFailure)
-	}
-	if failure = secondTask.Execute(context, command); failure != nil {
-		t.Fatalf("execute idempotent retry: %v", failure)
-	}
-	second := readRandomAndState(t, context, database, item.pipelineDelivery)
-	if second.randomID != first.randomID || second.state.status != "sent" || second.state.attempts != 2 {
-		t.Fatalf("idempotent retry state = %+v, first=%+v", second, first)
-	}
-	if calls := fake.Calls(); len(calls) != 2 {
-		t.Fatalf("transport calls = %d, want two logical attempts", len(calls))
-	}
-	if effects := fake.Effects(); len(effects) != 1 {
-		t.Fatalf("external effects = %d, want one stable-random effect", len(effects))
+	if calls := fake.Calls(); len(calls) != 1 {
+		t.Fatalf("transport calls = %d, want one logical attempt", len(calls))
 	}
 }
 
