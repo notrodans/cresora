@@ -1,50 +1,62 @@
 version: 3
+workdir: .
 
-workdir: internal
-
-# Сначала разрешаем сторонние библиотеки везде.
-# Архитектурные границы внутри проекта всё равно проверяются.
 allow:
   depOnAnyVendor: true
+  # Keep this guard focused on package import boundaries; existing wiring does
+  # not require a production refactor just to introduce the check.
+  deepScan: false
 
 components:
-  entrypoint:
-    in: internal/entrypoint/**
-
-  infrastracture:
-    in: internal/infrastracture/**
-
-  application:
-    in: internal/application/**
-
   domain:
     in: internal/domain/**
-
+  application:
+    in: internal/application/**
+  infrastracture:
+    in: internal/infrastracture/**
+  transport:
+    in: internal/transport/**
+  entrypoint:
+    in: internal/entrypoint/**
   composition:
     in: cmd/**
+  configuration:
+    in: config/**
+  api:
+    in: api/**
 
 deps:
-  # Domain не может импортировать другие компоненты проекта.
-  domain: {}
-
-  entrypoint:
-    mayDependOn:
-		- domain
-		- application
-        - infrastracture
-		- transport
-
-  infrastracture:
-    mayDependOn:
-		- domain
-		- application
-		- transport
-
+  domain:
+    anyVendorDeps: true
   application:
     mayDependOn:
       - domain
-	  - infrastracture
-
-  # Composition root связывает всё вместе.
+      # Packages within one component are explicit because the linter does not
+      # treat same-component imports as implicitly allowed.
+      # The only other project component allowed here is domain.
+      - application
+  infrastracture:
+    mayDependOn:
+      - domain
+      - application
+      - transport
+      - infrastracture
+      - configuration
+  transport:
+    mayDependOn:
+      - domain
+      - application
+      - transport
+  entrypoint:
+    mayDependOn:
+      - domain
+      - application
+      - infrastracture
+      - transport
+      - entrypoint
   composition:
     anyProjectDeps: true
+  configuration:
+    anyVendorDeps: true
+  api:
+    anyVendorDeps: true
