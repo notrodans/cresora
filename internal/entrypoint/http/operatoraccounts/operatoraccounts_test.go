@@ -105,7 +105,7 @@ func operatorPost(t *testing.T, handler http.Handler, jar *cookieJar, path strin
 
 func newMockOperatorHandler(provider principal.Provider) http.Handler {
 	mock := authmock.New()
-	return New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider)
+	return New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, "http://example.test")
 }
 
 func TestOperatorAccountHTTPScopesBrowserFlowByActor(t *testing.T) {
@@ -164,7 +164,7 @@ func TestOperatorAccountHTTPScopesQRAndClearsStatusNone(t *testing.T) {
 	actorB := application.Actor{OperatorID: uuid.New()}
 	provider := newTestActorProvider(actorA)
 	mock := authmock.New()
-	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider)
+	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, "http://example.test")
 	jar := newCookieJar()
 	operatorPage(t, handler, jar)
 
@@ -207,7 +207,7 @@ func TestOperatorAccountHTTPScopesQRAndClearsStatusNone(t *testing.T) {
 		t.Fatal("actor A QR challenge unexpectedly disappeared before status-none check")
 	}
 	statusNone := &fixedStatus{}
-	handler = New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, statusNone, provider)
+	handler = New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, statusNone, provider, "http://example.test")
 	if page := operatorPage(t, handler, jar); strings.Contains(page, `class="qr"`) {
 		t.Fatal("status-none did not clear stale QR browser cache")
 	}
@@ -226,7 +226,7 @@ func TestOperatorAccountHTTPUnknownQRResponsesAreEquivalent(t *testing.T) {
 	provider := newTestActorProvider(actor)
 	mock := authmock.New()
 	status := &fixedStatus{}
-	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, status, provider)
+	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, status, provider, "http://example.test")
 	jar := newCookieJar()
 	operatorPage(t, handler, jar)
 
@@ -262,6 +262,7 @@ func TestOperatorAccountHTTPForeignRealChallengesStayActorScoped(t *testing.T) {
 		authmock.NewRefreshQR(store),
 		status,
 		provider,
+		"http://example.test",
 	)
 
 	phoneA, failure := authmock.NewStartPhone(store).Execute(context.Background(), actorA, "+15551230031")
@@ -407,7 +408,7 @@ func TestOperatorAccountHTTPSerializesStaleGETAndPhoneVerify(t *testing.T) {
 		release:   make(chan struct{}),
 	}
 	verify := &observingVerify{delegate: authmock.NewVerifyPhone(store), entered: make(chan struct{})}
-	handler := New(startPhone, verify, authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider)
+	handler := New(startPhone, verify, authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider, "http://example.test")
 	jar := newCookieJar()
 	operatorPage(t, handler, jar)
 
@@ -452,7 +453,7 @@ func TestOperatorAccountHTTPSerializesStaleGETAndPhoneStart(t *testing.T) {
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
 	}
-	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider)
+	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider, "http://example.test")
 	jar := newCookieJar()
 	operatorPage(t, handler, jar)
 
@@ -496,7 +497,7 @@ func TestOperatorAccountHTTPSerializesStaleGETAndQRStart(t *testing.T) {
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
 	}
-	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider)
+	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), authmock.NewStartQR(store), authmock.NewRefreshQR(store), status, provider, "http://example.test")
 	jar := newCookieJar()
 	operatorPage(t, handler, jar)
 
@@ -544,7 +545,7 @@ func TestOperatorAccountHTTPSerializesStaleGETAndQRRefresh(t *testing.T) {
 		entered:   make(chan struct{}),
 		release:   make(chan struct{}),
 	}
-	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), startQR, authmock.NewRefreshQR(store), status, provider)
+	handler := New(authmock.NewStartPhone(store), authmock.NewVerifyPhone(store), startQR, authmock.NewRefreshQR(store), status, provider, "http://example.test")
 	jar := newCookieJar()
 	operatorPage(t, handler, jar)
 
@@ -588,7 +589,7 @@ func TestOperatorAccountHTTPCreatesOneFlowCookiePerRequest(t *testing.T) {
 	actor := application.Actor{OperatorID: uuid.New()}
 	provider := newTestActorProvider(actor)
 	mock := authmock.New()
-	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider)
+	handler := New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, "http://example.test")
 	response := operatorRequest(t, handler, newCookieJar(), http.MethodGet, "/operator-accounts/authenticate", nil)
 
 	count := 0

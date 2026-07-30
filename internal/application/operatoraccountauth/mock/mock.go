@@ -101,41 +101,29 @@ func NewStore() *Store {
 	}
 }
 
-// NewStartPhone constructs a phone command. If no store is supplied, a new
-// standalone mock store is created.
-func NewStartPhone(stores ...*Store) commands.StartPhone {
-	return StartPhoneCommand{store: selectStore(stores...)}
+// NewStartPhone constructs a phone command backed by store.
+func NewStartPhone(store *Store) commands.StartPhone {
+	return StartPhoneCommand{store: store}
 }
 
-// NewVerifyPhone constructs a phone verification command. If no store is
-// supplied, a new standalone mock store is created.
-func NewVerifyPhone(stores ...*Store) commands.VerifyPhone {
-	return VerifyPhoneCommand{store: selectStore(stores...)}
+// NewVerifyPhone constructs a phone verification command backed by store.
+func NewVerifyPhone(store *Store) commands.VerifyPhone {
+	return VerifyPhoneCommand{store: store}
 }
 
-// NewStartQR constructs a QR command. If no store is supplied, a new
-// standalone mock store is created.
-func NewStartQR(stores ...*Store) commands.StartQR {
-	return StartQRCommand{store: selectStore(stores...)}
+// NewStartQR constructs a QR command backed by store.
+func NewStartQR(store *Store) commands.StartQR {
+	return StartQRCommand{store: store}
 }
 
-// NewRefreshQR constructs a QR refresh command. If no store is supplied, a
-// new standalone mock store is created.
-func NewRefreshQR(stores ...*Store) commands.RefreshQR {
-	return RefreshQRCommand{store: selectStore(stores...)}
+// NewRefreshQR constructs a QR refresh command backed by store.
+func NewRefreshQR(store *Store) commands.RefreshQR {
+	return RefreshQRCommand{store: store}
 }
 
-// NewStatus constructs a status request. If no store is supplied, a new
-// standalone mock store is created.
-func NewStatus(stores ...*Store) requests.Status {
-	return StatusRequest{store: selectStore(stores...)}
-}
-
-func selectStore(stores ...*Store) *Store {
-	if len(stores) > 0 && stores[0] != nil {
-		return stores[0]
-	}
-	return NewStore()
+// NewStatus constructs a status request backed by store.
+func NewStatus(store *Store) requests.Status {
+	return StatusRequest{store: store}
 }
 
 // StartPhoneCommand is the mock StartPhone command implementation.
@@ -157,8 +145,8 @@ func (command StartPhoneCommand) Execute(
 	if failure != nil {
 		return application.PhoneChallenge{}, failure
 	}
-	if command.store == nil || actor.OperatorID == uuid.Nil {
-		return application.PhoneChallenge{}, fmt.Errorf("%w: mock store is required", ErrInvalidInput)
+	if actor.OperatorID == uuid.Nil {
+		return application.PhoneChallenge{}, fmt.Errorf("%w: actor identity is required", ErrInvalidInput)
 	}
 
 	command.store.mu.Lock()
@@ -201,8 +189,8 @@ func (command VerifyPhoneCommand) Execute(
 	if strings.TrimSpace(code) == "" {
 		return application.Account{}, fmt.Errorf("%w: phone code is required", ErrInvalidInput)
 	}
-	if command.store == nil || actor.OperatorID == uuid.Nil {
-		return application.Account{}, fmt.Errorf("%w: mock store is required", ErrInvalidInput)
+	if actor.OperatorID == uuid.Nil {
+		return application.Account{}, fmt.Errorf("%w: actor identity is required", ErrInvalidInput)
 	}
 
 	command.store.mu.Lock()
@@ -249,8 +237,8 @@ func (command StartQRCommand) Execute(ctx context.Context, actor applicationroot
 	if failure := validateContext(ctx); failure != nil {
 		return application.QRChallenge{}, failure
 	}
-	if command.store == nil || actor.OperatorID == uuid.Nil {
-		return application.QRChallenge{}, fmt.Errorf("%w: mock store is required", ErrInvalidInput)
+	if actor.OperatorID == uuid.Nil {
+		return application.QRChallenge{}, fmt.Errorf("%w: actor identity is required", ErrInvalidInput)
 	}
 
 	command.store.mu.Lock()
@@ -285,8 +273,8 @@ func (command RefreshQRCommand) Execute(
 	if requestID == uuid.Nil {
 		return application.QRChallenge{}, fmt.Errorf("%w: QR request ID is required", ErrInvalidInput)
 	}
-	if command.store == nil || actor.OperatorID == uuid.Nil {
-		return application.QRChallenge{}, fmt.Errorf("%w: mock store is required", ErrInvalidInput)
+	if actor.OperatorID == uuid.Nil {
+		return application.QRChallenge{}, fmt.Errorf("%w: actor identity is required", ErrInvalidInput)
 	}
 
 	command.store.mu.Lock()
@@ -321,8 +309,8 @@ func (request StatusRequest) Execute(ctx context.Context, actor applicationroot.
 	if failure := validateContext(ctx); failure != nil {
 		return application.Status{}, failure
 	}
-	if request.store == nil || actor.OperatorID == uuid.Nil {
-		return application.Status{}, fmt.Errorf("%w: mock store is required", ErrInvalidInput)
+	if actor.OperatorID == uuid.Nil {
+		return application.Status{}, fmt.Errorf("%w: actor identity is required", ErrInvalidInput)
 	}
 
 	request.store.mu.Lock()
@@ -400,9 +388,6 @@ func mockQRURL(actorID uuid.UUID, sequence string) string {
 }
 
 func validateContext(ctx context.Context) error {
-	if ctx == nil {
-		return fmt.Errorf("%w: context is required", ErrInvalidInput)
-	}
 	if failure := ctx.Err(); failure != nil {
 		return failure
 	}

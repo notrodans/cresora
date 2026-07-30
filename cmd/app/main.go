@@ -77,13 +77,6 @@ func logging(base *slogger.Logger, next http.Handler) http.Handler {
 }
 
 func runApplication(rootContext context.Context, cancel context.CancelFunc) error {
-	if rootContext == nil {
-		panic("run application without context")
-	}
-	if cancel == nil {
-		panic("run application without cancel function")
-	}
-
 	rootDir, err := config.ProjectRoot()
 	if err != nil {
 		panic(err)

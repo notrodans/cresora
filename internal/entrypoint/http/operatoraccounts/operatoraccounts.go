@@ -203,9 +203,9 @@ type qrView struct {
 }
 
 // New constructs the chi router for operator account authentication.
-func New(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, publicOrigin ...string) chi.Router {
+func New(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, publicOrigin string) chi.Router {
 	r := chi.NewRouter()
-	Register(r, startPhone, verifyPhone, startQR, refreshQR, status, provider, publicOrigin...)
+	Register(r, startPhone, verifyPhone, startQR, refreshQR, status, provider, publicOrigin)
 	return r
 }
 
@@ -231,9 +231,6 @@ func NewWithChallengeCoordinator(
 	publicOrigin string,
 	options RouteOptions,
 ) chi.Router {
-	if coordinator == nil {
-		panic("register operator account routes without challenge coordinator")
-	}
 	ports := coordinator.CQS()
 	return NewWithOptions(ports.StartPhone, ports.VerifyPhone, ports.StartQR, ports.RefreshQR, ports.Status, provider, publicOrigin, options)
 }
@@ -247,16 +244,12 @@ func Register(
 	refreshQR commands.RefreshQR,
 	status requests.Status,
 	provider principal.Provider,
-	configuredOrigin ...string,
+	configuredOrigin string,
 ) {
-	originValue := "http://example.test"
-	if len(configuredOrigin) > 0 && configuredOrigin[0] != "" {
-		originValue = configuredOrigin[0]
-	}
 	// The legacy constructor remains available for the explicitly composed
 	// in-memory development/test handlers. The application composition root
 	// uses RegisterWithOptions with RouteDisabled instead.
-	RegisterWithOptions(router, startPhone, verifyPhone, startQR, refreshQR, status, provider, originValue, RouteOptions{
+	RegisterWithOptions(router, startPhone, verifyPhone, startQR, refreshQR, status, provider, configuredOrigin, RouteOptions{
 		Mode:   RouteLive,
 		Cookie: SecureCookieConfig(),
 	})
@@ -275,15 +268,6 @@ func RegisterWithOptions(
 	configuredOrigin string,
 	options RouteOptions,
 ) {
-	if router == nil {
-		panic("register operator account routes with missing router")
-	}
-	if provider == nil {
-		panic("register operator account routes without principal provider")
-	}
-	if configuredOrigin == "" {
-		configuredOrigin = "http://example.test"
-	}
 	origin, failure := parsePublicOrigin(configuredOrigin)
 	if failure != nil {
 		panic(failure)
@@ -542,7 +526,7 @@ func (h *handler) resolveScope(w http.ResponseWriter, r *http.Request) (requestS
 }
 
 func (h *handler) unavailable(w http.ResponseWriter) bool {
-	if h == nil || !h.disabled {
+	if !h.disabled {
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -714,9 +698,7 @@ func isLocalOriginHost(origin *url.URL) bool {
 
 func randomID(size int) string {
 	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		panic("operator authentication entropy unavailable")
-	}
+	rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 func notice(code string) string {
