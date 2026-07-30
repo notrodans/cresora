@@ -6,6 +6,7 @@ import (
 	"fmt"
 	slogger "log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -55,7 +56,8 @@ func main() {
 	// Под стандартным поведением подразумевается немедленное принудительное завершение процесса.
 	defer cancel()
 	if failure := runApplication(root, cancel); failure != nil {
-		panic(failure)
+		slogger.Error("run application", "error", failure)
+		os.Exit(1)
 	}
 }
 
