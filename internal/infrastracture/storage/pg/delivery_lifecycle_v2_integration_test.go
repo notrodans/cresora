@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,7 +26,6 @@ import (
 	"github.com/notrodans/nebula-go/internal/domain/recipient"
 	pgclaims "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/claims"
 	pgdeliveries "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/deliveries"
-	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/invariants"
 	pgmailings "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/mailings"
 	"github.com/notrodans/nebula-go/internal/infrastracture/transport/faketelegram"
 )
@@ -139,6 +139,8 @@ func TestDeliveryExecutionV2MigrationCutover(t *testing.T) {
 	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown', attempt_count = 1, started_at = CURRENT_TIMESTAMP, error_message = 'expired sending lease' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
 		t.Fatalf("insert valid unknown delivery: %v", failure)
 	}
+	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET error_message = '   ' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
+	assertConstraintViolation(t, failure, "ck_mailing_deliveries_unknown_evidence")
 	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 0, started_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
 	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_evidence")
 	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = NULL, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
@@ -196,6 +198,47 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 	claims := pgclaims.NewClaims(database, time.Minute)
 	deliveries := pgdeliveries.NewDeliveries(database)
 	mailings := pgmailings.NewMailings(database)
+	assertTerminalUnknown := func(t *testing.T, item pipelineDelivery) {
+		t.Helper()
+		state := readLifecycleDeliveryState(t, ctx, database, item)
+		if state.status != "unknown" || state.attempts < 1 || !state.started.Valid || state.errorMessage == "" || state.leaseToken != uuid.Nil || state.leaseUntil.Valid || state.leaseGeneration.Valid {
+			t.Fatalf("terminal unknown delivery state = %+v", state)
+		}
+		if _, failure := claims.Claim(ctx); !errors.Is(failure, applicationdelivery.ErrEmpty) {
+			t.Fatalf("claim after terminal unknown delivery = %v, want ErrEmpty", failure)
+		}
+	}
+	finalizeNegativeAfterAdmission := func(t *testing.T, item pipelineDelivery, sendFailure error, invalidate func() error) {
+		t.Helper()
+		task, claimFailure := claims.Claim(ctx)
+		if claimFailure != nil {
+			t.Fatalf("claim delivery for negative finalization: %v", claimFailure)
+		}
+		port := newUncancellablePort(sendFailure)
+		dispatchDone := make(chan error, 1)
+		go func() {
+			dispatchDone <- task.Execute(ctx, applicationdelivery.New(deliveries, port))
+		}()
+		select {
+		case <-port.entered:
+		case <-ctx.Done():
+			t.Fatalf("wait for admitted negative send: %v", ctx.Err())
+		}
+		if failure := invalidate(); failure != nil {
+			close(port.release)
+			t.Fatalf("invalidate delivery parent before negative finalization: %v", failure)
+		}
+		close(port.release)
+		select {
+		case failure := <-dispatchDone:
+			if failure != nil {
+				t.Fatalf("finalize negative delivery: %v", failure)
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for negative finalization: %v", ctx.Err())
+		}
+		assertTerminalUnknown(t, item)
+	}
 
 	t.Run("claim matrix and lease semantics", func(t *testing.T) {
 		for _, test := range []struct {
@@ -533,7 +576,7 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown error is quarantined and stop preserves sending outcome", func(t *testing.T) {
+	t.Run("unknown error finalizes as terminal unknown outcome", func(t *testing.T) {
 		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
 		fake := faketelegram.New(faketelegram.WithDefault(faketelegram.Step{Outcome: faketelegram.OutcomeUnknown}), faketelegram.WithCallRecording(2))
 		task, claimFailure := claims.Claim(ctx)
@@ -541,10 +584,10 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 			t.Fatalf("claim unknown-error delivery: %v", claimFailure)
 		}
 		if failure := task.Execute(ctx, applicationdelivery.New(deliveries, fake)); failure != nil {
-			t.Fatalf("quarantine unknown outcome: %v", failure)
+			t.Fatalf("finalize unknown outcome: %v", failure)
 		}
 		state := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
-		if state.status != "sending" || state.attempts != 1 || state.errorMessage == "" || state.leaseToken == uuid.Nil {
+		if state.status != "unknown" || state.attempts != 1 || state.errorMessage == "" || state.leaseToken != uuid.Nil {
 			t.Fatalf("unknown outcome state = %+v", state)
 		}
 	})
@@ -588,7 +631,7 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 		if failure != nil {
 			t.Fatalf("claim delivery: %v", failure)
 		}
-		sendFailure := errors.New("transport outcome unknown")
+		sendFailure := fmt.Errorf("transport canceled after admission: %w", context.Canceled)
 		port := newUncancellablePort(sendFailure)
 		executionContext, cancelExecution := context.WithCancel(ctx)
 		dispatchDone := make(chan error, 1)
@@ -663,46 +706,19 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("quarantined sending expiry is a warning, not stopped or cancelled claimability", func(t *testing.T) {
+	t.Run("unknown outcome has no claimable lease", func(t *testing.T) {
 		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
 		task, claimFailure := claims.Claim(ctx)
 		if claimFailure != nil {
-			t.Fatalf("claim quarantined delivery: %v", claimFailure)
+			t.Fatalf("claim unknown delivery: %v", claimFailure)
 		}
 		fake := faketelegram.New(faketelegram.WithDefault(faketelegram.Step{Outcome: faketelegram.OutcomeUnknown}))
 		if failure := task.Execute(ctx, applicationdelivery.New(deliveries, fake)); failure != nil {
-			t.Fatalf("quarantine delivery: %v", failure)
+			t.Fatalf("finalize unknown delivery: %v", failure)
 		}
-		mailing := mailings.Mailing(mailing.Identity(item.mailingID))
-		if failure := mailing.Stop(ctx); failure != nil {
-			t.Fatalf("stop quarantined mailing: %v", failure)
-		}
-		if _, failure := database.Exec(ctx, `UPDATE mailing_deliveries SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, item.mailingID, item.runID, item.recipientID); failure != nil {
-			t.Fatalf("expire quarantined lease: %v", failure)
-		}
-
-		report, failure := invariants.NewWithSampleLimitAndExpiredLeaseGrace(database, 10, 0).Check(ctx)
-		if failure != nil {
-			t.Fatalf("check quarantined expiry invariants: %v", failure)
-		}
-		for _, result := range report.Results {
-			containsItem := false
-			for _, sample := range result.Sample {
-				if sample.MailingID == item.mailingID && sample.RunID == item.runID && sample.RecipientID == item.recipientID {
-					containsItem = true
-					break
-				}
-			}
-			switch result.Name {
-			case invariants.CheckStoppedMailingWithClaimableDelivery, invariants.CheckCancelledRunWithClaimableDelivery:
-				if containsItem {
-					t.Fatalf("quarantined sending row appeared in %q", result.Name)
-				}
-			case invariants.CheckExpiredSendingLease:
-				if !containsItem {
-					t.Fatalf("quarantined sending row missing from expired lease warning")
-				}
-			}
+		state := readLifecycleDeliveryState(t, ctx, database, item.pipelineDelivery)
+		if state.status != "unknown" || state.leaseToken != uuid.Nil || state.leaseUntil.Valid {
+			t.Fatalf("unknown outcome state = %+v", state)
 		}
 	})
 
@@ -765,6 +781,122 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 		}
 		if generation != 2 {
 			t.Fatalf("repeated stop generation = %d, want 2", generation)
+		}
+	})
+
+	t.Run("stop after admission then transient finalizes unknown", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		finalizeNegativeAfterAdmission(t, item.pipelineDelivery, applicationdelivery.ErrTransient, func() error {
+			return mailings.Mailing(mailing.Identity(item.mailingID)).Stop(ctx)
+		})
+	})
+
+	t.Run("stop after admission then FloodWait finalizes unknown", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		finalizeNegativeAfterAdmission(t, item.pipelineDelivery, &applicationdelivery.FloodWaitError{Duration: time.Minute}, func() error {
+			return mailings.Mailing(mailing.Identity(item.mailingID)).Stop(ctx)
+		})
+	})
+
+	t.Run("generation mismatch finalizes retryable negative as unknown", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		finalizeNegativeAfterAdmission(t, item.pipelineDelivery, applicationdelivery.ErrTransient, func() error {
+			_, failure := database.Exec(ctx, `UPDATE mailing_runs SET execution_generation = execution_generation + 1 WHERE mailing_id = $1 AND id = $2`, item.mailingID, item.runID)
+			return failure
+		})
+	})
+
+	t.Run("parent status mismatch finalizes retryable negative as unknown", func(t *testing.T) {
+		item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+		finalizeNegativeAfterAdmission(t, item.pipelineDelivery, &applicationdelivery.FloodWaitError{Duration: time.Minute}, func() error {
+			_, failure := database.Exec(ctx, `UPDATE mailings SET status = 'running' WHERE id = $1`, item.mailingID)
+			return failure
+		})
+	})
+
+	t.Run("negative finalization waits for uncommitted parent invalidation", func(t *testing.T) {
+		for _, test := range []struct {
+			name       string
+			invalidate func(transaction pgx.Tx, item lifecycleDelivery) error
+		}{
+			{
+				name: "stop cancellation",
+				invalidate: func(transaction pgx.Tx, item lifecycleDelivery) error {
+					if _, failure := transaction.Exec(ctx, `UPDATE mailing_runs
+						SET status = 'cancelled',
+						    execution_generation = execution_generation + 1,
+						    finished_at = CURRENT_TIMESTAMP
+						WHERE mailing_id = $1 AND id = $2`, item.mailingID, item.runID); failure != nil {
+						return failure
+					}
+					_, failure := transaction.Exec(ctx, `UPDATE mailings SET status = 'stopped' WHERE id = $1`, item.mailingID)
+					return failure
+				},
+			},
+			{
+				name: "generation invalidation",
+				invalidate: func(transaction pgx.Tx, item lifecycleDelivery) error {
+					_, failure := transaction.Exec(ctx, `UPDATE mailing_runs
+						SET execution_generation = execution_generation + 1
+						WHERE mailing_id = $1 AND id = $2`, item.mailingID, item.runID)
+					return failure
+				},
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				item := createLifecycleDelivery(t, ctx, database, operatorID, accountID)
+				task, claimFailure := claims.Claim(ctx)
+				if claimFailure != nil {
+					t.Fatalf("claim delivery for finalization race: %v", claimFailure)
+				}
+				port := newUncancellablePort(applicationdelivery.ErrTransient)
+				dispatchDone := make(chan error, 1)
+				go func() {
+					dispatchDone <- task.Execute(ctx, applicationdelivery.New(deliveries, port))
+				}()
+				select {
+				case <-port.entered:
+				case <-ctx.Done():
+					t.Fatalf("wait for admitted negative send: %v", ctx.Err())
+				}
+
+				transaction, failure := database.Begin(ctx)
+				if failure != nil {
+					t.Fatalf("begin parent invalidation transaction: %v", failure)
+				}
+				defer func() { _ = transaction.Rollback(context.Background()) }()
+				var mailingStatus string
+				if failure = transaction.QueryRow(ctx, `SELECT status::text FROM mailings WHERE id = $1 FOR UPDATE`, item.mailingID).Scan(&mailingStatus); failure != nil {
+					t.Fatalf("lock mailing for parent invalidation: %v", failure)
+				}
+				var runStatus string
+				var generation int64
+				if failure = transaction.QueryRow(ctx, `SELECT status::text, execution_generation FROM mailing_runs WHERE mailing_id = $1 AND id = $2 FOR UPDATE`, item.mailingID, item.runID).Scan(&runStatus, &generation); failure != nil {
+					t.Fatalf("lock run for parent invalidation: %v", failure)
+				}
+				if failure = test.invalidate(transaction, item); failure != nil {
+					t.Fatalf("invalidate parent in uncommitted transaction: %v", failure)
+				}
+
+				close(port.release)
+				select {
+				case failure = <-dispatchDone:
+					t.Fatalf("negative finalization completed before parent invalidation committed: %v", failure)
+				case <-time.After(250 * time.Millisecond):
+				}
+				if failure = transaction.Commit(ctx); failure != nil {
+					t.Fatalf("commit parent invalidation transaction: %v", failure)
+				}
+				select {
+				case failure = <-dispatchDone:
+					if failure != nil {
+						t.Fatalf("finalize negative delivery after parent invalidation: %v", failure)
+					}
+				case <-ctx.Done():
+					t.Fatalf("wait for negative finalization: %v", ctx.Err())
+				}
+				assertTerminalUnknown(t, item.pipelineDelivery)
+			})
 		}
 	})
 

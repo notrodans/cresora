@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/google/uuid"
@@ -42,17 +43,21 @@ func (kind *EnvKind) UnmarshalText(text []byte) error {
 }
 
 type Config struct {
-	Env                          EnvKind              `env:"ENV"`
-	DbUrl                        string               `env:"DB_URL"`
-	OperatorID                   uuid.UUID            `env:"OPERATOR_ID"`
-	WebAddr                      url.URL              `env:"WEB_ADDR"`
-	WebOnly                      bool                 `env:"WEB_ONLY" envDefault:"true"`
-	PublicOrigin                 url.URL              `env:"PUBLIC_ORIGIN"`
+	Env          EnvKind   `env:"ENV"`
+	DbUrl        string    `env:"DB_URL"`
+	OperatorID   uuid.UUID `env:"OPERATOR_ID"`
+	WebAddr      url.URL   `env:"WEB_ADDR"`
+	WebOnly      bool      `env:"WEB_ONLY" envDefault:"true"`
+	PublicOrigin url.URL   `env:"PUBLIC_ORIGIN"`
+	// DeliveryReaperInterval controls the transport-neutral lease recovery poll.
+	DeliveryReaperInterval       time.Duration        `env:"DELIVERY_REAPER_INTERVAL" envDefault:"1m"`
 	TelegramSessionKeyID         string               `env:"TELEGRAM_SESSION_KEY_ID" envDefault:""`
 	TelegramSessionEncryptionKey SessionEncryptionKey `env:"TELEGRAM_SESSION_ENCRYPTION_KEY" envDefault:""`
 }
 
 const (
+	DeliveryReaperIntervalEnv       = "DELIVERY_REAPER_INTERVAL"
+	DefaultDeliveryReaperInterval   = time.Minute
 	telegramSessionKeyIDEnv         = "TELEGRAM_SESSION_KEY_ID"
 	telegramSessionEncryptionKeyEnv = "TELEGRAM_SESSION_ENCRYPTION_KEY"
 	telegramSessionKeyIDMaxLength   = 128
@@ -138,8 +143,18 @@ func loadFrom(root string) (Config, error) {
 	if err := validateTelegramSessionConfiguration(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := validateDeliveryReaperConfiguration(cfg); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+func validateDeliveryReaperConfiguration(cfg Config) error {
+	if cfg.DeliveryReaperInterval <= 0 {
+		return fmt.Errorf("%s must be positive", DeliveryReaperIntervalEnv)
+	}
+	return nil
 }
 
 func validateTelegramSessionConfiguration(cfg Config) error {

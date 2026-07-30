@@ -68,6 +68,63 @@ func TestMonitorRuntimeServerFailureCancelsRoot(t *testing.T) {
 	}
 }
 
+func TestMonitorRuntimeReaperFailureShutsDownHTTP(t *testing.T) {
+	root, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := newFakeServerController()
+	expected := errors.New("reaper failed")
+	reaper := make(chan error, 1)
+	reaper <- expected
+
+	failure := monitorRuntime(root, cancel, server, server.serve, nil, reaper)
+	if !errors.Is(failure, expected) {
+		t.Fatalf("expected reaper failure, got %v", failure)
+	}
+	if server.shutdownCall != 1 {
+		t.Fatalf("expected one server shutdown, got %d", server.shutdownCall)
+	}
+	if root.Err() == nil {
+		t.Fatal("expected reaper failure to cancel root")
+	}
+}
+
+func TestMonitorRuntimeReaperCleanCancellation(t *testing.T) {
+	root, cancel := context.WithCancel(context.Background())
+	server := newFakeServerController()
+	reaper := make(chan error, 1)
+	go func() {
+		<-root.Done()
+		reaper <- nil
+	}()
+	go func() {
+		time.Sleep(time.Millisecond)
+		cancel()
+	}()
+
+	if failure := monitorRuntime(root, cancel, server, server.serve, nil, reaper); failure != nil {
+		t.Fatalf("clean reaper cancellation: %v", failure)
+	}
+}
+
+func TestMonitorRuntimeClosedReaperChannelShutsDownHTTP(t *testing.T) {
+	root, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := newFakeServerController()
+	reaper := make(chan error)
+	close(reaper)
+
+	failure := monitorRuntime(root, cancel, server, server.serve, nil, reaper)
+	if !errors.Is(failure, errReaperErrorsClosed) {
+		t.Fatalf("closed reaper channel = %v, want unexpected completion", failure)
+	}
+	if server.shutdownCall != 1 {
+		t.Fatalf("expected one server shutdown, got %d", server.shutdownCall)
+	}
+	if root.Err() == nil {
+		t.Fatal("expected closed reaper channel to cancel root")
+	}
+}
+
 func TestMonitorRuntimeWorkerErrorAndNilCompletion(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -123,6 +180,25 @@ func TestMonitorRuntimeWorkerWaitTimeout(t *testing.T) {
 	failure := monitorRuntime(root, cancel, server, server.serve, worker)
 	if failure == nil || !containsText(failure.Error(), "shutdown timed out") {
 		t.Fatalf("expected worker timeout, got %v", failure)
+	}
+}
+
+func TestMonitorRuntimeReaperWaitTimeoutPropagatesShutdown(t *testing.T) {
+	original := lifecycleWaitTimeout
+	lifecycleWaitTimeout = time.Millisecond
+	defer func() { lifecycleWaitTimeout = original }()
+
+	root, cancel := context.WithCancel(context.Background())
+	server := newFakeServerController()
+	reaper := make(chan error)
+	cancel()
+
+	failure := monitorRuntime(root, cancel, server, server.serve, nil, reaper)
+	if failure == nil || !containsText(failure.Error(), "delivery reaper shutdown timed out") {
+		t.Fatalf("expected reaper timeout, got %v", failure)
+	}
+	if server.shutdownCall != 1 {
+		t.Fatalf("expected one server shutdown, got %d", server.shutdownCall)
 	}
 }
 

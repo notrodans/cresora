@@ -155,7 +155,7 @@ func (task claimed) Release(context context.Context, cause error) error {
 		task.identity.Run().UUID(),
 		task.identity.Recipient().UUID(),
 		task.token.UUID(),
-		cause.Error(),
+		delivery.BoundedErrorMessage(cause),
 	)
 	if failure != nil {
 		return fmt.Errorf("release claimed mailing delivery: %w", failure)

@@ -5,8 +5,6 @@ package faketelegram
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -385,43 +383,16 @@ func (fake *Fake) EffectCount(randomID int64) int {
 	return 1
 }
 
-// ErrTransient identifies the fake transient failure scenario.
-var ErrTransient = errors.New("fake telegram transient failure")
+// These aliases keep the fake convenient for tests while making its outcomes
+// use the same consumer-owned taxonomy as real transports.
+var (
+	ErrTransient      = delivery.ErrTransient
+	ErrPermanent      = delivery.ErrPermanent
+	ErrFloodWait      = delivery.ErrFloodWait
+	ErrUnknownOutcome = delivery.ErrUnknownOutcome
+)
 
-// ErrPermanent identifies the fake permanent failure scenario.
-var ErrPermanent = errors.New("fake telegram permanent failure")
-
-// ErrFloodWait identifies FloodWaitError values.
-var ErrFloodWait = errors.New("fake telegram flood wait")
-
-// ErrUnknownOutcome identifies the fake failure which means the external
-// effect may already have happened.
-var ErrUnknownOutcome = errors.New("fake telegram outcome is unknown")
-
-// FloodWaitError is the fake rate-limit failure and carries a deterministic
-// retry-after duration.
-type FloodWaitError struct {
-	Duration time.Duration
-}
-
-func (failure *FloodWaitError) Error() string {
-	if failure == nil {
-		return ErrFloodWait.Error()
-	}
-	return fmt.Sprintf("%s: retry after %s", ErrFloodWait, failure.Duration)
-}
-
-func (failure *FloodWaitError) Unwrap() error {
-	return ErrFloodWait
-}
-
-// RetryAfter reports the duration supplied by the FloodWait step.
-func (failure *FloodWaitError) RetryAfter() time.Duration {
-	if failure == nil {
-		return 0
-	}
-	return failure.Duration
-}
+type FloodWaitError = delivery.FloodWaitError
 
 func wait(context context.Context, latency time.Duration) error {
 	if failure := context.Err(); failure != nil {
