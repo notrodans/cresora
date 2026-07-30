@@ -39,7 +39,7 @@ postgres_data/
 
 # OpenCode / Slim
 .opencode/
-.slim/deepwork/
+.slim/
 
 # Logs
 *.log
