@@ -2,14 +2,12 @@
 package console
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	slogger "log/slog"
 	"net/http"
 	"net/url"
@@ -43,32 +41,8 @@ type Handler struct {
 	publicOrigin *url.URL
 }
 
-// New returns an independent chi router for the operator-scoped mailing
-// console. The modern form is:
-//
-//	New(createDraft, queue, dashboard, provider, publicOrigin[, logger])
-//
-// A service form is retained for transport-level callers:
-//
-//	New(service, provider, publicOrigin[, logger])
-func New(first any, arguments ...any) chi.Router {
-	createDraft, queue, dashboard, provider, publicOrigin, logger := newDependencies(first, arguments...)
-	router := chi.NewRouter()
-	Register(router, createDraft, queue, dashboard, provider, publicOrigin, logger)
-	return router
-}
-
 // Register adds the mailing console routes to an existing chi router.
 func Register(router chi.Router, createDraft commands.CreateDraft, queue commands.Queue, dashboard requests.Dashboard, provider principal.Provider, publicOrigin string, logger *slogger.Logger) {
-	if router == nil {
-		panic("register mailing console routes on nil router")
-	}
-	if logger == nil {
-		panic("register mailing console routes without logger")
-	}
-	if provider == nil {
-		panic("register mailing console routes without principal provider")
-	}
 	origin, failure := parsePublicOrigin(publicOrigin)
 	if failure != nil {
 		panic(fmt.Sprintf("create mailing console handler with invalid public origin: %v", failure))
@@ -97,108 +71,6 @@ func Register(router chi.Router, createDraft commands.CreateDraft, queue command
 	router.Get("/console.js", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, assets, "console.js")
 	})
-}
-
-func newDependencies(first any, arguments ...any) (commands.CreateDraft, commands.Queue, requests.Dashboard, principal.Provider, string, *slogger.Logger) {
-	var (
-		createDraft  commands.CreateDraft
-		queue        commands.Queue
-		dashboard    requests.Dashboard
-		provider     principal.Provider
-		publicOrigin string
-		logger       = slogger.Default()
-		ok           bool
-	)
-	if len(arguments) == 2 || len(arguments) == 3 {
-		legacy, serviceOK := first.(*application.Service)
-		if !serviceOK {
-			panic("create mailing console handler without service")
-		}
-		provider, ok = arguments[0].(principal.Provider)
-		if !ok {
-			panic("create mailing console handler without principal provider")
-		}
-		publicOrigin, ok = arguments[1].(string)
-		if !ok {
-			panic("create mailing console handler without public origin")
-		}
-		if len(arguments) == 3 {
-			logger, ok = arguments[2].(*slogger.Logger)
-			if !ok {
-				panic("create mailing console handler without logger")
-			}
-		}
-		return legacyCreateDraftCommand{operation: legacy}, legacyQueueCommand{operation: legacy}, legacyDashboardRequest{operation: legacy}, provider, publicOrigin, logger
-	}
-	if len(arguments) != 4 && len(arguments) != 5 {
-		panic("create mailing console handler with invalid arguments")
-	}
-	queue, ok = arguments[0].(commands.Queue)
-	if !ok {
-		panic("create mailing console handler without queue command")
-	}
-	dashboard, ok = arguments[1].(requests.Dashboard)
-	if !ok {
-		panic("create mailing console handler without dashboard request")
-	}
-	provider, ok = arguments[2].(principal.Provider)
-	if !ok {
-		panic("create mailing console handler without principal provider")
-	}
-	publicOrigin, ok = arguments[3].(string)
-	if !ok {
-		panic("create mailing console handler without public origin")
-	}
-	if len(arguments) == 5 {
-		logger, ok = arguments[4].(*slogger.Logger)
-		if !ok {
-			panic("create mailing console handler without logger")
-		}
-	}
-	createDraft, ok = first.(commands.CreateDraft)
-	if !ok {
-		panic("create mailing console handler without create draft command")
-	}
-	return createDraft, queue, dashboard, provider, publicOrigin, logger
-}
-
-// These adapters keep the service form of New useful for transport-level
-// callers while new composition roots use Register with explicit CQS ports.
-// They are intentionally outside Handler, which only knows the ports.
-type legacyCreateDraftOperation interface {
-	CreateDraft(context.Context, applicationactor.Actor, application.CreateDraftInput) (mailing.ID, error)
-}
-
-type legacyQueueOperation interface {
-	Queue(context.Context, applicationactor.Actor, uuid.UUID) error
-}
-
-type legacyDashboardOperation interface {
-	Dashboard(context.Context, applicationactor.Actor) (application.Dashboard, error)
-}
-
-type legacyCreateDraftCommand struct {
-	operation legacyCreateDraftOperation
-}
-
-func (command legacyCreateDraftCommand) Execute(context context.Context, actor applicationactor.Actor, input application.CreateDraftInput) (mailing.ID, error) {
-	return command.operation.CreateDraft(context, actor, input)
-}
-
-type legacyQueueCommand struct {
-	operation legacyQueueOperation
-}
-
-func (command legacyQueueCommand) Execute(context context.Context, actor applicationactor.Actor, mailingID uuid.UUID) error {
-	return command.operation.Queue(context, actor, mailingID)
-}
-
-type legacyDashboardRequest struct {
-	operation legacyDashboardOperation
-}
-
-func (request legacyDashboardRequest) Execute(context context.Context, actor applicationactor.Actor) (application.Dashboard, error) {
-	return request.operation.Dashboard(context, actor)
 }
 
 type pageData struct {
@@ -573,13 +445,11 @@ func (h *Handler) csrfToken(w http.ResponseWriter, r *http.Request) string {
 	if c, err := r.Cookie(csrfCookie); err == nil && c.Value != "" {
 		return c.Value
 	}
-	// Аллоцируем срез из 32 байтов
-	// Он будет наполнен случайными криптографическими данными
-	// 32 байта - это 256 случайности
+	// Allocate a 32-byte buffer for a 256-bit CSRF token.
 	b := make([]byte, 32)
-	// Считываем 32 криптографически случайных байта из rand.Reader в буфер b.
-	// rand.Reader — это источник данных. Мы говорим ему: "Дай мне 32 случайных байта." и эти байты мы помещаем в буфер (b)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+	// crypto/rand.Read uses the operating system's cryptographically secure
+	// source and fills the complete buffer.
+	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
 	token := fmt.Sprintf("%x", b)

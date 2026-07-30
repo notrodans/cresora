@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -128,7 +129,21 @@ func (operator *scopedHTTPOperatorMailings) Mailing(identity mailing.ID) mailing
 
 func newHandler(dependencies *testDependencies) http.Handler {
 	service, operatorID := newService(dependencies)
-	return New(&service, trustedProvider(operatorID), "http://example.test")
+	return registeredHandler(&service, trustedProvider(operatorID), "http://example.test")
+}
+
+func registeredHandler(service *mailingconsole.Service, provider principal.Provider, publicOrigin string) http.Handler {
+	router := chi.NewRouter()
+	Register(
+		router,
+		commands.NewCreateDraft(service),
+		commands.NewQueue(service),
+		requests.NewDashboard(service),
+		provider,
+		publicOrigin,
+		slog.Default(),
+	)
+	return router
 }
 
 func trustedProvider(operatorID uuid.UUID) principal.Provider {
@@ -228,20 +243,8 @@ func TestTwoOperatorHTTPConsoleDoesNotCrossScope(t *testing.T) {
 		operatorB: {accountID: accountB, mailingID: draftB, row: &fakeMailing{mailingID: draftB}},
 	}}
 	service := mailingconsole.NewService(projection, mailingTable)
-	handlerA := New(
-		commands.NewCreateDraft(&service),
-		commands.NewQueue(&service),
-		requests.NewDashboard(&service),
-		trustedProvider(operatorA),
-		"http://example.test",
-	)
-	handlerB := New(
-		commands.NewCreateDraft(&service),
-		commands.NewQueue(&service),
-		requests.NewDashboard(&service),
-		trustedProvider(operatorB),
-		"http://example.test",
-	)
+	handlerA := registeredHandler(&service, trustedProvider(operatorA), "http://example.test")
+	handlerB := registeredHandler(&service, trustedProvider(operatorB), "http://example.test")
 
 	cookieA, tokenA := dashboardResponse(t, handlerA)
 	cookieB, tokenB := dashboardResponse(t, handlerB)
@@ -313,7 +316,7 @@ func TestAuthenticatedConsoleCSRFAndOriginFailuresRecoverWithoutAction(t *testin
 	token := strings.Repeat("a", 43)
 	dependencies := &testDependencies{dashboard: testDashboard()}
 	service, _ := newService(dependencies)
-	handler := New(&service, validSessionProvider{actor: application.Actor{OperatorID: actor}, token: token}, "http://example.test")
+	handler := registeredHandler(&service, validSessionProvider{actor: application.Actor{OperatorID: actor}, token: token}, "http://example.test")
 	expectedCSRF, ok := operatorsessions.SessionCSRFToken(token)
 	if !ok {
 		t.Fatal("derive session CSRF")
@@ -471,7 +474,7 @@ func TestCSRFCookieUsesConfiguredOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, operatorID := newService(&testDependencies{dashboard: testDashboard()})
-			h := New(&service, trustedProvider(operatorID), test.origin)
+			h := registeredHandler(&service, trustedProvider(operatorID), test.origin)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://untrusted-host.test/", nil))
 			cookie := w.Result().Cookies()[0]
