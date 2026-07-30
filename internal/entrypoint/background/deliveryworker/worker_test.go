@@ -79,27 +79,41 @@ func TestWorkerClaimsWithOneCoordinatorAndNoPrefetch(t *testing.T) {
 	claims := &claimsStub{}
 	commands := &commandsStub{}
 	started := make(chan struct{}, executionCapacity)
+	// Содержит текущее количество одновременно работающих задач.
 	var running atomic.Int32
+	// Хранит максимальное количество одновременно выполнявшихся задач.
+	// Например, значения running менялись так: 0 -> 1 -> 2 -> 3 -> 4
+	// Тогда maximum должно стать равным 4.
 	var maximum atomic.Int32
-	for index := 0; index < executionCapacity; index++ {
+	for range executionCapacity {
 		task := &taskStub{}
 		task.execute = func(ctx context.Context, _ applicationdelivery.Command) error {
 			current := running.Add(1)
+			// Повторный цикл нужен из-за возможной гонки между горутинами
+			// Горутина A прочитала maximum = 2
+			// Горутина B изменила maximum на 3
+			// Горутина A пытается заменить 2 на 4
+			// CAS не срабатывает, потому что там уже 3
+			// Горутина A повторяет попытку
 			for {
 				old := maximum.Load()
-				if current <= old || maximum.CompareAndSwap(old, current) {
+				if current <= old || maximum.CompareAndSwap(old, current) { // CompareAndSwap установит current, только если значение всё ещё равно old.
 					break
 				}
 			}
 			started <- struct{}{}
+			// Блокируем пока воркер не отменит контест.
 			<-ctx.Done()
+			// Задача уменьшает счётчик и возвращает context.Canceled.
 			running.Add(-1)
 			return ctx.Err()
 		}
 		claims.tasks = append(claims.tasks, task)
 	}
+	// Используется в качестве одноразового сигнала.
 	claimFive := make(chan struct{})
 	claims.after = func(number int) {
+		// пятый Claim произошёл -> claimFive закрыт.
 		if number == executionCapacity+1 {
 			close(claimFive)
 		}

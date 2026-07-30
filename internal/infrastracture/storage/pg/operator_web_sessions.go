@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
@@ -21,19 +19,13 @@ const (
 	operatorWebSessionLimit            = 5
 )
 
-type operatorWebSessionDatabase interface {
-	Begin(context.Context) (pgx.Tx, error)
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
 var _ operatorsessions.SessionRepository = (*OperatorWebSessionStore)(nil)
 
 // OperatorWebSessionStore is the PostgreSQL implementation of opaque browser
 // sessions. Every security boundary in this adapter uses PostgreSQL's clock;
 // caller timestamps are not accepted.
 type OperatorWebSessionStore struct {
-	database operatorWebSessionDatabase
+	database *pgxpool.Pool
 }
 
 func NewOperatorWebSessionStore(database *pgxpool.Pool) *OperatorWebSessionStore {

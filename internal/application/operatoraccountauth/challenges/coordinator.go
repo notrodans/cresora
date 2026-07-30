@@ -382,9 +382,6 @@ func New(config Config) *Coordinator {
 // already running in bounded executor workers are allowed to finish on their
 // own. Stop is intentionally nonblocking.
 func (coordinator *Coordinator) Stop() {
-	if coordinator == nil {
-		return
-	}
 	coordinator.closeOnce.Do(func() {
 		coordinator.closeState()
 	})
@@ -402,9 +399,6 @@ func (coordinator *Coordinator) Close() {
 // expires. The context is only a bound for waiting; it cannot interrupt a
 // provider cleanup call which ignores its deadline.
 func (coordinator *Coordinator) Shutdown(ctx context.Context) error {
-	if coordinator == nil {
-		return nil
-	}
 	coordinator.Stop()
 	return coordinator.cleanupExecutor.waitForStop(ctx)
 }
@@ -474,13 +468,11 @@ func (coordinator *Coordinator) registerOperationLocked(record *challenge, cance
 // completeOperation removes a completed operation reference after its child
 // CancelFunc has been invoked by the caller. It is generation-safe so a late
 // provider return cannot delete a replacement record's operation.
-func (coordinator *Coordinator) completeOperation(requestID uuid.UUID, generation, operationID uint64, cancel context.CancelFunc) {
+func (coordinator *Coordinator) completeOperation(requestID uuid.UUID, generation, operationID uint64, _ context.CancelFunc) {
 	coordinator.mu.Lock()
 	record := coordinator.challenges[requestID]
 	if record != nil && record.generation == generation {
-		if _, ok := record.operations[operationID]; ok {
-			delete(record.operations, operationID)
-		}
+		delete(record.operations, operationID)
 	}
 	coordinator.mu.Unlock()
 }

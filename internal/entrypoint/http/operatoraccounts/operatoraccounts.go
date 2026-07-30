@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -698,7 +699,7 @@ func isLocalOriginHost(origin *url.URL) bool {
 
 func randomID(size int) string {
 	b := make([]byte, size)
-	rand.Read(b)
+	io.ReadFull(rand.Reader, b)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 func notice(code string) string {

@@ -269,5 +269,5 @@ const (
 	// for an unknown username and contains no live secret. The parameter
 	// equality test in this package must be kept with the immutable password
 	// defaults if those defaults are ever intentionally changed.
-	dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=1$QkJCQkJCQkJCQkJCQkJCQg$zcS15uZIKyLKK8fEVrDvkFnAJRpTIpduyDeW4MTQScQ"
+	dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=1$zoGxWL7tL2reGa8XjQF2DA$xnf4h+1sCPEWwN91YzLwwULY/1eukz/ky3Mj1lKJcyo"
 )

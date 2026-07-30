@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -27,13 +26,6 @@ const (
 	telegramSessionKeyIDMaxBytes = 128
 )
 
-// sessionDatabase is the narrow database contract used by the adapter. It
-// also makes envelope behavior unit-testable without a PostgreSQL dependency.
-type sessionDatabase interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
 var _ telegram.SessionStore = &telegramSessionStore{}
 
 // telegramSessionStore stores only the encrypted session envelope. The
@@ -41,7 +33,7 @@ var _ telegram.SessionStore = &telegramSessionStore{}
 // implemented yet, but every row records keyID so a future rotation can be
 // explicit rather than silently reusing an identifier.
 type telegramSessionStore struct {
-	database sessionDatabase
+	database *pgxpool.Pool
 	keyID    string
 	aead     cipher.AEAD
 }
@@ -58,7 +50,7 @@ func NewTelegramSessionStore(
 }
 
 func newTelegramSessionStore(
-	database sessionDatabase,
+	database *pgxpool.Pool,
 	keyID string,
 	key []byte,
 ) (telegram.SessionStore, error) {

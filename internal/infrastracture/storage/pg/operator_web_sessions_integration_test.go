@@ -36,7 +36,7 @@ func TestOperatorWebSessionStorePostgresSecurityBoundaries(t *testing.T) {
 
 	store := NewOperatorWebSessionStore(database)
 	hashes := make([][32]byte, 0, operatorWebSessionLimit+1)
-	for index := 0; index < operatorWebSessionLimit; index++ {
+	for index := range operatorWebSessionLimit {
 		hash := sha256.Sum256([]byte("operator-a-session-" + string(rune('a'+index))))
 		if _, failure = store.CreateSession(context, operatorA, operatorA.String(), canonicalOperatorCredentialPHC, hash[:]); failure != nil {
 			t.Fatalf("create session %d: %v", index, failure)

@@ -37,6 +37,7 @@ func TestOperatorCredentialStoreUsesOneAtomicUpsertAndRevokesTokens(t *testing.T
 		operatorID: uuid.New(),
 		username:   "admin",
 	}}
+	//go:ignore
 	store := &OperatorCredentialStore{database: database}
 	operator, err := store.BootstrapOrReset(context.Background(), "admin", canonicalOperatorCredentialPHC)
 	if err != nil {
