@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	application "github.com/notrodans/nebula-go/internal/application"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
 )
 
@@ -38,31 +39,27 @@ type Mailings interface {
 
 // Service provides transport-neutral mailing console operations.
 type Service struct {
-	operatorID uuid.UUID
-	console    Console
-	// TODO: Убрать когда в будущем появится аутентификация пользователей на базе JWT/OAuth
-	// Получать operatorMailing динамически
-	operatorMailing OperatorMailings
+	console  Console
+	mailings Mailings
 }
 
-// NewService creates an operator-scoped mailing console service.
-func NewService(operatorID uuid.UUID, console Console, mailings Mailings) Service {
-	validateServiceDependencies(operatorID, console, mailings)
-	operatorMailing := mailings.OwnedBy(operatorID)
-	if operatorMailing == nil {
-		panic("create mailing console service without operator mailings")
-	}
+// NewService creates a stateless mailing console service. Operator ownership
+// is selected for every operation from its explicit actor.
+func NewService(console Console, mailings Mailings) Service {
+	validateServiceDependencies(console, mailings)
 	return Service{
-		operatorID:      operatorID,
-		console:         console,
-		operatorMailing: operatorMailing,
+		console:  console,
+		mailings: mailings,
 	}
 }
 
 // Dashboard returns the operator's accounts, sendable dialogs, and mailings.
-func (service Service) Dashboard(context context.Context) (Dashboard, error) {
+func (service Service) Dashboard(context context.Context, actor application.Actor) (Dashboard, error) {
 	service.validateContext(context)
-	accounts, dialogs, privateDialogs, mailings, failure := service.console.Dashboard(context, service.operatorID)
+	if failure := validateActor(actor); failure != nil {
+		return Dashboard{}, failure
+	}
+	accounts, dialogs, privateDialogs, mailings, failure := service.console.Dashboard(context, actor.OperatorID)
 	if failure != nil {
 		return Dashboard{}, fmt.Errorf("load mailing console dashboard: %w", failure)
 	}
@@ -75,9 +72,12 @@ func (service Service) Dashboard(context context.Context) (Dashboard, error) {
 }
 
 // ListAccounts returns the operator's Telegram accounts.
-func (service Service) ListAccounts(context context.Context) ([]Account, error) {
+func (service Service) ListAccounts(context context.Context, actor application.Actor) ([]Account, error) {
 	service.validateContext(context)
-	accounts, _, _, _, failure := service.console.Dashboard(context, service.operatorID)
+	if failure := validateActor(actor); failure != nil {
+		return nil, failure
+	}
+	accounts, _, _, _, failure := service.console.Dashboard(context, actor.OperatorID)
 	if failure != nil {
 		return nil, fmt.Errorf("list mailing console accounts: %w", failure)
 	}
@@ -85,20 +85,24 @@ func (service Service) ListAccounts(context context.Context) ([]Account, error) 
 }
 
 // Accounts is a short alias for ListAccounts.
-func (service Service) Accounts(context context.Context) ([]Account, error) {
-	return service.ListAccounts(context)
+func (service Service) Accounts(context context.Context, actor application.Actor) ([]Account, error) {
+	return service.ListAccounts(context, actor)
 }
 
 // ListSharedDialogs returns sendable shared dialogs for one selected account.
 func (service Service) ListSharedDialogs(
 	context context.Context,
+	actor application.Actor,
 	accountID uuid.UUID,
 ) ([]SharedDialog, error) {
 	service.validateContext(context)
+	if failure := validateActor(actor); failure != nil {
+		return nil, failure
+	}
 	if accountID == uuid.Nil {
 		return nil, fmt.Errorf("%w: selected account is required", ErrInvalidInput)
 	}
-	_, dialogs, _, _, failure := service.console.Dashboard(context, service.operatorID)
+	_, dialogs, _, _, failure := service.console.Dashboard(context, actor.OperatorID)
 	if failure != nil {
 		return nil, fmt.Errorf("list mailing console shared dialogs: %w", failure)
 	}
@@ -114,15 +118,19 @@ func (service Service) ListSharedDialogs(
 // SharedDialogs is a short alias for ListSharedDialogs.
 func (service Service) SharedDialogs(
 	context context.Context,
+	actor application.Actor,
 	accountID uuid.UUID,
 ) ([]SharedDialog, error) {
-	return service.ListSharedDialogs(context, accountID)
+	return service.ListSharedDialogs(context, actor, accountID)
 }
 
-// ListMailings returns summaries for the configured operator.
-func (service Service) ListMailings(context context.Context) ([]MailingSummary, error) {
+// ListMailings returns summaries for the actor's operator.
+func (service Service) ListMailings(context context.Context, actor application.Actor) ([]MailingSummary, error) {
 	service.validateContext(context)
-	_, _, _, mailings, failure := service.console.Dashboard(context, service.operatorID)
+	if failure := validateActor(actor); failure != nil {
+		return nil, failure
+	}
+	_, _, _, mailings, failure := service.console.Dashboard(context, actor.OperatorID)
 	if failure != nil {
 		return nil, fmt.Errorf("list mailing console mailings: %w", failure)
 	}
@@ -130,48 +138,66 @@ func (service Service) ListMailings(context context.Context) ([]MailingSummary, 
 }
 
 // Mailings is a short alias for ListMailings.
-func (service Service) Mailings(context context.Context) ([]MailingSummary, error) {
-	return service.ListMailings(context)
+func (service Service) Mailings(context context.Context, actor application.Actor) ([]MailingSummary, error) {
+	return service.ListMailings(context, actor)
 }
 
 // CreateDraft validates and persists a new operator-owned draft.
 func (service Service) CreateDraft(
 	context context.Context,
+	actor application.Actor,
 	input CreateDraftInput,
 ) (mailing.ID, error) {
 	service.validateContext(context)
+	if failure := validateActor(actor); failure != nil {
+		return mailing.ID{}, failure
+	}
 	validated, failure := validateCreateDraftInput(input)
 	if failure != nil {
 		return mailing.ID{}, failure
 	}
-	draft, failure := service.operatorMailing.CreateDraft(context, validated)
+	operatorMailings, failure := service.operatorMailings(actor)
+	if failure != nil {
+		return mailing.ID{}, failure
+	}
+	draft, failure := operatorMailings.CreateDraft(context, validated)
 	if failure != nil {
 		return mailing.ID{}, fmt.Errorf("create mailing console draft: %w", failure)
 	}
 	return draft, nil
 }
 
-// VerifyOperator confirms that the configured operator exists before serving
-// the console.
-func (service Service) VerifyOperator(context context.Context) error {
+// VerifyOperator confirms that the actor's operator exists before serving the
+// console.
+func (service Service) VerifyOperator(context context.Context, actor application.Actor) error {
 	service.validateContext(context)
-	exists, failure := service.console.OperatorExists(context, service.operatorID)
+	if failure := validateActor(actor); failure != nil {
+		return failure
+	}
+	exists, failure := service.console.OperatorExists(context, actor.OperatorID)
 	if failure != nil {
 		return fmt.Errorf("verify mailing console operator: %w", failure)
 	}
 	if !exists {
-		return fmt.Errorf("%w: configured operator %s does not exist", ErrNotFound, service.operatorID)
+		return fmt.Errorf("%w: operator does not exist", ErrNotFound)
 	}
 	return nil
 }
 
 // Queue queues one mailing through the operator-scoped mailing row.
-func (service Service) Queue(context context.Context, mailingID uuid.UUID) error {
+func (service Service) Queue(context context.Context, actor application.Actor, mailingID uuid.UUID) error {
 	service.validateContext(context)
+	if failure := validateActor(actor); failure != nil {
+		return failure
+	}
 	if mailingID == uuid.Nil {
 		return fmt.Errorf("%w: mailing is required", ErrInvalidInput)
 	}
-	if failure := service.operatorMailing.Mailing(mailing.Identity(mailingID)).Queue(context); failure != nil {
+	operatorMailings, failure := service.operatorMailings(actor)
+	if failure != nil {
+		return failure
+	}
+	if failure = operatorMailings.Mailing(mailing.Identity(mailingID)).Queue(context); failure != nil {
 		return fmt.Errorf("queue mailing console mailing %s: %w", mailingID, translateLifecycleFailure(failure))
 	}
 	return nil
@@ -181,27 +207,36 @@ func (service Service) validateContext(context context.Context) {
 	if context == nil {
 		panic("use mailing console service without context")
 	}
-	if service.operatorID == uuid.Nil {
-		panic("use mailing console service without operator identity")
-	}
 	if service.console == nil {
 		panic("use mailing console service without console projection")
 	}
-	if service.operatorMailing == nil {
-		panic("use mailing console service without operator mailings")
+	if service.mailings == nil {
+		panic("use mailing console service without mailing table")
 	}
 }
 
-func validateServiceDependencies(operatorID uuid.UUID, console Console, mailings Mailings) {
-	if operatorID == uuid.Nil {
-		panic("create mailing console service without operator identity")
-	}
+func validateServiceDependencies(console Console, mailings Mailings) {
 	if console == nil {
 		panic("create mailing console service without console projection")
 	}
 	if mailings == nil {
 		panic("create mailing console service without mailing table")
 	}
+}
+
+func validateActor(actor application.Actor) error {
+	if actor.OperatorID == uuid.Nil {
+		return fmt.Errorf("%w: operator identity is required", ErrInvalidInput)
+	}
+	return nil
+}
+
+func (service Service) operatorMailings(actor application.Actor) (OperatorMailings, error) {
+	operatorMailings := service.mailings.OwnedBy(actor.OperatorID)
+	if operatorMailings == nil {
+		return nil, fmt.Errorf("%w: operator mailings are unavailable", ErrNotFound)
+	}
+	return operatorMailings, nil
 }
 
 func translateLifecycleFailure(failure error) error {

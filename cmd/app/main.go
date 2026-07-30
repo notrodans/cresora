@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/notrodans/nebula-go/config"
+	application "github.com/notrodans/nebula-go/internal/application"
 	mailingconsolecommands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
 	operatoraccountauthmock "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/mock"
 	mailingconsolerequests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
@@ -28,6 +29,7 @@ import (
 	deliveryreconciler "github.com/notrodans/nebula-go/internal/entrypoint/background/deliveryreconciler"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/console"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/operatoraccounts"
+	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
 	"github.com/notrodans/nebula-go/internal/infrastracture/logger/slog"
 	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg"
 	claims "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/claims"
@@ -117,8 +119,10 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	})
 
 	// Создаём сервис для работы с таблицами рассылок.
-	service := mailingconsole.NewService(cfg.OperatorID, mailings.NewMailingConsole(database), mailings.NewMailings(database))
-	if failure = service.VerifyOperator(rootContext); failure != nil {
+	service := mailingconsole.NewService(mailings.NewMailingConsole(database), mailings.NewMailings(database))
+	staticActor := application.Actor{OperatorID: cfg.OperatorID}
+	principalProvider := principal.Static(cfg.OperatorID)
+	if failure = service.VerifyOperator(rootContext, staticActor); failure != nil {
 		return fmt.Errorf("verify configured operator: %w", failure)
 	}
 	// Команда для создания драфта рассылки
@@ -143,8 +147,9 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		accountAuthentication.StartQR,
 		accountAuthentication.RefreshQR,
 		accountAuthentication.Status,
+		principalProvider,
 	)
-	console.Register(router, createDraft, queueMailing, dashboard, cfg.PublicOrigin.String(), log)
+	console.Register(router, createDraft, queueMailing, dashboard, principalProvider, cfg.PublicOrigin.String(), log)
 
 	// Инициализируем HTTP сервер
 	server := &http.Server{

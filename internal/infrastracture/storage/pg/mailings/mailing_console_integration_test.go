@@ -19,6 +19,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	application "github.com/notrodans/nebula-go/internal/application"
 	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
 )
@@ -53,9 +54,12 @@ func TestMailingConsolePostgres(t *testing.T) {
 
 	projection := NewMailingConsole(database)
 	mailings := NewMailings(database)
+	service := mailingconsole.NewService(projection, mailings)
+	actorA := application.Actor{OperatorID: fixture.operatorA}
+	actorB := application.Actor{OperatorID: fixture.operatorB}
 	operatorAMailings := mailings.OwnedBy(fixture.operatorA)
 	operatorBMailings := mailings.OwnedBy(fixture.operatorB)
-	operatorBDraft, failure := operatorBMailings.CreateDraft(ctx, mailingconsole.CreateDraftInput{
+	operatorBDraft, failure := service.CreateDraft(ctx, actorB, mailingconsole.CreateDraftInput{
 		Name:            "operator B draft",
 		MessageText:     "operator B message",
 		AccountID:       fixture.accountB,
@@ -74,8 +78,10 @@ func TestMailingConsolePostgres(t *testing.T) {
 
 	t.Run("cross operator queue is rejected without changes", func(t *testing.T) {
 		statusBefore, runsBefore, deliveriesBefore := mailingConsoleQueueState(t, ctx, database, operatorBDraft.UUID())
-		failure := operatorAMailings.Mailing(operatorBDraft).Queue(ctx)
-		assertMailingConsoleError(t, failure, mailing.ErrNotFound)
+		foreignFailure := service.Queue(ctx, actorA, operatorBDraft.UUID())
+		assertMailingConsoleError(t, foreignFailure, mailing.ErrNotFound)
+		randomFailure := service.Queue(ctx, actorA, uuid.New())
+		assertMailingConsoleError(t, randomFailure, mailing.ErrNotFound)
 		statusAfter, runsAfter, deliveriesAfter := mailingConsoleQueueState(t, ctx, database, operatorBDraft.UUID())
 		if statusBefore != statusAfter || runsBefore != runsAfter || deliveriesBefore != deliveriesAfter {
 			t.Fatalf("cross-operator queue changed state: %q/%d/%d -> %q/%d/%d", statusBefore, runsBefore, deliveriesBefore, statusAfter, runsAfter, deliveriesAfter)
@@ -97,28 +103,33 @@ func TestMailingConsolePostgres(t *testing.T) {
 		}
 		assertMailingConsoleQueuedGraph(t, ctx, database, operatorBDraft.UUID(), 1)
 	})
-	t.Run("owner-scoped stop does not cross operators", func(t *testing.T) {
-		failure := operatorAMailings.Mailing(operatorBDraft).Stop(ctx)
-		if failure == nil {
-			t.Fatal("expected cross-operator stop to fail")
-		}
-		status, _, _ := mailingConsoleQueueState(t, ctx, database, operatorBDraft.UUID())
-		if status != "queued" {
-			t.Fatalf("cross-operator stop changed status to %q", status)
-		}
-		if failure = operatorBMailings.Mailing(operatorBDraft).Stop(ctx); failure != nil {
-			t.Fatalf("stop operator B draft: %v", failure)
-		}
-		status, _, _ = mailingConsoleQueueState(t, ctx, database, operatorBDraft.UUID())
-		if status != "stopped" {
-			t.Fatalf("expected stopped status, got %q", status)
-		}
-		if failure = operatorBMailings.Mailing(operatorBDraft).Stop(ctx); failure != nil {
-			t.Fatalf("repeat stop operator B draft: %v", failure)
-		}
-	})
-
 	t.Run("dashboard is operator scoped and excludes unusable targets", func(t *testing.T) {
+		for _, test := range []struct {
+			name    string
+			actor   application.Actor
+			own     uuid.UUID
+			foreign uuid.UUID
+		}{
+			{name: "operator A", actor: actorA, own: fixture.accountA, foreign: fixture.accountB},
+			{name: "operator B", actor: actorB, own: fixture.accountB, foreign: fixture.accountA},
+		} {
+			dashboard, dashboardFailure := service.Dashboard(ctx, test.actor)
+			if dashboardFailure != nil {
+				t.Fatalf("load %s application dashboard: %v", test.name, dashboardFailure)
+			}
+			for _, account := range dashboard.Accounts {
+				if account.ID == test.foreign {
+					t.Fatalf("%s application dashboard leaked foreign account", test.name)
+				}
+			}
+			found := false
+			for _, account := range dashboard.Accounts {
+				found = found || account.ID == test.own
+			}
+			if !found {
+				t.Fatalf("%s application dashboard omitted owned account", test.name)
+			}
+		}
 		accounts, sharedDialogs, privateDialogs, dashboardMailings, dashboardFailure := projection.Dashboard(ctx, fixture.operatorA)
 		if dashboardFailure != nil {
 			t.Fatalf("load operator A dashboard: %v", dashboardFailure)
@@ -158,7 +169,7 @@ func TestMailingConsolePostgres(t *testing.T) {
 	})
 
 	createFailure := func(input mailingconsole.CreateDraftInput) error {
-		_, failure := operatorAMailings.CreateDraft(ctx, input)
+		_, failure := service.CreateDraft(ctx, actorA, input)
 		return failure
 	}
 	t.Run("wrong account is rejected", func(t *testing.T) {

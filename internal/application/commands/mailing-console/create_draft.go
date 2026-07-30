@@ -3,13 +3,14 @@ package mailingconsole
 import (
 	"context"
 
+	application "github.com/notrodans/nebula-go/internal/application"
 	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
 )
 
 // CreateDraft creates a new mailing draft.
 type CreateDraft interface {
-	Execute(context.Context, mailingconsole.CreateDraftInput) (mailing.ID, error)
+	Execute(context.Context, application.Actor, mailingconsole.CreateDraftInput) (mailing.ID, error)
 }
 
 type createDraftCommand struct {
@@ -24,6 +25,6 @@ func NewCreateDraft(service *mailingconsole.Service) CreateDraft {
 	return &createDraftCommand{service: service}
 }
 
-func (command *createDraftCommand) Execute(context context.Context, input mailingconsole.CreateDraftInput) (mailing.ID, error) {
-	return command.service.CreateDraft(context, input)
+func (command *createDraftCommand) Execute(context context.Context, actor application.Actor, input mailingconsole.CreateDraftInput) (mailing.ID, error) {
+	return command.service.CreateDraft(context, actor, input)
 }

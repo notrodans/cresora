@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	commands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
+	requests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
 	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
 )
 
 type testDependencies struct {
@@ -63,19 +66,70 @@ func (f *fakeOperatorMailings) CreateDraft(_ context.Context, input mailingconso
 func (f *fakeOperatorMailings) Mailing(mailing.ID) mailing.Mailing { return f.row }
 
 type fakeMailing struct {
-	queueErr error
+	mailingID uuid.UUID
+	queueErr  error
 }
 
 func (f *fakeMailing) Queue(context.Context) error { return f.queueErr }
 
 func (f *fakeMailing) Stop(context.Context) error { return nil }
 
-func newHandler(dependencies *testDependencies) http.Handler {
-	service := newService(dependencies)
-	return New(&service, "http://example.test")
+type scopedHTTPConsole struct {
+	dashboards map[uuid.UUID]mailingconsole.Dashboard
 }
 
-func newService(dependencies *testDependencies) mailingconsole.Service {
+func (projection *scopedHTTPConsole) OperatorExists(_ context.Context, operatorID uuid.UUID) (bool, error) {
+	_, exists := projection.dashboards[operatorID]
+	return exists, nil
+}
+
+func (projection *scopedHTTPConsole) Dashboard(_ context.Context, operatorID uuid.UUID) ([]mailingconsole.Account, []mailingconsole.SharedDialog, []mailingconsole.PrivateDialog, []mailingconsole.MailingSummary, error) {
+	dashboard, exists := projection.dashboards[operatorID]
+	if !exists {
+		return nil, nil, nil, nil, mailingconsole.ErrNotFound
+	}
+	return dashboard.Accounts, dashboard.SharedDialogs, dashboard.PrivateDialogs, dashboard.Mailings, nil
+}
+
+type scopedHTTPMailings struct {
+	operators map[uuid.UUID]*scopedHTTPOperatorMailings
+}
+
+type scopedHTTPOperatorMailings struct {
+	accountID uuid.UUID
+	mailingID uuid.UUID
+	row       *fakeMailing
+}
+
+func (table *scopedHTTPMailings) OwnedBy(operatorID uuid.UUID) mailingconsole.OperatorMailings {
+	operator := table.operators[operatorID]
+	if operator == nil {
+		return nil
+	}
+	return operator
+}
+
+func (operator *scopedHTTPOperatorMailings) CreateDraft(_ context.Context, input mailingconsole.CreateDraftInput) (mailing.ID, error) {
+	if input.AccountID != operator.accountID {
+		return mailing.ID{}, mailingconsole.ErrNotFound
+	}
+	return mailing.Identity(operator.mailingID), nil
+}
+
+func (operator *scopedHTTPOperatorMailings) Mailing(identity mailing.ID) mailing.Mailing {
+	if identity.UUID() != operator.mailingID {
+		return &fakeMailing{mailingID: identity.UUID(), queueErr: mailing.ErrNotFound}
+	}
+	return operator.row
+}
+
+func newHandler(dependencies *testDependencies) http.Handler {
+	service, operatorID := newService(dependencies)
+	return New(&service, principal.Static(operatorID), "http://example.test")
+}
+
+func newService(dependencies *testDependencies) (mailingconsole.Service, uuid.UUID) {
+	operatorID := uuid.New()
 	projection := &fakeConsole{
 		dashboard:      dependencies.dashboard,
 		operatorExists: dependencies.operatorExists,
@@ -85,7 +139,7 @@ func newService(dependencies *testDependencies) mailingconsole.Service {
 		createErr: dependencies.createErr,
 		row:       &fakeMailing{queueErr: dependencies.queueErr},
 	}
-	return mailingconsole.NewService(uuid.New(), projection, &fakeMailings{scoped: scoped})
+	return mailingconsole.NewService(projection, &fakeMailings{scoped: scoped}), operatorID
 }
 
 func dashboardResponse(t *testing.T, handler http.Handler) (*http.Cookie, string) {
@@ -132,6 +186,77 @@ func TestDashboardEscapesTemplateValues(t *testing.T) {
 	newHandler(repo).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://example.test/", nil))
 	if strings.Contains(response.Body.String(), "<script>alert") || !strings.Contains(response.Body.String(), "&lt;script&gt;") {
 		t.Fatal("template value was not escaped")
+	}
+}
+
+func TestTwoOperatorHTTPConsoleDoesNotCrossScope(t *testing.T) {
+	operatorA, operatorB := uuid.New(), uuid.New()
+	accountA, accountB := uuid.New(), uuid.New()
+	dialogA, dialogB := uuid.New(), uuid.New()
+	draftA, draftB := uuid.New(), uuid.New()
+	projection := &scopedHTTPConsole{dashboards: map[uuid.UUID]mailingconsole.Dashboard{
+		operatorA: {Accounts: []mailingconsole.Account{{ID: accountA}}, SharedDialogs: []mailingconsole.SharedDialog{{ID: dialogA, AccountID: accountA}}, Mailings: []mailingconsole.MailingSummary{{ID: draftA, Status: "draft"}}},
+		operatorB: {Accounts: []mailingconsole.Account{{ID: accountB}}, SharedDialogs: []mailingconsole.SharedDialog{{ID: dialogB, AccountID: accountB}}, Mailings: []mailingconsole.MailingSummary{{ID: draftB, Status: "draft"}}},
+	}}
+	mailingTable := &scopedHTTPMailings{operators: map[uuid.UUID]*scopedHTTPOperatorMailings{
+		operatorA: {accountID: accountA, mailingID: draftA, row: &fakeMailing{mailingID: draftA}},
+		operatorB: {accountID: accountB, mailingID: draftB, row: &fakeMailing{mailingID: draftB}},
+	}}
+	service := mailingconsole.NewService(projection, mailingTable)
+	handlerA := New(
+		commands.NewCreateDraft(&service),
+		commands.NewQueue(&service),
+		requests.NewDashboard(&service),
+		principal.Static(operatorA),
+		"http://example.test",
+	)
+	handlerB := New(
+		commands.NewCreateDraft(&service),
+		commands.NewQueue(&service),
+		requests.NewDashboard(&service),
+		principal.Static(operatorB),
+		"http://example.test",
+	)
+
+	cookieA, tokenA := dashboardResponse(t, handlerA)
+	cookieB, tokenB := dashboardResponse(t, handlerB)
+	for _, test := range []struct {
+		name       string
+		handler    http.Handler
+		own, other uuid.UUID
+	}{
+		{name: "operator A", handler: handlerA, own: accountA, other: accountB},
+		{name: "operator B", handler: handlerB, own: accountB, other: accountA},
+	} {
+		t.Run(test.name+" dashboard", func(t *testing.T) {
+			response := httptest.NewRecorder()
+			test.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://example.test/", nil))
+			body := response.Body.String()
+			if !strings.Contains(body, test.own.String()) || strings.Contains(body, test.other.String()) {
+				t.Fatalf("dashboard leaked account: %s", body)
+			}
+		})
+	}
+	if response := postForm(t, handlerA, "/mailings", url.Values{
+		"name": {"foreign"}, "message": {"message"}, "account_id": {accountB.String()}, "shared_dialog_id": {dialogB.String()},
+	}, cookieA, tokenA); response.Code != http.StatusNotFound {
+		t.Fatalf("foreign account create: expected 404, got %d", response.Code)
+	}
+	foreignQueue := postForm(t, handlerA, "/mailings/"+draftB.String()+"/queue", nil, cookieA, tokenA)
+	if foreignQueue.Code != http.StatusNotFound {
+		t.Fatalf("foreign queue: expected 404, got %d", foreignQueue.Code)
+	}
+	randomQueue := postForm(t, handlerA, "/mailings/"+uuid.NewString()+"/queue", nil, cookieA, tokenA)
+	if randomQueue.Code != foreignQueue.Code {
+		t.Fatalf("foreign and random queue responses differ: foreign=%d random=%d", foreignQueue.Code, randomQueue.Code)
+	}
+	if response := postForm(t, handlerB, "/mailings", url.Values{
+		"name": {"owned"}, "message": {"message"}, "account_id": {accountB.String()}, "shared_dialog_id": {dialogB.String()},
+	}, cookieB, tokenB); response.Code != http.StatusSeeOther {
+		t.Fatalf("owned create: expected redirect, got %d", response.Code)
+	}
+	if response := postForm(t, handlerB, "/mailings/"+draftB.String()+"/queue", nil, cookieB, tokenB); response.Code != http.StatusSeeOther {
+		t.Fatalf("owned queue: expected redirect, got %d", response.Code)
 	}
 }
 
@@ -275,8 +400,8 @@ func TestCSRFCookieUsesConfiguredOrigin(t *testing.T) {
 		{name: "https", origin: "https://example.test", secure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service := newService(&testDependencies{dashboard: testDashboard()})
-			h := New(&service, test.origin)
+			service, operatorID := newService(&testDependencies{dashboard: testDashboard()})
+			h := New(&service, principal.Static(operatorID), test.origin)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://untrusted-host.test/", nil))
 			cookie := w.Result().Cookies()[0]
