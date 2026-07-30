@@ -8,6 +8,8 @@ require (
 	github.com/ogen-go/ogen v1.23.0
 	github.com/pressly/goose v2.7.0+incompatible
 	go.opentelemetry.io/otel/metric v1.44.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -108,7 +110,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260718201538-764159d718ef // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect

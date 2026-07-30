@@ -234,7 +234,7 @@ func createTelegramSessionFixture(context context.Context, database *pgxpool.Poo
 		return fixture, err
 	}
 	defer transaction.Rollback(context)
-	if _, err := transaction.Exec(context, `INSERT INTO operators (id, username, password) VALUES ($1, $2, 'session-fixture-password'), ($3, $4, 'session-fixture-password')`, fixture.operatorA, "session-fixture-"+fixture.operatorA.String()[:8], fixture.operatorB, "session-fixture-"+fixture.operatorB.String()[:8]); err != nil {
+	if _, err := transaction.Exec(context, `INSERT INTO operators (id, username) VALUES ($1, $2), ($3, $4)`, fixture.operatorA, "session-fixture-"+fixture.operatorA.String()[:8], fixture.operatorB, "session-fixture-"+fixture.operatorB.String()[:8]); err != nil {
 		return fixture, fmt.Errorf("insert session fixture operators: %w", err)
 	}
 	if _, err := transaction.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id) VALUES ($1, $2, '+12025550201', $3, 'Session A', 1), ($4, $5, '+12025550202', $6, 'Session B', 2)`, fixture.accountA, fixture.operatorA, "session-a-"+fixture.accountA.String()[:8], fixture.accountB, fixture.operatorB, "session-b-"+fixture.accountB.String()[:8]); err != nil {

@@ -134,6 +134,20 @@ func MustLoad(root string) *Config {
 	return &cfg
 }
 
+// LoadDatabaseURL loads only the database setting needed by maintenance
+// commands. It intentionally does not require web or operator runtime
+// configuration that is unrelated to local credential bootstrap.
+func LoadDatabaseURL(root string) (string, error) {
+	if err := loadEnvironmentFile(root); err != nil {
+		return "", err
+	}
+	databaseURL := os.Getenv("DB_URL")
+	if databaseURL == "" {
+		return "", fmt.Errorf("DB_URL is required")
+	}
+	return databaseURL, nil
+}
+
 func loadFrom(root string) (Config, error) {
 	if err := loadEnvironmentFile(root); err != nil {
 		return Config{}, err

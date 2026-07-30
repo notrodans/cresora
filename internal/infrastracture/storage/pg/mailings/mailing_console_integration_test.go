@@ -299,7 +299,7 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 		_, failure := transaction.Exec(context, query, arguments...)
 		return failure
 	}
-	if failure = exec(`INSERT INTO operators (id, username, password) VALUES ($1, $2, 'console-test-password'), ($3, $4, 'console-test-password')`, fixture.operatorA, "console-a-"+fixture.operatorA.String()[:8], fixture.operatorB, "console-b-"+fixture.operatorB.String()[:8]); failure != nil {
+	if failure = exec(`INSERT INTO operators (id, username) VALUES ($1, $2), ($3, $4)`, fixture.operatorA, "console-a-"+fixture.operatorA.String()[:8], fixture.operatorB, "console-b-"+fixture.operatorB.String()[:8]); failure != nil {
 		return fixture, fmt.Errorf("insert operators: %w", failure)
 	}
 	if failure = exec(

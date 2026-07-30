@@ -24,6 +24,8 @@ components:
     in: config/**
   api:
     in: api/**
+  migrations:
+    in: migrations/**
 
 deps:
   domain:
@@ -59,4 +61,6 @@ deps:
   configuration:
     anyVendorDeps: true
   api:
+    anyVendorDeps: true
+  migrations:
     anyVendorDeps: true
