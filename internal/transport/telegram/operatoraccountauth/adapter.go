@@ -5,6 +5,7 @@ package operatoraccountauth
 
 import (
 	"context"
+	"errors"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -14,6 +15,11 @@ import (
 	applicationroot "github.com/notrodans/nebula-go/internal/application"
 	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
 )
+
+// ErrLiveAuthenticationDisabled is the safe result of the intentionally inert
+// Telegram auth adapter. Live gotd auth, session writes, and account
+// persistence are not part of the challenge-coordinator composition yet.
+var ErrLiveAuthenticationDisabled = errors.New("live Telegram operator authentication is disabled")
 
 // Adapter owns the gotd client configuration needed by the eventual Telegram
 // authentication implementation. It performs no network calls and stores no
@@ -50,7 +56,7 @@ func (adapter Adapter) StartPhone(
 	applicationroot.Actor,
 	string,
 ) (application.PhoneChallenge, error) {
-	panic("TODO: use auth.Client.SendCode and map its delivery to PhoneChallenge")
+	return application.PhoneChallenge{}, ErrLiveAuthenticationDisabled
 }
 
 // VerifyPhone is the future phone-code authentication completion point. Wire
@@ -61,13 +67,13 @@ func (adapter Adapter) VerifyPhone(
 	uuid.UUID,
 	string,
 ) (application.Account, error) {
-	panic("TODO: use auth.Client.SignIn and persist no session until explicitly wired")
+	return application.Account{}, ErrLiveAuthenticationDisabled
 }
 
 // StartQR is the future QR authentication entry point. Wire qrlogin.NewQR,
 // followed by token export, here.
 func (adapter Adapter) StartQR(context.Context, applicationroot.Actor) (application.QRChallenge, error) {
-	panic("TODO: use qrlogin.NewQR and QR token export to build QRChallenge")
+	return application.QRChallenge{}, ErrLiveAuthenticationDisabled
 }
 
 // RefreshQR is the future QR token refresh point. Wire QR token export/import
@@ -77,11 +83,11 @@ func (adapter Adapter) RefreshQR(
 	applicationroot.Actor,
 	uuid.UUID,
 ) (application.QRChallenge, error) {
-	panic("TODO: use qrlogin QR token export/import to refresh QRChallenge")
+	return application.QRChallenge{}, ErrLiveAuthenticationDisabled
 }
 
 // Status is the future account projection endpoint. It intentionally does not
 // read persistence in this scaffold.
 func (adapter Adapter) Status(context.Context, applicationroot.Actor) (application.Status, error) {
-	panic("TODO: load operator_accounts display rows and in-progress auth challenges")
+	return application.Status{}, ErrLiveAuthenticationDisabled
 }
