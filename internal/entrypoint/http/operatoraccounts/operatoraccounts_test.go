@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	application "github.com/notrodans/nebula-go/internal/application"
-	commands "github.com/notrodans/nebula-go/internal/application/commands/operator-account-auth"
-	common "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
-	authmock "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/mock"
-	requests "github.com/notrodans/nebula-go/internal/application/requests/operator-account-auth"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
+	application "github.com/notrodans/cresora/internal/application"
+	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
+	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	authmock "github.com/notrodans/cresora/internal/application/operatoraccountauth/mock"
+	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
+	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 )
 
 type testActorProvider struct {

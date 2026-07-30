@@ -21,8 +21,8 @@ import (
 
 	"github.com/google/uuid"
 
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
-	common "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
+	applicationroot "github.com/notrodans/cresora/internal/application"
+	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 )
 
 const (

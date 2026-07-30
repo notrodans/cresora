@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/invariants"
+	"github.com/notrodans/cresora/internal/infrastracture/storage/pg/invariants"
 )
 
 const (

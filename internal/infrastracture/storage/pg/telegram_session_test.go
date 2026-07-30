@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 func TestEncryptTelegramSessionRandomizesNonce(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-	application "github.com/notrodans/nebula-go/internal/application"
-	mailingconsole "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
+	application "github.com/notrodans/cresora/internal/application"
+	mailingconsole "github.com/notrodans/cresora/internal/application/services/mailingconsole"
 )
 
 // Queue places a mailing in the send queue.

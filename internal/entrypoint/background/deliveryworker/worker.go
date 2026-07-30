@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
 )
 
 const (

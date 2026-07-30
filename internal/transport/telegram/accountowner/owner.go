@@ -8,8 +8,8 @@ import (
 
 	gotdtelegram "github.com/gotd/td/telegram"
 
-	transporttelegram "github.com/notrodans/nebula-go/internal/transport/telegram"
-	"github.com/notrodans/nebula-go/internal/transport/telegram/gotdclient"
+	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/transport/telegram/gotdclient"
 )
 
 var (

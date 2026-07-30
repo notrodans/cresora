@@ -3,9 +3,9 @@ package mailingconsole
 import (
 	"context"
 
-	application "github.com/notrodans/nebula-go/internal/application"
-	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	application "github.com/notrodans/cresora/internal/application"
+	"github.com/notrodans/cresora/internal/application/services/mailingconsole"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 // CreateDraft creates a new mailing draft.

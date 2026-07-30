@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 var _ mailing.Mailing = pgMailing{}

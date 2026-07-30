@@ -5,7 +5,7 @@ import (
 
 	"github.com/gotd/td/tg"
 
-	transport "github.com/notrodans/nebula-go/internal/transport/telegram"
+	transport "github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 // Represents a Telegram channel as a delivery target.

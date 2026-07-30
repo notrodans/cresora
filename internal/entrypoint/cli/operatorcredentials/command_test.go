@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	application "github.com/notrodans/nebula-go/internal/application/operatorcredentials"
+	application "github.com/notrodans/cresora/internal/application/operatorcredentials"
 )
 
 type fakeUI struct {

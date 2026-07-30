@@ -449,7 +449,7 @@ components:
         type:
           type: string
           format: uri
-          example: https://nebula.dev/problems/mailing-state-conflict
+          example: https://cresora.dev/problems/mailing-state-conflict
         title:
           type: string
           example: Mailing state conflict

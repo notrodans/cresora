@@ -3,7 +3,7 @@ package telegram
 import (
 	"errors"
 	"github.com/gotd/td/tg"
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 // Представляет пользователя Telegram как цель доставки

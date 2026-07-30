@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/application/commands/delivery"
 )
 
 type Task interface {

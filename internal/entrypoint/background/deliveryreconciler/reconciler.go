@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
 )
 
 const DefaultInterval = time.Minute

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
+	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
 )
 
 const (

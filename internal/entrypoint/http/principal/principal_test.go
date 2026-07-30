@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	application "github.com/notrodans/nebula-go/internal/application"
+	application "github.com/notrodans/cresora/internal/application"
 )
 
 func TestProviderFuncMiddlewarePassesTrustedActor(t *testing.T) {

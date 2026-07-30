@@ -17,11 +17,11 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 const (
-	telegramSessionPurpose       = "nebula/telegram-session"
+	telegramSessionPurpose       = "cresora/telegram-session"
 	telegramSessionFormatVersion = 1
 	telegramSessionMaxBytes      = 1 << 20
 	telegramSessionKeyIDMaxBytes = 128

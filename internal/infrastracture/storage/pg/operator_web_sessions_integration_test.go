@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
+	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
 )
 
 func TestOperatorWebSessionStorePostgresSecurityBoundaries(t *testing.T) {

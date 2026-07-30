@@ -9,8 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/coordinates"
+	"github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/infrastracture/storage/pg/coordinates"
 )
 
 // Represents one leased PostgreSQL delivery task

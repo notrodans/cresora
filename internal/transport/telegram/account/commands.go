@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 // Provides account-specific Telegram APIs

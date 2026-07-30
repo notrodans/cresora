@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/application/commands/delivery"
 )
 
 // Routes tasks to supervised account actors

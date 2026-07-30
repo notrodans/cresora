@@ -19,18 +19,17 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	applicationactor "github.com/notrodans/nebula-go/internal/application"
-	commands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
-	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
-	requests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
-	application "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
-	"github.com/notrodans/nebula-go/internal/infrastracture/logger/slog"
+	applicationactor "github.com/notrodans/cresora/internal/application"
+	commands "github.com/notrodans/cresora/internal/application/commands/mailing-console"
+	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
+	requests "github.com/notrodans/cresora/internal/application/requests/mailing-console"
+	application "github.com/notrodans/cresora/internal/application/services/mailingconsole"
+	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
+	"github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 )
 
 const maxBody = 64 << 10
-const csrfCookie = "nebula_console_csrf"
+const csrfCookie = "cresora_console_csrf"
 
 //go:embed templates/index.html style.css console.js
 var assets embed.FS

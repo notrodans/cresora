@@ -20,14 +20,14 @@ import (
 	"github.com/pressly/goose/v3"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	"github.com/notrodans/nebula-go/internal/domain/message"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
-	pgclaims "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/claims"
-	pgdeliveries "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/deliveries"
-	pgmailings "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/mailings"
-	"github.com/notrodans/nebula-go/internal/infrastracture/transport/faketelegram"
+	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/message"
+	"github.com/notrodans/cresora/internal/domain/recipient"
+	pgclaims "github.com/notrodans/cresora/internal/infrastracture/storage/pg/claims"
+	pgdeliveries "github.com/notrodans/cresora/internal/infrastracture/storage/pg/deliveries"
+	pgmailings "github.com/notrodans/cresora/internal/infrastracture/storage/pg/mailings"
+	"github.com/notrodans/cresora/internal/infrastracture/transport/faketelegram"
 )
 
 const preDeliveryExecutionV2Migration int64 = 20260726100000

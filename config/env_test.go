@@ -247,7 +247,7 @@ func mustURL(t *testing.T, value string) url.URL {
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("ENV", string(Testing))
-	t.Setenv("DB_URL", "postgres://example.invalid/nebula")
+	t.Setenv("DB_URL", "postgres://example.invalid/cresora")
 	t.Setenv("OPERATOR_ID", "11111111-1111-4111-8111-111111111111")
 	t.Setenv("WEB_ADDR", "http://127.0.0.1:8080")
 	t.Setenv("PUBLIC_ORIGIN", "http://127.0.0.1:8080")

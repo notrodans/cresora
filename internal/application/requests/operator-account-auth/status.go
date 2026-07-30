@@ -3,8 +3,8 @@ package operatoraccountauth
 import (
 	"context"
 
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
-	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
+	applicationroot "github.com/notrodans/cresora/internal/application"
+	application "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 )
 
 // Status returns the operator account list and any in-progress authentication

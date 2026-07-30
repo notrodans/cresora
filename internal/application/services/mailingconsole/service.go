@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	application "github.com/notrodans/nebula-go/internal/application"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	application "github.com/notrodans/cresora/internal/application"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 var (

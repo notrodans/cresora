@@ -14,10 +14,10 @@ import (
 
 	"github.com/google/uuid"
 
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
-	commands "github.com/notrodans/nebula-go/internal/application/commands/operator-account-auth"
-	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
-	requests "github.com/notrodans/nebula-go/internal/application/requests/operator-account-auth"
+	applicationroot "github.com/notrodans/cresora/internal/application"
+	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
+	application "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 )
 
 const (

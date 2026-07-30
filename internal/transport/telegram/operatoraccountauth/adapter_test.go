@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
+	applicationroot "github.com/notrodans/cresora/internal/application"
 )
 
 func TestAdapterIsInertUntilLiveAuthenticationIsExplicitlyApproved(t *testing.T) {

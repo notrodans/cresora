@@ -13,7 +13,7 @@ import (
 	"github.com/gotd/td/session"
 	gotdtelegram "github.com/gotd/td/telegram"
 
-	transporttelegram "github.com/notrodans/nebula-go/internal/transport/telegram"
+	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 type sessionStoreStub struct {

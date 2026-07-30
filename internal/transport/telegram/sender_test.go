@@ -11,10 +11,10 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
-	delivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/message"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
-	telegram "github.com/notrodans/nebula-go/internal/transport/telegram"
+	delivery "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/message"
+	"github.com/notrodans/cresora/internal/domain/recipient"
+	telegram "github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 type senderAPI struct {

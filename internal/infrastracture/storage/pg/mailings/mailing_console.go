@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/application/services/mailingconsole"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 type privateTargetKey struct {

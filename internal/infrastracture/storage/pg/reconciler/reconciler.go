@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 const (

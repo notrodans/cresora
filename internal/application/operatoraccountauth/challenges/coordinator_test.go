@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
+	applicationroot "github.com/notrodans/cresora/internal/application"
 )
 
 type testClock struct {

@@ -3,10 +3,10 @@ package pg
 import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
-	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/coordinates"
+	"github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/recipient"
+	"github.com/notrodans/cresora/internal/infrastracture/storage/pg/coordinates"
 )
 
 // +--------------------------------------------------+

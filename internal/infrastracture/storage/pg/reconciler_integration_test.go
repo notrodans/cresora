@@ -10,11 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	pginvariants "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/invariants"
-	pgmailings "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/mailings"
-	pgreconciler "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/reconciler"
+	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	pginvariants "github.com/notrodans/cresora/internal/infrastracture/storage/pg/invariants"
+	pgmailings "github.com/notrodans/cresora/internal/infrastracture/storage/pg/mailings"
+	pgreconciler "github.com/notrodans/cresora/internal/infrastracture/storage/pg/reconciler"
 )
 
 func TestPostgreSQLDeliveryRunReconciliation(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
-	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
+	applicationroot "github.com/notrodans/cresora/internal/application"
+	application "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 )
 
 // StartPhone starts phone-code authentication for a normalized phone number.

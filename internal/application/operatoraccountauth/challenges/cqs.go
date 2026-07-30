@@ -4,10 +4,10 @@ import (
 	"context"
 	"github.com/google/uuid"
 
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
-	commands "github.com/notrodans/nebula-go/internal/application/commands/operator-account-auth"
-	common "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
-	requests "github.com/notrodans/nebula-go/internal/application/requests/operator-account-auth"
+	applicationroot "github.com/notrodans/cresora/internal/application"
+	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
+	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 )
 
 // CQS exposes the coordinator through the repository's existing command/query

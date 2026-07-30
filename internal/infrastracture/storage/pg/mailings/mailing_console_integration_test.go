@@ -19,9 +19,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	application "github.com/notrodans/nebula-go/internal/application"
-	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	application "github.com/notrodans/cresora/internal/application"
+	"github.com/notrodans/cresora/internal/application/services/mailingconsole"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 func TestMailingConsolePostgres(t *testing.T) {

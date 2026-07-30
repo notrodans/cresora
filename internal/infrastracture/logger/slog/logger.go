@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/notrodans/nebula-go/config"
+	"github.com/notrodans/cresora/config"
 )
 
 type LoggerKey struct{}

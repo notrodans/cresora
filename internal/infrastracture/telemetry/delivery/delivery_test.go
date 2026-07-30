@@ -12,10 +12,10 @@ import (
 	"go.opentelemetry.io/otel/metric/embedded"
 	"go.opentelemetry.io/otel/metric/noop"
 
-	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	"github.com/notrodans/nebula-go/internal/domain/message"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
+	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/message"
+	"github.com/notrodans/cresora/internal/domain/recipient"
 )
 
 func TestNewClaimsWithNilMeterIsNoOp(t *testing.T) {

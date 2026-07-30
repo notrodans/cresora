@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/recipient"
 )
 
 // Composes persistent deliveries with one transport

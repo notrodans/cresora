@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	application "github.com/notrodans/nebula-go/internal/application/operatorcredentials"
+	application "github.com/notrodans/cresora/internal/application/operatorcredentials"
 )
 
 var (

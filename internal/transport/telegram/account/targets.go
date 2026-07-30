@@ -1,9 +1,9 @@
 package account
 
 import (
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
-	targets "github.com/notrodans/nebula-go/internal/transport/telegram/targets"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/transport/telegram"
+	targets "github.com/notrodans/cresora/internal/transport/telegram/targets"
 )
 
 // targetProvider binds target resolution to the route's Telegram account.

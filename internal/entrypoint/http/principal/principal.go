@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	application "github.com/notrodans/nebula-go/internal/application"
+	application "github.com/notrodans/cresora/internal/application"
 )
 
 var ErrUnavailable = errors.New("request principal is unavailable")

@@ -12,8 +12,8 @@ import (
 	"github.com/gotd/td/telegram/auth/qrlogin"
 
 	"github.com/google/uuid"
-	applicationroot "github.com/notrodans/nebula-go/internal/application"
-	application "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
+	applicationroot "github.com/notrodans/cresora/internal/application"
+	application "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 )
 
 // ErrLiveAuthenticationDisabled is the safe result of the intentionally inert

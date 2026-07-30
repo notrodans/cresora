@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/notrodans/nebula-go/internal/application/operatorcredentials/password"
+	"github.com/notrodans/cresora/internal/application/operatorcredentials/password"
 )
 
 type fakeCredentials struct {

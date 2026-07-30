@@ -10,11 +10,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/config"
-	operatorcredentials "github.com/notrodans/nebula-go/internal/application/operatorcredentials"
-	password "github.com/notrodans/nebula-go/internal/application/operatorcredentials/password"
-	operatorcredentialcli "github.com/notrodans/nebula-go/internal/entrypoint/cli/operatorcredentials"
-	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg"
+	"github.com/notrodans/cresora/config"
+	operatorcredentials "github.com/notrodans/cresora/internal/application/operatorcredentials"
+	password "github.com/notrodans/cresora/internal/application/operatorcredentials/password"
+	operatorcredentialcli "github.com/notrodans/cresora/internal/entrypoint/cli/operatorcredentials"
+	"github.com/notrodans/cresora/internal/infrastracture/storage/pg"
 )
 
 var errUnexpectedArguments = errors.New("operator-admin does not accept arguments or options")

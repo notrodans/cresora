@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 // Выполняет постановку одной рассылки в очередь

@@ -10,10 +10,10 @@ import (
 
 	"github.com/google/uuid"
 
-	application "github.com/notrodans/nebula-go/internal/application"
-	challengecoordinator "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/challenges"
-	challengefake "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/challenges/fake"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
+	application "github.com/notrodans/cresora/internal/application"
+	challengecoordinator "github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges"
+	challengefake "github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges/fake"
+	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 )
 
 func TestCoordinatorHTTPUsesOpaqueRequestIDsAndSafeProjection(t *testing.T) {

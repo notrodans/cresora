@@ -1,4 +1,4 @@
-module github.com/notrodans/nebula-go
+module github.com/notrodans/cresora
 
 go 1.26.5
 

@@ -6,10 +6,10 @@ import (
 
 	"github.com/google/uuid"
 
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
-	"github.com/notrodans/nebula-go/internal/transport/telegram/account"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/recipient"
+	"github.com/notrodans/cresora/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/transport/telegram/account"
 )
 
 type targetLookup struct {

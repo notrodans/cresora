@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/notrodans/nebula-go/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 func TestTelegramSessionStorePostgres(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
 )
 
 // Accepts claimed tasks for actor routing

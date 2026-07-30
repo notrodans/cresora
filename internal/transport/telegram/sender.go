@@ -9,9 +9,9 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
-	application "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/message"
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
+	application "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/message"
+	"github.com/notrodans/cresora/internal/domain/recipient"
 )
 
 // Delivers domain messages through Telegram

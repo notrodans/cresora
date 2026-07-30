@@ -6,8 +6,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/notrodans/nebula-go/internal/domain/recipient"
-	transport "github.com/notrodans/nebula-go/internal/transport/telegram"
+	"github.com/notrodans/cresora/internal/domain/recipient"
+	transport "github.com/notrodans/cresora/internal/transport/telegram"
 )
 
 var _ transport.Targets = resolver{}

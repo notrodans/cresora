@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	operatorcredentials "github.com/notrodans/nebula-go/internal/application/operatorcredentials"
-	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
+	operatorcredentials "github.com/notrodans/cresora/internal/application/operatorcredentials"
+	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
 )
 
 type operatorCredentialDatabase interface {

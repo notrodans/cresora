@@ -20,15 +20,15 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	application "github.com/notrodans/nebula-go/internal/application"
-	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/operatorlogin"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
+	application "github.com/notrodans/cresora/internal/application"
+	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
+	"github.com/notrodans/cresora/internal/entrypoint/http/operatorlogin"
+	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 )
 
 const (
-	preAuthCSRFCookie  = "nebula_login_csrf"
-	preAuthFlowCookie  = "nebula_login_flow"
+	preAuthCSRFCookie  = "cresora_login_csrf"
+	preAuthFlowCookie  = "cresora_login_flow"
 	csrfFormField      = "csrf"
 	maxLoginBody       = 8 << 10
 	loginRefreshNotice = "refresh"

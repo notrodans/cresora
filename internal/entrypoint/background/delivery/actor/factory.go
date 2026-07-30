@@ -3,7 +3,7 @@ package actor
 import (
 	"context"
 
-	"github.com/notrodans/nebula-go/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/application/commands/delivery"
 )
 
 // Provides route-specific delivery commands

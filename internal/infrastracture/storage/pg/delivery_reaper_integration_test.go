@@ -10,13 +10,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	applicationdelivery "github.com/notrodans/nebula-go/internal/application/commands/delivery"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	pgclaims "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/claims"
-	pgdeliveries "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/deliveries"
-	pgmailings "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/mailings"
-	pgreaper "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/reaper"
-	"github.com/notrodans/nebula-go/internal/infrastracture/transport/faketelegram"
+	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	pgclaims "github.com/notrodans/cresora/internal/infrastracture/storage/pg/claims"
+	pgdeliveries "github.com/notrodans/cresora/internal/infrastracture/storage/pg/deliveries"
+	pgmailings "github.com/notrodans/cresora/internal/infrastracture/storage/pg/mailings"
+	pgreaper "github.com/notrodans/cresora/internal/infrastracture/storage/pg/reaper"
+	"github.com/notrodans/cresora/internal/infrastracture/transport/faketelegram"
 )
 
 func TestPostgreSQLDeliveryReaper(t *testing.T) {

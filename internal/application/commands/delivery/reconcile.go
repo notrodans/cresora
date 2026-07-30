@@ -3,7 +3,7 @@ package delivery
 import (
 	"context"
 
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/mailing"
 )
 
 // DeliveryState is the persisted state of one logical delivery.  The

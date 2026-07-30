@@ -11,14 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	application "github.com/notrodans/nebula-go/internal/application"
-	commands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
-	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
-	requests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
-	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
-	"github.com/notrodans/nebula-go/internal/domain/mailing"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
+	application "github.com/notrodans/cresora/internal/application"
+	commands "github.com/notrodans/cresora/internal/application/commands/mailing-console"
+	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
+	requests "github.com/notrodans/cresora/internal/application/requests/mailing-console"
+	"github.com/notrodans/cresora/internal/application/services/mailingconsole"
+	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 )
 
 type testDependencies struct {

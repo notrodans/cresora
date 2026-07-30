@@ -7,7 +7,7 @@ import (
 	"os"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/notrodans/nebula-go/config"
+	"github.com/notrodans/cresora/config"
 	"github.com/pressly/goose/v3"
 )
 

@@ -17,7 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	"github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/invariants"
+	"github.com/notrodans/cresora/internal/infrastracture/storage/pg/invariants"
 )
 
 func TestPostgreSQLInvariants(t *testing.T) {

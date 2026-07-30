@@ -3,8 +3,8 @@ package mailingconsole
 import (
 	"context"
 
-	application "github.com/notrodans/nebula-go/internal/application"
-	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
+	application "github.com/notrodans/cresora/internal/application"
+	"github.com/notrodans/cresora/internal/application/services/mailingconsole"
 )
 
 // Dashboard loads the operator's mailing console dashboard.

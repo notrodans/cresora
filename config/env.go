@@ -58,8 +58,8 @@ type Config struct {
 }
 
 const (
-	ProductionSessionCookie  = "__Host-nebula_session"
-	DevelopmentSessionCookie = "nebula_session"
+	ProductionSessionCookie  = "__Host-cresora_session"
+	DevelopmentSessionCookie = "cresora_session"
 )
 
 // SessionCookieName returns the deployment-mode-specific browser cookie name.

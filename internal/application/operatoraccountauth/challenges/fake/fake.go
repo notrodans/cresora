@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/notrodans/nebula-go/internal/application/operatoraccountauth/challenges"
+	"github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges"
 )
 
 // DefaultCode is deliberately a fake-only value. It is not used by the

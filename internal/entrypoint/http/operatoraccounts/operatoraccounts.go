@@ -18,20 +18,20 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	application "github.com/notrodans/nebula-go/internal/application"
-	commands "github.com/notrodans/nebula-go/internal/application/commands/operator-account-auth"
-	common "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
-	challengecoordinator "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/challenges"
-	requests "github.com/notrodans/nebula-go/internal/application/requests/operator-account-auth"
-	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
+	application "github.com/notrodans/cresora/internal/application"
+	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
+	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	challengecoordinator "github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges"
+	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
+	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 	"rsc.io/qr"
 )
 
 const (
-	productionCSRFCookie    = "__Host-nebula_operator_csrf"
-	productionSessionCookie = "__Host-nebula_operator_session"
-	localCSRFCookie         = "nebula_operator_csrf"
-	localSessionCookie      = "nebula_operator_session"
+	productionCSRFCookie    = "__Host-cresora_operator_csrf"
+	productionSessionCookie = "__Host-cresora_operator_session"
+	localCSRFCookie         = "cresora_operator_csrf"
+	localSessionCookie      = "cresora_operator_session"
 	// These aliases describe the secure-by-default route used by the existing
 	// tests. Runtime handlers use the names from CookieConfig instead.
 	csrfCookie    = productionCSRFCookie
