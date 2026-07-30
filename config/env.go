@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -43,12 +43,11 @@ func (kind *EnvKind) UnmarshalText(text []byte) error {
 }
 
 type Config struct {
-	Env          EnvKind   `env:"ENV"`
-	DbUrl        string    `env:"DB_URL"`
-	OperatorID   uuid.UUID `env:"OPERATOR_ID"`
-	WebAddr      url.URL   `env:"WEB_ADDR"`
-	WebOnly      bool      `env:"WEB_ONLY" envDefault:"true"`
-	PublicOrigin url.URL   `env:"PUBLIC_ORIGIN"`
+	Env          EnvKind `env:"ENV"`
+	DbUrl        string  `env:"DB_URL"`
+	WebAddr      url.URL `env:"WEB_ADDR"`
+	WebOnly      bool    `env:"WEB_ONLY" envDefault:"true"`
+	PublicOrigin url.URL `env:"PUBLIC_ORIGIN"`
 	// DeliveryReaperInterval controls the transport-neutral lease recovery poll.
 	DeliveryReaperInterval time.Duration `env:"DELIVERY_REAPER_INTERVAL" envDefault:"1m"`
 	// DeliveryReconcilerInterval controls the transport-neutral terminal run
@@ -56,6 +55,34 @@ type Config struct {
 	DeliveryReconcilerInterval   time.Duration        `env:"DELIVERY_RECONCILER_INTERVAL" envDefault:"1m"`
 	TelegramSessionKeyID         string               `env:"TELEGRAM_SESSION_KEY_ID" envDefault:""`
 	TelegramSessionEncryptionKey SessionEncryptionKey `env:"TELEGRAM_SESSION_ENCRYPTION_KEY" envDefault:""`
+}
+
+const (
+	ProductionSessionCookie  = "__Host-nebula_session"
+	DevelopmentSessionCookie = "nebula_session"
+)
+
+// SessionCookieName returns the deployment-mode-specific browser cookie name.
+// Only explicitly local HTTP development/testing uses the non-__Host name;
+// HTTPS local runs and all staging/production runs use the host-only policy.
+func (cfg Config) SessionCookieName() string {
+	if cfg.SessionCookieSecure() {
+		return ProductionSessionCookie
+	}
+	return DevelopmentSessionCookie
+}
+
+func (cfg Config) SessionCookieSecure() bool {
+	return !cfg.SessionCookieAllowsInsecureLocal()
+}
+
+// SessionCookieAllowsInsecureLocal is true only for explicitly local
+// development/testing modes with an HTTP public origin. Staging and
+// production never receive this escape hatch.
+func (cfg Config) SessionCookieAllowsInsecureLocal() bool {
+	return (cfg.Env == Development || cfg.Env == Testing) &&
+		strings.EqualFold(cfg.PublicOrigin.Scheme, "http") &&
+		isLocalOriginHost(cfg.PublicOrigin)
 }
 
 const (
@@ -168,8 +195,36 @@ func loadFrom(root string) (Config, error) {
 	if err := validateDeliveryReconcilerConfiguration(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := validateWebConfiguration(cfg); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+func validateWebConfiguration(cfg Config) error {
+	if cfg.PublicOrigin.User != nil || cfg.PublicOrigin.Host == "" || (!strings.EqualFold(cfg.PublicOrigin.Scheme, "http") && !strings.EqualFold(cfg.PublicOrigin.Scheme, "https")) {
+		return fmt.Errorf("PUBLIC_ORIGIN must be an absolute HTTP(S) URL without user info")
+	}
+	if (cfg.PublicOrigin.Path != "" && cfg.PublicOrigin.Path != "/") || cfg.PublicOrigin.RawQuery != "" || cfg.PublicOrigin.Fragment != "" {
+		return fmt.Errorf("PUBLIC_ORIGIN must contain only a scheme and host")
+	}
+	if (cfg.Env == Production || cfg.Env == Staging) && !strings.EqualFold(cfg.PublicOrigin.Scheme, "https") {
+		return fmt.Errorf("PUBLIC_ORIGIN must use HTTPS in staging and production")
+	}
+	if strings.EqualFold(cfg.PublicOrigin.Scheme, "http") && !cfg.SessionCookieAllowsInsecureLocal() {
+		return fmt.Errorf("PUBLIC_ORIGIN may use HTTP only for development/testing on localhost or a loopback IP")
+	}
+	return nil
+}
+
+func isLocalOriginHost(origin url.URL) bool {
+	hostname := origin.Hostname()
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateDeliveryReaperConfiguration(cfg Config) error {

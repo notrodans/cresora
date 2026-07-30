@@ -9,14 +9,22 @@
 	<body>
 		<main class="shell">
 			<header class="header">
-				<h1>Рассылки</h1>
-				<p>Создание и постановка сообщений в очередь</p>
+				<div class="header-content">
+					<div>
+						<h1>Рассылки</h1>
+						<p>Создание и постановка сообщений в очередь</p>
+					</div>
+					<form class="logout-form" method="post" action="/logout">
+						<input type="hidden" name="csrf_token" value="{{.CSRF}}">
+						<button class="logout-button" type="submit">Выйти из консоли</button>
+					</form>
+				</div>
 			</header>
 			{{if .Notice}}
-			<div class="notice" role="status">{{if eq .Notice "draft-created"}}Черновик создан{{else if eq .Notice "queued"}}Рассылка поставлена в очередь{{end}}</div>
+			<div class="notice" role="status" tabindex="-1"{{if and (ne .Notice "draft-created") (ne .Notice "queued")}} autofocus{{end}}>{{if eq .Notice "draft-created"}}Черновик создан{{else if eq .Notice "queued"}}Рассылка поставлена в очередь{{else}}Не удалось обновить консоль. Повторите попытку.{{end}}</div>
 			{{end}}
 			{{if .Error}}
-			<div class="alert" role="alert">{{.Error}}</div>
+			<div class="alert" id="console-error" role="alert" tabindex="-1" autofocus>Не удалось выполнить действие. Проверьте данные и повторите попытку.</div>
 			{{end}}
 			<div class="columns">
 				<section class="panel form-panel">
@@ -25,36 +33,36 @@
 						<input type="hidden" name="csrf_token" value="{{.CSRF}}">
 						<fieldset>
 							<legend>Основное</legend>
-							<label for="name">Название рассылки</label><input id="name" name="name" value="{{.Form.Name}}" placeholder="Например, объявление о мероприятии" aria-describedby="name-help name-error"><small id="name-help">Внутреннее название, его увидит только оператор</small>{{with index .Form.FieldErrors "name"}}<em id="name-error">{{.}}</em>{{end}}
+							<label for="name">Название рассылки</label><input id="name" name="name" value="{{.Form.Name}}" placeholder="Например, объявление о мероприятии" aria-describedby="name-help{{with index .Form.FieldErrors "name"}} name-error{{end}}"{{with index .Form.FieldErrors "name"}} aria-invalid="true"{{end}}><small id="name-help">Внутреннее название, его увидит только оператор</small>{{with index .Form.FieldErrors "name"}}<em id="name-error">{{.}}</em>{{end}}
 							<label for="message">Текст сообщения</label>
-							<textarea id="message" name="message" rows="7" placeholder="Введите текст сообщения" aria-describedby="message-error">{{.Form.Message}}</textarea>
+							<textarea id="message" name="message" rows="7" placeholder="Введите текст сообщения"{{with index .Form.FieldErrors "message"}} aria-invalid="true" aria-describedby="message-error"{{end}}>{{.Form.Message}}</textarea>
 							{{with index .Form.FieldErrors "message"}}<em id="message-error">{{.}}</em>{{end}}
 						</fieldset>
 						<fieldset>
 							<legend>Аккаунт отправителя</legend>
 							<label for="account_id">Аккаунт отправителя</label>
-							<select id="account_id" name="account_id">
+							<select id="account_id" name="account_id"{{with index .Form.FieldErrors "account"}} aria-invalid="true" aria-describedby="account-error"{{end}}>
 								<option value="">Выберите аккаунт</option>
 								{{range .Dashboard.Accounts}}<option value="{{.ID}}" {{if eq (print .ID) $.Form.AccountID}}selected{{end}}>{{if .TelegramUsername}}@{{.TelegramUsername}}{{else}}{{.TelegramFirstName}} {{.TelegramLastName}}{{end}} {{.Phone}}</option>{{end}}
 							</select>
-							{{with index .Form.FieldErrors "account"}}<em>{{.}}</em>{{end}}
+							{{with index .Form.FieldErrors "account"}}<em id="account-error">{{.}}</em>{{end}}
 						</fieldset>
 						<fieldset>
 							<legend>Получатели</legend>
 							<p class="help">Выберите хотя бы одного получателя.</p>
 							<div class="target-group">
 								<h3>Общие диалоги</h3>
-								{{range .Dashboard.SharedDialogs}}<label class="check" data-account-id="{{.AccountID}}"><input type="checkbox" name="shared_dialog_id" value="{{.ID}}" {{if contains $.Form.Shared (print .ID)}}checked{{end}}><span>{{if .Title}}{{.Title}}{{else}}{{.CanonicalUsername}}{{end}}</span></label>{{else}}
+								{{range .Dashboard.SharedDialogs}}<label class="check" data-account-id="{{.AccountID}}"><input type="checkbox" name="shared_dialog_id" value="{{.ID}}" {{if contains $.Form.Shared (print .ID)}}checked{{end}}{{with index $.Form.FieldErrors "recipients"}} aria-invalid="true" aria-describedby="recipients-error"{{end}}><span>{{if .Title}}{{.Title}}{{else}}{{.CanonicalUsername}}{{end}}</span></label>{{else}}
 								<p class="muted">Нет доступных общих диалогов.</p>
 								{{end}}
 							</div>
 							<div class="target-group">
 								<h3>Личные диалоги</h3>
-								{{range .Dashboard.PrivateDialogs}}<label class="check" data-account-id="{{.AccountID}}"><input type="checkbox" name="private_target" value="{{.PeerType}}:{{.PeerID}}" {{if contains $.Form.Private (printf "%s:%d" .PeerType .PeerID)}}checked{{end}}><span>{{if .Title}}{{.Title}}{{else}}{{.Username}}{{end}}</span></label>{{else}}
+								{{range .Dashboard.PrivateDialogs}}<label class="check" data-account-id="{{.AccountID}}"><input type="checkbox" name="private_target" value="{{.PeerType}}:{{.PeerID}}" {{if contains $.Form.Private (printf "%s:%d" .PeerType .PeerID)}}checked{{end}}{{with index $.Form.FieldErrors "recipients"}} aria-invalid="true" aria-describedby="recipients-error"{{end}}><span>{{if .Title}}{{.Title}}{{else}}{{.Username}}{{end}}</span></label>{{else}}
 								<p class="muted">Нет доступных личных диалогов.</p>
 								{{end}}
 							</div>
-							{{with index .Form.FieldErrors "recipients"}}<em>{{.}}</em>{{end}}
+							{{with index .Form.FieldErrors "recipients"}}<em id="recipients-error">{{.}}</em>{{end}}
 						</fieldset>
 						<button class="primary" type="submit">Сохранить черновик</button>
 					</form>

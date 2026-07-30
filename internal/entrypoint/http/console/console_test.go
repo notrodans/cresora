@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	application "github.com/notrodans/nebula-go/internal/application"
 	commands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
+	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
 	requests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
 	"github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
@@ -125,7 +127,29 @@ func (operator *scopedHTTPOperatorMailings) Mailing(identity mailing.ID) mailing
 
 func newHandler(dependencies *testDependencies) http.Handler {
 	service, operatorID := newService(dependencies)
-	return New(&service, principal.Static(operatorID), "http://example.test")
+	return New(&service, trustedProvider(operatorID), "http://example.test")
+}
+
+func trustedProvider(operatorID uuid.UUID) principal.Provider {
+	return principal.ProviderFunc(func(*http.Request) (application.Actor, error) {
+		if operatorID == uuid.Nil {
+			return application.Actor{}, principal.ErrUnavailable
+		}
+		return application.Actor{OperatorID: operatorID}, nil
+	})
+}
+
+type validSessionProvider struct {
+	actor application.Actor
+	token string
+}
+
+func (provider validSessionProvider) Provide(*http.Request) (application.Actor, error) {
+	return provider.actor, nil
+}
+
+func (provider validSessionProvider) ProvideSession(*http.Request) (application.Actor, string, error) {
+	return provider.actor, provider.token, nil
 }
 
 func newService(dependencies *testDependencies) (mailingconsole.Service, uuid.UUID) {
@@ -207,14 +231,14 @@ func TestTwoOperatorHTTPConsoleDoesNotCrossScope(t *testing.T) {
 		commands.NewCreateDraft(&service),
 		commands.NewQueue(&service),
 		requests.NewDashboard(&service),
-		principal.Static(operatorA),
+		trustedProvider(operatorA),
 		"http://example.test",
 	)
 	handlerB := New(
 		commands.NewCreateDraft(&service),
 		commands.NewQueue(&service),
 		requests.NewDashboard(&service),
-		principal.Static(operatorB),
+		trustedProvider(operatorB),
 		"http://example.test",
 	)
 
@@ -280,6 +304,51 @@ func TestCSRFRejectedAndAcceptedWithPRG(t *testing.T) {
 	}
 	if got := postForm(t, h, "/mailings", values, cookie, token).Code; got != http.StatusSeeOther {
 		t.Fatalf("valid csrf: %d", got)
+	}
+}
+
+func TestAuthenticatedConsoleCSRFAndOriginFailuresRecoverWithoutAction(t *testing.T) {
+	actor := uuid.New()
+	token := strings.Repeat("a", 43)
+	dependencies := &testDependencies{dashboard: testDashboard()}
+	service, _ := newService(dependencies)
+	handler := New(&service, validSessionProvider{actor: application.Actor{OperatorID: actor}, token: token}, "http://example.test")
+	expectedCSRF, ok := operatorsessions.SessionCSRFToken(token)
+	if !ok {
+		t.Fatal("derive session CSRF")
+	}
+
+	for _, test := range []struct {
+		name   string
+		origin string
+		csrf   string
+	}{
+		{name: "invalid csrf", origin: "http://example.test", csrf: "wrong"},
+		{name: "foreign origin", origin: "http://foreign.test", csrf: expectedCSRF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			form := url.Values{"name": {"draft"}, "message": {"message"}, "csrf_token": {test.csrf}}
+			request := httptest.NewRequest(http.MethodPost, "http://example.test/mailings?notice=<script>alert(1)</script>", strings.NewReader(form.Encode()))
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?notice=retry" {
+				t.Fatalf("console recovery: status=%d location=%q body=%q", response.Code, response.Header().Get("Location"), response.Body.String())
+			}
+			if strings.Contains(response.Header().Get("Location"), "script") || strings.Contains(response.Header().Get("Location"), "csrf") {
+				t.Fatalf("console recovery reflected rejected input: %q", response.Header().Get("Location"))
+			}
+		})
+	}
+	if dependencies.created.Name != "" || dependencies.created.MessageText != "" {
+		t.Fatal("console recovery performed a draft action")
+	}
+
+	unknownNotice := httptest.NewRecorder()
+	handler.ServeHTTP(unknownNotice, httptest.NewRequest(http.MethodGet, "http://example.test/?notice=do-not-reflect", nil))
+	if unknownNotice.Code != http.StatusOK || strings.Contains(unknownNotice.Body.String(), "do-not-reflect") {
+		t.Fatalf("console notice was not whitelisted: status=%d body=%q", unknownNotice.Code, unknownNotice.Body.String())
 	}
 }
 
@@ -401,7 +470,7 @@ func TestCSRFCookieUsesConfiguredOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, operatorID := newService(&testDependencies{dashboard: testDashboard()})
-			h := New(&service, principal.Static(operatorID), test.origin)
+			h := New(&service, trustedProvider(operatorID), test.origin)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://untrusted-host.test/", nil))
 			cookie := w.Result().Cookies()[0]

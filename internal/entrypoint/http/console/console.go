@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	applicationactor "github.com/notrodans/nebula-go/internal/application"
 	commands "github.com/notrodans/nebula-go/internal/application/commands/mailing-console"
+	operatorsessions "github.com/notrodans/nebula-go/internal/application/operatorsessions"
 	requests "github.com/notrodans/nebula-go/internal/application/requests/mailing-console"
 	application "github.com/notrodans/nebula-go/internal/application/services/mailingconsole"
 	"github.com/notrodans/nebula-go/internal/domain/mailing"
@@ -87,7 +88,7 @@ func Register(router chi.Router, createDraft commands.CreateDraft, queue command
 	}
 	protected := router.With(principal.Middleware(provider))
 	protected.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		handler.dashboard(w, r, r.URL.Query().Get("notice"))
+		handler.dashboard(w, r, safeNotice(r.URL.Query().Get("notice")))
 	})
 	protected.Post("/mailings", handler.create)
 	protected.Post("/mailings/{mailingID}/queue", handler.queueMailing)
@@ -202,10 +203,11 @@ func (request legacyDashboardRequest) Execute(context context.Context, actor app
 }
 
 type pageData struct {
-	Dashboard application.Dashboard
-	Form      formData
-	Notice    string
-	Error     string
+	Dashboard  application.Dashboard
+	Form       formData
+	Notice     string
+	Error      string
+	ErrorFocus bool
 }
 type formData struct {
 	Name        string
@@ -349,7 +351,7 @@ func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f formData,
 	_ = h.tmpl.Execute(w, struct {
 		pageData
 		CSRF string
-	}{pageData: pageData{Dashboard: d, Form: f, Error: message}, CSRF: token})
+	}{pageData: pageData{Dashboard: d, Form: f, Error: message, ErrorFocus: message != ""}, CSRF: token})
 }
 
 func requestActor(w http.ResponseWriter, r *http.Request) (applicationactor.Actor, bool) {
@@ -448,11 +450,15 @@ func (h *Handler) parsePost(w http.ResponseWriter, r *http.Request) (url.Values,
 		return nil, false
 	}
 	if !h.sameOrigin(r) {
+		if h.redirectRecoverableSession(w, r) {
+			return nil, false
+		}
 		http.Error(w, "Запрос отклонён.", http.StatusForbidden)
 		return nil, false
 	}
 	cookie, failure := r.Cookie(csrfCookie)
-	if failure != nil {
+	rawSessionToken, sessionBound := principal.SessionTokenFromContext(r.Context())
+	if failure != nil && !sessionBound {
 		http.Error(w, "Запрос отклонён.", http.StatusForbidden)
 		return nil, false
 	}
@@ -471,11 +477,40 @@ func (h *Handler) parsePost(w http.ResponseWriter, r *http.Request) (url.Values,
 		return nil, false
 	}
 	token := r.PostForm.Get("csrf_token")
-	if len(token) != len(cookie.Value) || subtle.ConstantTimeCompare([]byte(token), []byte(cookie.Value)) != 1 {
+	expected := ""
+	if sessionBound {
+		expected, sessionBound = operatorsessions.SessionCSRFToken(rawSessionToken)
+	}
+	if !sessionBound {
+		expected = cookie.Value
+	}
+	if len(token) != len(expected) || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+		if h.redirectRecoverableSession(w, r) {
+			return nil, false
+		}
 		http.Error(w, "Запрос отклонён", http.StatusForbidden)
 		return nil, false
 	}
 	return r.PostForm, true
+}
+
+func (h *Handler) redirectRecoverableSession(w http.ResponseWriter, r *http.Request) bool {
+	if _, ok := principal.SessionTokenFromContext(r.Context()); !ok {
+		return false
+	}
+	// The target and notice are fixed server-owned values. Never reflect the
+	// rejected request's query, form fields, or validation reason here.
+	h.redirect(w, r, "/?notice=retry")
+	return true
+}
+
+func safeNotice(value string) string {
+	switch value {
+	case "draft-created", "queued", "retry":
+		return value
+	default:
+		return ""
+	}
 }
 
 func contains(values []string, value string) bool {
@@ -531,6 +566,11 @@ func (h *Handler) matchesOrigin(raw string, referer bool) bool {
 }
 
 func (h *Handler) csrfToken(w http.ResponseWriter, r *http.Request) string {
+	if rawSessionToken, ok := principal.SessionTokenFromContext(r.Context()); ok {
+		if token, valid := operatorsessions.SessionCSRFToken(rawSessionToken); valid {
+			return token
+		}
+	}
 	if c, err := r.Cookie(csrfCookie); err == nil && c.Value != "" {
 		return c.Value
 	}
@@ -557,7 +597,7 @@ func (h *Handler) csrfToken(w http.ResponseWriter, r *http.Request) string {
 
 func parsePublicOrigin(value string) (*url.URL, error) {
 	parsed, failure := url.Parse(value)
-	if failure != nil || parsed.User != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if failure != nil || parsed.User != nil || parsed.Host == "" || (!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
 		return nil, errors.New("public origin must be an absolute HTTP(S) URL")
 	}
 	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
