@@ -105,9 +105,6 @@ func (provider *Provider) CancelQR(ctx context.Context, handle challenges.Provid
 }
 
 func contextError(ctx context.Context) error {
-	if ctx == nil {
-		return errors.New("nil context")
-	}
 	return ctx.Err()
 }
 

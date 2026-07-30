@@ -51,9 +51,6 @@ type jobResult struct {
 // cooperative jobs before returning. A job that ignores cancellation is
 // bounded by shutdownTimeout and contributes ErrShutdownTimeout.
 func (runner Runner) Run(parent context.Context) error {
-	if parent == nil {
-		panic("run background jobs without context")
-	}
 	if len(runner.jobs) == 0 {
 		return fmt.Errorf("%w: at least one job is required", ErrInvalidConfig)
 	}

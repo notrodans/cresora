@@ -26,12 +26,6 @@ func (task claimed) Route() delivery.Route {
 }
 
 func (task claimed) Renew(context context.Context, duration time.Duration) error {
-	if context == nil {
-		panic("renew claimed delivery without context")
-	}
-	if task.database == nil {
-		panic("renew claimed delivery without database")
-	}
 	if duration <= 0 {
 		panic("renew claimed delivery with invalid lease")
 	}
@@ -128,12 +122,6 @@ func (task claimed) Execute(
 }
 
 func (task claimed) Release(context context.Context, cause error) error {
-	if context == nil {
-		panic("release claimed delivery without context")
-	}
-	if task.database == nil {
-		panic("release claimed delivery without database")
-	}
 	if cause == nil {
 		panic("release claimed delivery without cause")
 	}

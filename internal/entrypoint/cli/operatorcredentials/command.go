@@ -27,10 +27,7 @@ type UI interface {
 // Run executes the interactive bootstrap/reset flow. Passwords are compared
 // only in memory and are never passed to UI.Write or the repository.
 func Run(context context.Context, ui UI, service application.Service) error {
-	if context == nil {
-		return fmt.Errorf("run operator credential bootstrap: %w", ErrTTYRequired)
-	}
-	if ui == nil || !ui.IsTTY() {
+	if !ui.IsTTY() {
 		return ErrTTYRequired
 	}
 	username, failure := ui.ReadUsername()

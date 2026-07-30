@@ -46,15 +46,6 @@ func New(reaper application.Reaper, config Config) *Loop {
 // Run keeps reaping until its context is canceled or a pass fails. The first
 // pass is deliberately immediate rather than delayed by one interval.
 func (loop *Loop) Run(context context.Context) error {
-	if context == nil {
-		panic("run delivery reaper without context")
-	}
-	if loop == nil {
-		return errors.New("run delivery reaper without loop")
-	}
-	if loop.reaper == nil {
-		return errors.New("run delivery reaper without reaper")
-	}
 	if failure := loop.config.Validate(); failure != nil {
 		return fmt.Errorf("validate delivery reaper loop: %w", failure)
 	}

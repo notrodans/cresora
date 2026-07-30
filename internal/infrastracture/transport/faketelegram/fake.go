@@ -227,9 +227,6 @@ func (fake *Fake) Send(
 	body message.Message,
 	randomID int64,
 ) error {
-	if context == nil {
-		panic("send fake Telegram message without context")
-	}
 	if randomID == 0 {
 		panic("send fake Telegram message with zero random identity")
 	}

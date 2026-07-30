@@ -138,20 +138,8 @@ func New(
 // Claimed task execution intentionally uses a root context independent of the
 // parent so shutdown can first drain active work before forcing cancellation.
 func (worker *Worker) Run(parent context.Context) error {
-	if parent == nil {
-		panic("run delivery worker without context")
-	}
-	if worker == nil {
-		return errors.New("run delivery worker without worker")
-	}
 	if err := worker.config.Validate(); err != nil {
 		return fmt.Errorf("validate delivery worker config: %w", err)
-	}
-	if worker.claims == nil {
-		return errors.New("run delivery worker without claims")
-	}
-	if worker.commands == nil {
-		return errors.New("run delivery worker without commands")
 	}
 	if err := parent.Err(); err != nil {
 		return err

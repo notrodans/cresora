@@ -28,12 +28,6 @@ func (entity persistentDelivery) Dispatch(
 	executionContext context.Context,
 	port application.Port,
 ) error {
-	if executionContext == nil {
-		panic("dispatch PostgreSQL delivery without context")
-	}
-	if entity.database == nil {
-		panic("dispatch PostgreSQL delivery without database")
-	}
 	if port == nil {
 		panic("dispatch PostgreSQL delivery without port")
 	}

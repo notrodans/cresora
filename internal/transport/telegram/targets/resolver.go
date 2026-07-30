@@ -23,9 +23,6 @@ func NewResolver(accountID uuid.UUID, lookup transport.PeerLookup) transport.Tar
 	if accountID == uuid.Nil {
 		panic("resolve Telegram targets without account identity")
 	}
-	if lookup == nil {
-		panic("resolve Telegram targets without peer lookup")
-	}
 	return resolver{
 		accountID: accountID,
 		lookup:    lookup,
@@ -36,12 +33,6 @@ func (resolver resolver) Target(
 	context context.Context,
 	recipientValue recipient.Recipient,
 ) (transport.Target, error) {
-	if context == nil {
-		panic("resolve Telegram target without context")
-	}
-	if recipientValue == nil {
-		panic("resolve Telegram target without recipient")
-	}
 	recipientID := recipientValue.UUID()
 	if recipientID == uuid.Nil {
 		panic("resolve Telegram target with zero recipient identity")

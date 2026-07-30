@@ -15,9 +15,6 @@ var _ Targets = targetProvider{}
 
 // NewTargets creates a provider of account-bound Telegram target resolvers.
 func NewTargets(lookup telegram.PeerLookup) Targets {
-	if lookup == nil {
-		panic("provide Telegram targets without peer lookup")
-	}
 	return targetProvider{lookup: lookup}
 }
 

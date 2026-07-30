@@ -61,9 +61,6 @@ func (process *process) Submit(
 }
 
 func (process *process) Run(context context.Context) error {
-	if context == nil {
-		panic("run delivery actor without context")
-	}
 	if process.command == nil {
 		panic("run delivery actor without command")
 	}

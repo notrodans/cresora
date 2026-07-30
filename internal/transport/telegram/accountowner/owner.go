@@ -84,13 +84,6 @@ func newOwner(client lifecycle) *Owner {
 // after session initialization, while the owner only keeps the client alive
 // until gotd asks it to stop.
 func (owner *Owner) Run(ctx context.Context) error {
-	if ctx == nil {
-		panic("run Telegram account owner without context")
-	}
-	if owner == nil {
-		return errors.New("run Telegram account owner without owner")
-	}
-
 	runContext, cancel := context.WithCancel(ctx)
 	owner.mu.Lock()
 	if owner.started {
@@ -153,13 +146,6 @@ func (owner *Owner) Stop() {
 // or owner shutdown. Ready is obtained for every call rather than cached:
 // gotd replaces that channel when it reconnects.
 func (owner *Owner) WaitReady(ctx context.Context) error {
-	if ctx == nil {
-		panic("wait for Telegram account owner readiness without context")
-	}
-	if owner == nil {
-		return errors.New("wait for Telegram account owner readiness without owner")
-	}
-
 	for {
 		owner.mu.Lock()
 		stopping := owner.stopping

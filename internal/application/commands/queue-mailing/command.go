@@ -27,12 +27,6 @@ func (operation operation) Execute(
 	context context.Context,
 	identity mailing.ID,
 ) error {
-	if context == nil {
-		panic("execute mailing dispatch without context")
-	}
-	if operation.mailings == nil {
-		panic("execute mailing dispatch without mailings")
-	}
 	if failure := operation.mailings.
 		Mailing(identity).
 		Queue(context); failure != nil {

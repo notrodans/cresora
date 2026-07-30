@@ -79,13 +79,6 @@ func NewReaper(database *pgxpool.Pool, config Config) Reaper {
 // statement locks candidates with SKIP LOCKED and compares the old lease
 // token in each update, so concurrent reapers can safely share the queue.
 func (reaper Reaper) Reap(context context.Context) (application.ReapResult, error) {
-	if context == nil {
-		panic("reap PostgreSQL deliveries without context")
-	}
-	if reaper.database == nil {
-		return application.ReapResult{}, errors.New("reap PostgreSQL deliveries without database")
-	}
-
 	var result application.ReapResult
 	failure := reaper.database.QueryRow(
 		context,

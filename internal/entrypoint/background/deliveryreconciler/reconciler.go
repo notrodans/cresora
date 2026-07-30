@@ -45,15 +45,6 @@ func New(reconciler application.RunReconciler, config Config) *Loop {
 }
 
 func (loop *Loop) Run(context context.Context) error {
-	if context == nil {
-		panic("run delivery reconciler without context")
-	}
-	if loop == nil {
-		return errors.New("run delivery reconciler without loop")
-	}
-	if loop.reconciler == nil {
-		return errors.New("run delivery reconciler without reconciler")
-	}
 	if failure := loop.config.Validate(); failure != nil {
 		return fmt.Errorf("validate delivery reconciler loop: %w", failure)
 	}

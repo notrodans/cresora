@@ -28,15 +28,6 @@ func (operation operation) Execute(
 	recipientID recipient.ID,
 	token Token,
 ) error {
-	if context == nil {
-		panic("execute mailing delivery without context")
-	}
-	if operation.deliveries == nil {
-		panic("execute mailing delivery without deliveries")
-	}
-	if operation.port == nil {
-		panic("execute mailing delivery without transport port")
-	}
 	if failure := operation.deliveries.
 		Delivery(mailingID, runID, recipientID, token).
 		Dispatch(context, operation.port); failure != nil {

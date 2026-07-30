@@ -30,12 +30,6 @@ func NewClaims(database *pgxpool.Pool, lease time.Duration) delivery.Claims {
 }
 
 func (claims claims) Claim(context context.Context) (delivery.Task, error) {
-	if context == nil {
-		panic("claim PostgreSQL delivery without context")
-	}
-	if claims.database == nil {
-		panic("claim PostgreSQL delivery without database")
-	}
 	if claims.lease <= 0 {
 		panic("claim PostgreSQL delivery with invalid lease")
 	}

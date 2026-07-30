@@ -24,9 +24,6 @@ func Text(body string) Message {
 }
 
 func (message text) Print(destination io.Writer) error {
-	if destination == nil {
-		panic("print mailing message without destination")
-	}
 	if message.body == "" {
 		panic("print mailing message with empty body")
 	}

@@ -33,15 +33,6 @@ func (ts telegramSender) Send(
 	message message.Message,
 	random int64,
 ) error {
-	if context == nil {
-		panic("send Telegram message without context")
-	}
-	if ts.api == nil {
-		panic("send Telegram message without API")
-	}
-	if ts.targets == nil {
-		panic("send Telegram message without targets")
-	}
 	if random == 0 {
 		panic("send Telegram message with zero random identity")
 	}

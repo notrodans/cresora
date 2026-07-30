@@ -178,22 +178,6 @@ func awaitError(t *testing.T, errors <-chan error, name string) error {
 	}
 }
 
-func assertPanics(t *testing.T, call func()) {
-	t.Helper()
-	defer func() {
-		if recover() == nil {
-			t.Fatal("call did not panic")
-		}
-	}()
-	call()
-}
-
-func TestOwnerNilContextPanics(t *testing.T) {
-	owner := newOwner(newFakeLifecycle())
-	assertPanics(t, func() { _ = owner.Run(nil) })
-	assertPanics(t, func() { _ = owner.WaitReady(nil) })
-}
-
 func TestNewPropagatesFactoryConstructionFailure(t *testing.T) {
 	owner, failure := New(
 		gotdclient.New(nil),

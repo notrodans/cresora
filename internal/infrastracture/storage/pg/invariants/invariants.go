@@ -279,12 +279,6 @@ var checks = [...]checkSpec{
 // transaction contains only the SELECT statements in checks; no row is
 // claimed, locked, updated, or otherwise changed by this package.
 func (checker Checker) Check(context context.Context) (Report, error) {
-	if context == nil {
-		panic("check PostgreSQL invariants without context")
-	}
-	if checker.database == nil {
-		return Report{}, errors.New("check PostgreSQL invariants without database")
-	}
 	if checker.sampleLimit <= 0 {
 		return Report{}, errors.New("check PostgreSQL invariants with invalid sample limit")
 	}

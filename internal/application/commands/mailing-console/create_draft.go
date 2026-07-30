@@ -19,9 +19,6 @@ type createDraftCommand struct {
 
 // NewCreateDraft creates a CreateDraft command backed by service.
 func NewCreateDraft(service *mailingconsole.Service) CreateDraft {
-	if service == nil {
-		panic("create mailing console draft command without service")
-	}
 	return &createDraftCommand{service: service}
 }
 

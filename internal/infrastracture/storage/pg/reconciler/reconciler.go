@@ -59,9 +59,6 @@ type Reconciler struct {
 var _ application.RunReconciler = Reconciler{}
 
 func New(database *pgxpool.Pool, config Config) application.RunReconciler {
-	if database == nil {
-		panic("create PostgreSQL delivery run reconciler without database")
-	}
 	if config == (Config{}) {
 		config = Defaults()
 	}
@@ -78,13 +75,6 @@ func NewReconciler(database *pgxpool.Pool, config Config) application.RunReconci
 // per-run transaction below takes the lifecycle locks and performs the CAS,
 // allowing concurrent passes to share the bounded scan safely.
 func (reconciler Reconciler) Reconcile(context context.Context) (application.ReconciliationResult, error) {
-	if context == nil {
-		panic("reconcile PostgreSQL delivery runs without context")
-	}
-	if reconciler.database == nil {
-		return application.ReconciliationResult{}, errors.New("reconcile PostgreSQL delivery runs without database")
-	}
-
 	candidates, failure := reconciler.findCandidates(context)
 	if failure != nil {
 		return application.ReconciliationResult{}, fmt.Errorf("discover delivery run reconciliation candidates: %w", failure)

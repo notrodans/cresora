@@ -43,13 +43,6 @@ func runWithChecker(
 	errorOutput io.Writer,
 	check checkFunction,
 ) int {
-	if parent == nil {
-		panic("run invariant checker without context")
-	}
-	if check == nil {
-		panic("run invariant checker without checker")
-	}
-
 	defaultDatabaseURL := os.Getenv("DB_URL")
 	if defaultDatabaseURL == "" {
 		defaultDatabaseURL = os.Getenv("TEST_DATABASE_URL")

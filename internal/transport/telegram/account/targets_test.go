@@ -68,12 +68,6 @@ func TestNewTargetsBindsResolversToRoutes(t *testing.T) {
 	}
 }
 
-func TestNewTargetsGuardsNilLookup(t *testing.T) {
-	assertPanics(t, func() {
-		_ = account.NewTargets(nil)
-	})
-}
-
 func TestTargetsGuardsZeroRoute(t *testing.T) {
 	provider := account.NewTargets(&targetLookup{})
 

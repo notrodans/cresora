@@ -44,9 +44,6 @@ type sessionTokenKey struct{}
 // Middleware obtains the actor from the trusted provider and makes it
 // available only to HTTP handlers through the request context seam.
 func Middleware(provider Provider) func(http.Handler) http.Handler {
-	if provider == nil {
-		panic("create principal middleware without provider")
-	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 			response.Header().Set("Cache-Control", "no-store")
@@ -94,9 +91,6 @@ func Middleware(provider Provider) func(http.Handler) http.Handler {
 // context extraction point; callers must pass the returned actor explicitly to
 // application operations.
 func FromContext(context context.Context) (application.Actor, bool) {
-	if context == nil {
-		return application.Actor{}, false
-	}
 	actor, ok := context.Value(contextKey{}).(application.Actor)
 	if !ok || actor.OperatorID == uuid.Nil {
 		return application.Actor{}, false
@@ -107,9 +101,6 @@ func FromContext(context context.Context) (application.Actor, bool) {
 // SessionTokenFromContext is restricted to HTTP entrypoint code that needs to
 // derive a CSRF synchronizer value. It is never an identity source.
 func SessionTokenFromContext(context context.Context) (string, bool) {
-	if context == nil {
-		return "", false
-	}
 	token, ok := context.Value(sessionTokenKey{}).(string)
 	return token, ok && token != ""
 }

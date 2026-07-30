@@ -34,9 +34,6 @@ func (identity ID) UUID() uuid.UUID {
 }
 
 func (recipient identity) Print(destination io.Writer) error {
-	if destination == nil {
-		panic("print recipient identity without destination")
-	}
 	if uuid.UUID(recipient.value) == uuid.Nil {
 		panic("print recipient identity with zero value")
 	}

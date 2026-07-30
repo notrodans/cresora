@@ -38,15 +38,6 @@ func New(
 }
 
 func (pump Pump) Run(parent context.Context) error {
-	if parent == nil {
-		panic("run delivery pump without context")
-	}
-	if pump.claims == nil {
-		panic("run delivery pump without claims")
-	}
-	if pump.exchange == nil {
-		panic("run delivery pump without exchange")
-	}
 	if pump.width < 1 {
 		panic("run delivery pump with invalid width")
 	}

@@ -36,11 +36,11 @@ func NewTerminal(input *os.File, output io.Writer) (*Terminal, error) {
 }
 
 func (terminal *Terminal) IsTTY() bool {
-	return terminal != nil && terminal.input != nil && term.IsTerminal(int(terminal.input.Fd()))
+	return term.IsTerminal(int(terminal.input.Fd()))
 }
 
 func (terminal *Terminal) ReadUsername() (string, error) {
-	if terminal == nil || !terminal.IsTTY() {
+	if !terminal.IsTTY() {
 		return "", ErrTTYRequired
 	}
 	if _, err := io.WriteString(terminal.output, "Username: "); err != nil {
@@ -54,7 +54,7 @@ func (terminal *Terminal) ReadUsername() (string, error) {
 }
 
 func (terminal *Terminal) ReadPassword(prompt string) (string, error) {
-	if terminal == nil || !terminal.IsTTY() {
+	if !terminal.IsTTY() {
 		return "", ErrTTYRequired
 	}
 	if _, err := io.WriteString(terminal.output, prompt); err != nil {
@@ -80,9 +80,6 @@ func (terminal *Terminal) ReadPassword(prompt string) (string, error) {
 }
 
 func (terminal *Terminal) Write(value string) error {
-	if terminal == nil || terminal.output == nil {
-		return errors.New("operator credential bootstrap output is unavailable")
-	}
 	_, err := io.WriteString(terminal.output, value)
 	return err
 }

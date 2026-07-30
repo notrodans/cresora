@@ -14,7 +14,6 @@ import (
 
 var (
 	ErrInvalidInput = errors.New("invalid operator credential input")
-	ErrMissingPort  = errors.New("operator credential port is unavailable")
 )
 
 // Operator is the only identity returned by bootstrap/reset. It deliberately
@@ -47,26 +46,14 @@ type Service struct {
 
 // NewService constructs the local bootstrap/reset service.
 func NewService(repository Repository, hasher Hasher) Service {
-	if repository == nil {
-		panic("create operator credential service without repository")
-	}
-	if hasher == nil {
-		panic("create operator credential service without hasher")
-	}
 	return Service{repository: repository, hasher: hasher}
 }
 
 // BootstrapOrReset hashes password in memory and atomically creates or resets
 // the named operator. No plaintext is passed to the repository.
 func (service Service) BootstrapOrReset(context context.Context, username, plaintext string) (Operator, error) {
-	if context == nil {
-		return Operator{}, fmt.Errorf("bootstrap operator credential: %w", ErrInvalidInput)
-	}
 	if failure := validateUsername(username); failure != nil {
 		return Operator{}, failure
-	}
-	if service.repository == nil || service.hasher == nil {
-		return Operator{}, ErrMissingPort
 	}
 	hash, failure := service.hasher.Hash(plaintext)
 	if failure != nil {

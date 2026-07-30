@@ -27,9 +27,6 @@ type telegramPeerLookup struct {
 
 // NewTelegramPeerLookup creates an account-scoped Telegram peer lookup.
 func NewTelegramPeerLookup(database *pgxpool.Pool) telegram.PeerLookup {
-	if database == nil {
-		return telegramPeerLookup{}
-	}
 	return newTelegramPeerLookup(database)
 }
 
@@ -41,12 +38,6 @@ func (lookup telegramPeerLookup) Lookup(
 	context context.Context,
 	request telegram.PeerLookupRequest,
 ) (telegram.PeerProjection, error) {
-	if context == nil {
-		panic("lookup Telegram target without context")
-	}
-	if lookup.database == nil {
-		panic("lookup Telegram target without database")
-	}
 	if request.AccountID == uuid.Nil {
 		panic("lookup Telegram target without account identity")
 	}

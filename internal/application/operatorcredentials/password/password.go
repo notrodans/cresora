@@ -149,10 +149,6 @@ func hashWithReader(plaintext string, parameters Parameters, random io.Reader) (
 	if err := parameters.validate(); err != nil {
 		return "", err
 	}
-	if random == nil {
-		return "", errors.New("generate password salt")
-	}
-
 	salt := make([]byte, parameters.SaltLength)
 	if _, err := io.ReadFull(random, salt); err != nil {
 		clear(salt)
