@@ -25,6 +25,7 @@ import (
 	deliverybackground "github.com/notrodans/nebula-go/internal/entrypoint/background/delivery"
 	"github.com/notrodans/nebula-go/internal/entrypoint/background/delivery/actor"
 	deliveryreaper "github.com/notrodans/nebula-go/internal/entrypoint/background/deliveryreaper"
+	deliveryreconciler "github.com/notrodans/nebula-go/internal/entrypoint/background/deliveryreconciler"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/console"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/nebula-go/internal/infrastracture/logger/slog"
@@ -33,6 +34,7 @@ import (
 	deliveries "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/deliveries"
 	mailings "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/mailings"
 	pgreaper "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/reaper"
+	pgreconciler "github.com/notrodans/nebula-go/internal/infrastracture/storage/pg/reconciler"
 	telegramaccount "github.com/notrodans/nebula-go/internal/transport/telegram/account"
 )
 
@@ -109,6 +111,10 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	reaperLoop := deliveryreaper.New(deliveryRecovery, deliveryreaper.Config{
 		Interval: cfg.DeliveryReaperInterval,
 	})
+	runReconciler := pgreconciler.New(database, pgreconciler.Config{})
+	reconcilerLoop := deliveryreconciler.New(runReconciler, deliveryreconciler.Config{
+		Interval: cfg.DeliveryReconcilerInterval,
+	})
 
 	// Создаём сервис для работы с таблицами рассылок.
 	service := mailingconsole.NewService(cfg.OperatorID, mailings.NewMailingConsole(database), mailings.NewMailings(database))
@@ -168,16 +174,19 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		}()
 	}
 
-	reaperErrors := make(chan error, 1)
-	reaperSupervisor := backgroundjobs.NewRunner(
-		[]backgroundjobs.Job{reaperLoop.Run},
+	backgroundErrors := make(chan error, 1)
+	backgroundSupervisor := backgroundjobs.NewRunner(
+		[]backgroundjobs.Job{
+			namedBackgroundJob("delivery reaper", reaperLoop.Run),
+			namedBackgroundJob("delivery reconciler", reconcilerLoop.Run),
+		},
 		lifecycleWaitTimeout,
 	)
 	go func() {
-		reaperErrors <- reaperSupervisor.Run(rootContext)
+		backgroundErrors <- backgroundSupervisor.Run(rootContext)
 	}()
 
-	return monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, reaperErrors)
+	return monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, backgroundErrors)
 }
 
 // APIs и Targets — это адаптеры уровня приложения вокруг существующего
@@ -210,6 +219,15 @@ type serverController interface {
 }
 
 type serveFunction func() error
+
+func namedBackgroundJob(name string, job backgroundjobs.Job) backgroundjobs.Job {
+	return func(context context.Context) error {
+		if failure := job(context); failure != nil {
+			return fmt.Errorf("%s: %w", name, failure)
+		}
+		return nil
+	}
+}
 
 var lifecycleWaitTimeout = 10 * time.Second
 

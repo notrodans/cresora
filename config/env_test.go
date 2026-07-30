@@ -62,6 +62,9 @@ func TestLoadFromAllowsTelegramSessionConfigurationToBeAbsent(t *testing.T) {
 	if config.DeliveryReaperInterval != DefaultDeliveryReaperInterval {
 		t.Fatalf("delivery reaper interval = %s, want default %s", config.DeliveryReaperInterval, DefaultDeliveryReaperInterval)
 	}
+	if config.DeliveryReconcilerInterval != DefaultDeliveryReconcilerInterval {
+		t.Fatalf("delivery reconciler interval = %s, want default %s", config.DeliveryReconcilerInterval, DefaultDeliveryReconcilerInterval)
+	}
 }
 
 func TestLoadFromValidatesDeliveryReaperInterval(t *testing.T) {
@@ -87,6 +90,34 @@ func TestValidateDeliveryReaperConfiguration(t *testing.T) {
 	}
 	for _, interval := range []time.Duration{0, -time.Second} {
 		if err := validateDeliveryReaperConfiguration(Config{DeliveryReaperInterval: interval}); err == nil {
+			t.Fatalf("validate interval %s succeeded, want error", interval)
+		}
+	}
+}
+
+func TestLoadFromValidatesDeliveryReconcilerInterval(t *testing.T) {
+	for _, value := range []string{"0s", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(DeliveryReconcilerIntervalEnv, value)
+
+			_, err := loadFrom(t.TempDir())
+			if err == nil {
+				t.Fatal("load configuration succeeded, want invalid reconciler interval")
+			}
+			if !strings.Contains(err.Error(), DeliveryReconcilerIntervalEnv) {
+				t.Fatalf("error %q does not name %s", err, DeliveryReconcilerIntervalEnv)
+			}
+		})
+	}
+}
+
+func TestValidateDeliveryReconcilerConfiguration(t *testing.T) {
+	if err := validateDeliveryReconcilerConfiguration(Config{DeliveryReconcilerInterval: time.Second}); err != nil {
+		t.Fatalf("validate positive delivery reconciler interval: %v", err)
+	}
+	for _, interval := range []time.Duration{0, -time.Second} {
+		if err := validateDeliveryReconcilerConfiguration(Config{DeliveryReconcilerInterval: interval}); err == nil {
 			t.Fatalf("validate interval %s succeeded, want error", interval)
 		}
 	}

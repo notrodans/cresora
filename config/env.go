@@ -50,17 +50,22 @@ type Config struct {
 	WebOnly      bool      `env:"WEB_ONLY" envDefault:"true"`
 	PublicOrigin url.URL   `env:"PUBLIC_ORIGIN"`
 	// DeliveryReaperInterval controls the transport-neutral lease recovery poll.
-	DeliveryReaperInterval       time.Duration        `env:"DELIVERY_REAPER_INTERVAL" envDefault:"1m"`
+	DeliveryReaperInterval time.Duration `env:"DELIVERY_REAPER_INTERVAL" envDefault:"1m"`
+	// DeliveryReconcilerInterval controls the transport-neutral terminal run
+	// reconciliation poll.
+	DeliveryReconcilerInterval   time.Duration        `env:"DELIVERY_RECONCILER_INTERVAL" envDefault:"1m"`
 	TelegramSessionKeyID         string               `env:"TELEGRAM_SESSION_KEY_ID" envDefault:""`
 	TelegramSessionEncryptionKey SessionEncryptionKey `env:"TELEGRAM_SESSION_ENCRYPTION_KEY" envDefault:""`
 }
 
 const (
-	DeliveryReaperIntervalEnv       = "DELIVERY_REAPER_INTERVAL"
-	DefaultDeliveryReaperInterval   = time.Minute
-	telegramSessionKeyIDEnv         = "TELEGRAM_SESSION_KEY_ID"
-	telegramSessionEncryptionKeyEnv = "TELEGRAM_SESSION_ENCRYPTION_KEY"
-	telegramSessionKeyIDMaxLength   = 128
+	DeliveryReaperIntervalEnv         = "DELIVERY_REAPER_INTERVAL"
+	DefaultDeliveryReaperInterval     = time.Minute
+	DeliveryReconcilerIntervalEnv     = "DELIVERY_RECONCILER_INTERVAL"
+	DefaultDeliveryReconcilerInterval = time.Minute
+	telegramSessionKeyIDEnv           = "TELEGRAM_SESSION_KEY_ID"
+	telegramSessionEncryptionKeyEnv   = "TELEGRAM_SESSION_ENCRYPTION_KEY"
+	telegramSessionKeyIDMaxLength     = 128
 )
 
 // SessionEncryptionKey keeps the key bytes out of ordinary formatted config
@@ -146,6 +151,9 @@ func loadFrom(root string) (Config, error) {
 	if err := validateDeliveryReaperConfiguration(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := validateDeliveryReconcilerConfiguration(cfg); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
 }
@@ -153,6 +161,13 @@ func loadFrom(root string) (Config, error) {
 func validateDeliveryReaperConfiguration(cfg Config) error {
 	if cfg.DeliveryReaperInterval <= 0 {
 		return fmt.Errorf("%s must be positive", DeliveryReaperIntervalEnv)
+	}
+	return nil
+}
+
+func validateDeliveryReconcilerConfiguration(cfg Config) error {
+	if cfg.DeliveryReconcilerInterval <= 0 {
+		return fmt.Errorf("%s must be positive", DeliveryReconcilerIntervalEnv)
 	}
 	return nil
 }
