@@ -51,6 +51,28 @@ func (factory Factory) NewClient(
 	appID int,
 	appHash string,
 ) (*gotdtelegram.Client, error) {
+	return factory.newClient(scope, appID, appHash, nil)
+}
+
+// NewClientWithConnectionState creates one new, unstarted gotd client for
+// scope and installs the narrow connection-state observer used by lifecycle
+// owners. It deliberately accepts only this dedicated callback rather than
+// exposing gotd Options, so session storage remains bound to this scope.
+func (factory Factory) NewClientWithConnectionState(
+	scope transporttelegram.SessionScope,
+	appID int,
+	appHash string,
+	onConnectionState func(gotdtelegram.ConnectionState),
+) (*gotdtelegram.Client, error) {
+	return factory.newClient(scope, appID, appHash, onConnectionState)
+}
+
+func (factory Factory) newClient(
+	scope transporttelegram.SessionScope,
+	appID int,
+	appHash string,
+	onConnectionState func(gotdtelegram.ConnectionState),
+) (*gotdtelegram.Client, error) {
 	if sessionStoreIsNil(factory.store) {
 		return nil, errNilSessionStore
 	}
@@ -69,7 +91,8 @@ func (factory Factory) NewClient(
 		scope: scope,
 	}
 	return newClient(appID, appHash, gotdtelegram.Options{
-		SessionStorage: storage,
+		SessionStorage:    storage,
+		OnConnectionState: onConnectionState,
 	}), nil
 }
 
