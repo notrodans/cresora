@@ -21,6 +21,7 @@ import (
 	application "github.com/notrodans/nebula-go/internal/application"
 	commands "github.com/notrodans/nebula-go/internal/application/commands/operator-account-auth"
 	common "github.com/notrodans/nebula-go/internal/application/operatoraccountauth"
+	challengecoordinator "github.com/notrodans/nebula-go/internal/application/operatoraccountauth/challenges"
 	requests "github.com/notrodans/nebula-go/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/nebula-go/internal/entrypoint/http/principal"
 	"rsc.io/qr"
@@ -36,7 +37,6 @@ const (
 	csrfCookie    = productionCSRFCookie
 	sessionCookie = productionSessionCookie
 	stateLifetime = 10 * time.Minute
-	maxStateCount = 4096
 )
 
 // CookieConfig is the deployment policy for the operator-account browser
@@ -159,8 +159,6 @@ type handler struct {
 	refreshQR    commands.RefreshQR
 	status       requests.Status
 	tmpl         *template.Template
-	mu           sync.Mutex
-	states       map[browserStateKey]browserState
 	actorMu      sync.Mutex
 	actorLocks   map[uuid.UUID]*sync.Mutex
 	publicOrigin *url.URL
@@ -168,28 +166,13 @@ type handler struct {
 	cookie       CookieConfig
 }
 
-// browserStateKey keeps a browser flow separate for every trusted actor. A
-// session cookie is only a flow identifier; it is never an identity source.
-type browserStateKey struct {
-	actorID uuid.UUID
-	flowID  string
-}
-
-type browserState struct {
-	Phone       string
-	PhoneID     uuid.UUID
-	PhoneExpiry time.Time
-	QR          common.QRChallenge
-	QRExpiry    time.Time
-	HasQR       bool
-	Touched     time.Time
-}
-
 type page struct {
 	Accounts           []accountRow
 	Phone              string
+	PhoneRequestID     string
 	CodeSent           bool
 	QR                 *qrView
+	QRRequestID        string
 	CSRF               string
 	Notice             string
 	Error              string
@@ -199,15 +182,10 @@ type page struct {
 	ReturnToConsole    string
 }
 
-type browserStateSnapshot struct {
-	flowID string
-	state  browserState
-}
-
 // requestScope is resolved once at the HTTP boundary. The actor comes from
-// the trusted principal middleware and the flow ID comes from the browser
-// cookie (or is created once for this response). Keeping both values together
-// prevents one request from accidentally operating on multiple browser flows.
+// the trusted principal middleware. The legacy flow cookie is retained only
+// for the existing browser-session contract; challenge state and ownership
+// come exclusively from the application coordinator.
 type requestScope struct {
 	actor  application.Actor
 	flowID string
@@ -241,8 +219,36 @@ func NewWithOptions(startPhone commands.StartPhone, verifyPhone commands.VerifyP
 	return r
 }
 
+// NewWithChallengeCoordinator composes the application-only coordinator into
+// an explicitly supplied HTTP route. It is intended for development/testing
+// with challenges/fake; production and staging must continue to use the
+// authenticated RouteDisabled composition until a real adapter is approved.
+// Account rows are intentionally empty because the coordinator does not read
+// or write account persistence.
+func NewWithChallengeCoordinator(
+	coordinator *challengecoordinator.Coordinator,
+	provider principal.Provider,
+	publicOrigin string,
+	options RouteOptions,
+) chi.Router {
+	if coordinator == nil {
+		panic("register operator account routes without challenge coordinator")
+	}
+	ports := coordinator.CQS()
+	return NewWithOptions(ports.StartPhone, ports.VerifyPhone, ports.StartQR, ports.RefreshQR, ports.Status, provider, publicOrigin, options)
+}
+
 // Register adds the account authentication routes to an existing chi router.
-func Register(router chi.Router, startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, configuredOrigin ...string) {
+func Register(
+	router chi.Router,
+	startPhone commands.StartPhone,
+	verifyPhone commands.VerifyPhone,
+	startQR commands.StartQR,
+	refreshQR commands.RefreshQR,
+	status requests.Status,
+	provider principal.Provider,
+	configuredOrigin ...string,
+) {
 	originValue := "http://example.test"
 	if len(configuredOrigin) > 0 && configuredOrigin[0] != "" {
 		originValue = configuredOrigin[0]
@@ -258,7 +264,17 @@ func Register(router chi.Router, startPhone commands.StartPhone, verifyPhone com
 
 // RegisterWithOptions adds the account authentication routes to an existing
 // chi router with an explicit command and cookie policy.
-func RegisterWithOptions(router chi.Router, startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, configuredOrigin string, options RouteOptions) {
+func RegisterWithOptions(
+	router chi.Router,
+	startPhone commands.StartPhone,
+	verifyPhone commands.VerifyPhone,
+	startQR commands.StartQR,
+	refreshQR commands.RefreshQR,
+	status requests.Status,
+	provider principal.Provider,
+	configuredOrigin string,
+	options RouteOptions,
+) {
 	if router == nil {
 		panic("register operator account routes with missing router")
 	}
@@ -283,6 +299,11 @@ func RegisterWithOptions(router chi.Router, startPhone commands.StartPhone, veri
 	}
 	if !options.Cookie.Secure && (!strings.EqualFold(origin.Scheme, "http") || !isLocalOriginHost(origin)) {
 		panic("insecure operator-account cookies require a local HTTP origin")
+	}
+	if options.Mode == RouteLive && (options.Environment == EnvironmentProduction || options.Environment == EnvironmentStaging) {
+		// Until live Telegram auth is explicitly approved, production and
+		// staging must use the same inert authenticated 503 as RouteDisabled.
+		options.Mode = RouteDisabled
 	}
 	switch options.Mode {
 	case RouteDisabled:
@@ -312,7 +333,6 @@ func RegisterWithOptions(router chi.Router, startPhone commands.StartPhone, veri
 		startQR:      startQR,
 		refreshQR:    refreshQR,
 		status:       status,
-		states:       make(map[browserStateKey]browserState),
 		actorLocks:   make(map[uuid.UUID]*sync.Mutex),
 		publicOrigin: origin,
 		disabled:     options.Mode == RouteDisabled,
@@ -334,6 +354,7 @@ func RegisterWithOptions(router chi.Router, startPhone commands.StartPhone, veri
 }
 
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if h.unavailable(w) {
 		return
 	}
@@ -344,7 +365,6 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 	csrf := h.ensureCSRF(w, r)
 	unlock := h.lockActor(scope.actor.OperatorID)
 	defer unlock()
-	snapshot := h.snapshot(scope)
 	p := page{CSRF: csrf, Notice: notice(r.URL.Query().Get("notice")), Error: errorMessage(r.URL.Query().Get("error"))}
 	p.ErrorFocus = p.Error != ""
 
@@ -355,15 +375,16 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 			p.ErrorFocus = true
 		} else {
 			p.Accounts = mapAccounts(current.Accounts)
-			snapshot = h.synchronizeStatus(scope, current)
+			if current.PhoneChallenge != nil && time.Now().Before(current.PhoneChallenge.ExpiresAt) {
+				p.Phone = current.PhoneChallenge.Phone
+				p.PhoneRequestID = current.PhoneChallenge.RequestID.String()
+				p.CodeSent = true
+			}
+			if current.QRChallenge != nil && time.Now().Before(current.QRChallenge.ExpiresAt) {
+				p.QR = makeQRView(*current.QRChallenge)
+				p.QRRequestID = current.QRChallenge.RequestID.String()
+			}
 		}
-	}
-
-	// The view model is built only after all state synchronization has happened.
-	p.Phone = snapshot.state.Phone
-	p.CodeSent = snapshot.state.PhoneID != uuid.Nil
-	if snapshot.state.HasQR && snapshot.state.QRExpiry.After(time.Now()) {
-		p.QR = makeQRView(snapshot.state.QR)
 	}
 
 	var body bytes.Buffer
@@ -376,6 +397,7 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) phone(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if h.unavailable(w) {
 		return
 	}
@@ -398,16 +420,16 @@ func (h *handler) phone(w http.ResponseWriter, r *http.Request) {
 	scope := h.scopeForActor(w, r, actor)
 	unlock := h.lockActor(scope.actor.OperatorID)
 	defer unlock()
-	challenge, err := h.startPhone.Execute(r.Context(), scope.actor, phone)
+	_, err := h.startPhone.Execute(r.Context(), scope.actor, phone)
 	if err != nil {
 		redirectError(w, "send-code")
 		return
 	}
-	h.setPhone(scope, challenge)
 	h.redirect(w, "/operator-accounts/authenticate?notice=code-sent")
 }
 
 func (h *handler) code(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if h.unavailable(w) {
 		return
 	}
@@ -423,23 +445,34 @@ func (h *handler) code(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := strings.TrimSpace(r.FormValue("code"))
+	requestIDValue := strings.TrimSpace(r.FormValue("challenge_request_id"))
 	scope := h.scopeForActor(w, r, actor)
 	unlock := h.lockActor(scope.actor.OperatorID)
 	defer unlock()
-	snapshot := h.snapshot(scope)
-	if snapshot.state.PhoneID == uuid.Nil || snapshot.state.PhoneExpiry.Before(time.Now()) || code == "" || len(code) > 16 {
+	current, err := h.status.Execute(r.Context(), scope.actor)
+	requestID := uuid.Nil
+	if requestIDValue != "" {
+		requestID, err = uuid.Parse(requestIDValue)
+		if err != nil {
+			redirectError(w, "code")
+			return
+		}
+	} else if current.PhoneChallenge != nil {
+		requestID = current.PhoneChallenge.RequestID
+	}
+	if (err != nil && requestIDValue == "") || requestID == uuid.Nil || (requestIDValue == "" && (current.PhoneChallenge == nil || !time.Now().Before(current.PhoneChallenge.ExpiresAt))) || code == "" || len(code) > 16 {
 		redirectError(w, "code")
 		return
 	}
-	if _, err := h.verifyPhone.Execute(r.Context(), scope.actor, snapshot.state.PhoneID, code); err != nil {
+	if _, err := h.verifyPhone.Execute(r.Context(), scope.actor, requestID, code); err != nil {
 		redirectError(w, "code")
 		return
 	}
-	h.clearPhone(scope)
 	h.redirect(w, "/operator-accounts/authenticate?notice=account-added")
 }
 
 func (h *handler) qr(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if h.unavailable(w) {
 		return
 	}
@@ -453,16 +486,16 @@ func (h *handler) qr(w http.ResponseWriter, r *http.Request) {
 	scope := h.scopeForActor(w, r, actor)
 	unlock := h.lockActor(scope.actor.OperatorID)
 	defer unlock()
-	challenge, err := h.startQR.Execute(r.Context(), scope.actor)
+	_, err := h.startQR.Execute(r.Context(), scope.actor)
 	if err != nil {
 		redirectError(w, "qr-start")
 		return
 	}
-	h.setQR(scope, challenge)
 	h.redirect(w, "/operator-accounts/authenticate?notice=qr-ready")
 }
 
 func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if h.unavailable(w) {
 		return
 	}
@@ -476,17 +509,27 @@ func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
 	scope := h.scopeForActor(w, r, actor)
 	unlock := h.lockActor(scope.actor.OperatorID)
 	defer unlock()
-	snapshot := h.snapshot(scope)
-	if !snapshot.state.HasQR || snapshot.state.QRExpiry.Before(time.Now()) {
+	current, err := h.status.Execute(r.Context(), scope.actor)
+	requestIDValue := strings.TrimSpace(r.FormValue("challenge_request_id"))
+	requestID := uuid.Nil
+	if requestIDValue != "" {
+		requestID, err = uuid.Parse(requestIDValue)
+		if err != nil {
+			redirectError(w, "qr-refresh")
+			return
+		}
+	} else if current.QRChallenge != nil {
+		requestID = current.QRChallenge.RequestID
+	}
+	if (err != nil && requestIDValue == "") || requestID == uuid.Nil || (requestIDValue == "" && (current.QRChallenge == nil || !time.Now().Before(current.QRChallenge.ExpiresAt))) {
 		redirectError(w, "qr-expired")
 		return
 	}
-	challenge, err := h.refreshQR.Execute(r.Context(), scope.actor, snapshot.state.QR.RequestID)
+	_, err = h.refreshQR.Execute(r.Context(), scope.actor, requestID)
 	if err != nil {
 		redirectError(w, "qr-refresh")
 		return
 	}
-	h.setQR(scope, challenge)
 	h.redirect(w, "/operator-accounts/authenticate?notice=qr-ready")
 }
 
@@ -527,17 +570,19 @@ func (h *handler) unavailable(w http.ResponseWriter) bool {
 	return true
 }
 
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+}
+
 func (h *handler) scopeForActor(w http.ResponseWriter, r *http.Request, actor application.Actor) requestScope {
 	return requestScope{actor: actor, flowID: h.flowID(w, r)}
 }
 
-// lockActor serializes the complete backend operation and its browser-cache
-// synchronization for one actor. The registry mutex is held only while
-// looking up a per-actor lock; unrelated actors never wait for an external
-// application operation belonging to another actor. This boundary is also
-// where future external Telegram operations must remain contained: add the
-// operation through these actor-scoped HTTP flows rather than introducing a
-// second unsynchronized browser-state path.
+// lockActor serializes the complete HTTP operation for one actor. The registry
+// mutex is held only while looking up a per-actor lock; unrelated actors never
+// wait for an external application operation belonging to another actor. The
+// lock is not the challenge store: coordinator state remains the sole source
+// of truth and its mutex is never held across provider calls.
 func (h *handler) lockActor(actorID uuid.UUID) func() {
 	h.actorMu.Lock()
 	if h.actorLocks == nil {
@@ -587,102 +632,6 @@ func (h *handler) ensureCSRF(w http.ResponseWriter, r *http.Request) string {
 	return token
 }
 
-func (h *handler) snapshot(scope requestScope) browserStateSnapshot {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	now := time.Now()
-	h.cleanupLocked(now)
-	key := browserStateKey{actorID: scope.actor.OperatorID, flowID: scope.flowID}
-	state := h.states[key]
-	h.expireStateLocked(&state, now)
-	state.Touched = now
-	h.states[key] = state
-	return browserStateSnapshot{flowID: scope.flowID, state: state}
-}
-
-func (h *handler) synchronizeStatus(scope requestScope, current common.Status) browserStateSnapshot {
-	// Copy the optional values before taking the browser-state lock. The
-	// application status is a snapshot, but keeping that boundary explicit
-	// prevents a caller-owned pointer from being retained in browser state.
-	var phone *common.PhoneChallenge
-	if current.PhoneChallenge != nil {
-		challenge := *current.PhoneChallenge
-		phone = &challenge
-	}
-	var qrChallenge *common.QRChallenge
-	if current.QRChallenge != nil {
-		challenge := *current.QRChallenge
-		qrChallenge = &challenge
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	now := time.Now()
-	h.cleanupLocked(now)
-	key := browserStateKey{actorID: scope.actor.OperatorID, flowID: scope.flowID}
-	state := h.states[key]
-
-	// A missing backend challenge is authoritative. In particular, do not
-	// leave an old browser cache visible after a challenge was consumed or
-	// otherwise disappeared from the actor-scoped service.
-	state.Phone = ""
-	state.PhoneID = uuid.Nil
-	state.PhoneExpiry = time.Time{}
-	if phone != nil && phone.RequestID != uuid.Nil && time.Now().Before(phone.ExpiresAt) {
-		state.Phone = phone.Phone
-		state.PhoneID = phone.RequestID
-		state.PhoneExpiry = phone.ExpiresAt
-	}
-	state.QR = common.QRChallenge{}
-	state.QRExpiry = time.Time{}
-	state.HasQR = false
-	if qrChallenge != nil && qrChallenge.RequestID != uuid.Nil && time.Now().Before(qrChallenge.ExpiresAt) {
-		state.QR = *qrChallenge
-		state.QRExpiry = qrChallenge.ExpiresAt
-		state.HasQR = true
-	}
-	state.Touched = now
-	h.states[key] = state
-	return browserStateSnapshot{flowID: scope.flowID, state: state}
-}
-
-func (h *handler) setPhone(scope requestScope, challenge common.PhoneChallenge) {
-	h.updateState(scope, func(state *browserState) {
-		state.Phone = challenge.Phone
-		state.PhoneID = challenge.RequestID
-		state.PhoneExpiry = challenge.ExpiresAt
-	})
-}
-
-func (h *handler) clearPhone(scope requestScope) {
-	h.updateState(scope, func(state *browserState) {
-		state.Phone = ""
-		state.PhoneID = uuid.Nil
-		state.PhoneExpiry = time.Time{}
-	})
-}
-
-func (h *handler) setQR(scope requestScope, challenge common.QRChallenge) {
-	h.updateState(scope, func(state *browserState) {
-		state.QR = challenge
-		state.QRExpiry = challenge.ExpiresAt
-		state.HasQR = true
-	})
-}
-
-func (h *handler) updateState(scope requestScope, update func(*browserState)) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	now := time.Now()
-	h.cleanupLocked(now)
-	key := browserStateKey{actorID: scope.actor.OperatorID, flowID: scope.flowID}
-	state := h.states[key]
-	h.expireStateLocked(&state, now)
-	update(&state)
-	state.Touched = now
-	h.states[key] = state
-}
-
 func (h *handler) flowID(w http.ResponseWriter, r *http.Request) string {
 	cookie, err := r.Cookie(h.cookie.SessionCookieName)
 	if err == nil && cookie.Value != "" {
@@ -702,61 +651,6 @@ func (h *handler) newCookie(name, value string, maxAge int) *http.Cookie {
 		Secure:   h.cookie.Secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
-	}
-}
-
-func (h *handler) cleanupLocked(now time.Time) {
-	for key, state := range h.states {
-		if state.Touched.Add(stateLifetime).Before(now) {
-			delete(h.states, key)
-			continue
-		}
-		hadChallenge := state.PhoneID != uuid.Nil || state.HasQR
-		h.expireStateLocked(&state, now)
-		if state.PhoneID == uuid.Nil {
-			state.Phone = ""
-			state.PhoneExpiry = time.Time{}
-		}
-		if !state.HasQR {
-			state.QR = common.QRChallenge{}
-			state.QRExpiry = time.Time{}
-		}
-		h.states[key] = state
-		if hadChallenge && state.PhoneID == uuid.Nil && !state.HasQR {
-			delete(h.states, key)
-			continue
-		}
-		if state.PhoneID == uuid.Nil && !state.HasQR {
-			continue
-		}
-		phoneExpired := state.PhoneID == uuid.Nil || !now.Before(state.PhoneExpiry)
-		qrExpired := !state.HasQR || !now.Before(state.QRExpiry)
-		if phoneExpired && qrExpired {
-			delete(h.states, key)
-		}
-	}
-	for len(h.states) > maxStateCount {
-		var oldest browserStateKey
-		var oldestTouched time.Time
-		for key, state := range h.states {
-			if oldestTouched.IsZero() || state.Touched.Before(oldestTouched) {
-				oldest, oldestTouched = key, state.Touched
-			}
-		}
-		delete(h.states, oldest)
-	}
-}
-
-func (h *handler) expireStateLocked(state *browserState, now time.Time) {
-	if state.PhoneID != uuid.Nil && !now.Before(state.PhoneExpiry) {
-		state.Phone = ""
-		state.PhoneID = uuid.Nil
-		state.PhoneExpiry = time.Time{}
-	}
-	if state.HasQR && !now.Before(state.QRExpiry) {
-		state.QR = common.QRChallenge{}
-		state.QRExpiry = time.Time{}
-		state.HasQR = false
 	}
 }
 
