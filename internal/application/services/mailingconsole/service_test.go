@@ -470,18 +470,10 @@ func TestServiceVerifiesConfiguredOperator(t *testing.T) {
 	}
 }
 
-func TestServiceGuardsContextAndCollaborators(t *testing.T) {
-	operatorID := uuid.New()
+func TestServiceRejectsMissingActor(t *testing.T) {
 	projection := &fakeConsole{}
 	table := &fakeMailings{scoped: &fakeOperatorMailings{row: &fakeMailing{}}}
-	assertPanics(t, func() {
-		NewService(projection, nil)
-	})
-
 	service := NewService(projection, table)
-	assertPanics(t, func() {
-		_, _ = service.Dashboard(nil, application.Actor{OperatorID: operatorID})
-	})
 	if _, failure := service.Dashboard(context.Background(), application.Actor{}); !errors.Is(failure, ErrInvalidInput) {
 		t.Fatalf("expected missing actor to be rejected, got %v", failure)
 	}
@@ -493,14 +485,4 @@ func repeatedRune(value rune, count int) string {
 		result[index] = value
 	}
 	return string(result)
-}
-
-func assertPanics(t *testing.T, call func()) {
-	t.Helper()
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic")
-		}
-	}()
-	call()
 }

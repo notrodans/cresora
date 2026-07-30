@@ -51,7 +51,7 @@ func wrapLifecycleFailure(message string, cause error) error {
 }
 
 func (entity pgMailing) Queue(context context.Context) error {
-	entity.validate(context, "queue")
+	entity.validate("queue")
 	transaction, failure := entity.database.Begin(context)
 	if failure != nil {
 		return fmt.Errorf("begin mailing %s queue transaction: %w", entity.identity.UUID(), failure)
@@ -180,7 +180,7 @@ func (entity pgMailing) Queue(context context.Context) error {
 }
 
 func (entity pgMailing) Stop(context context.Context) error {
-	entity.validate(context, "stop")
+	entity.validate("stop")
 	transaction, failure := entity.database.Begin(context)
 	if failure != nil {
 		return fmt.Errorf("begin mailing %s stop transaction: %w", entity.identity.UUID(), failure)
@@ -302,13 +302,7 @@ func (entity pgMailing) Stop(context context.Context) error {
 	return nil
 }
 
-func (entity pgMailing) validate(context context.Context, operation string) {
-	if context == nil {
-		panic(operation + " PostgreSQL mailing without context")
-	}
-	if entity.database == nil {
-		panic(operation + " PostgreSQL mailing without database")
-	}
+func (entity pgMailing) validate(operation string) {
 	if entity.identity.UUID() == uuid.Nil {
 		panic(operation + " PostgreSQL mailing with zero identity")
 	}

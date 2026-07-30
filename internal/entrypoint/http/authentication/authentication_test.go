@@ -59,7 +59,7 @@ func newAuthenticationTestHandlerWithLimiter(repository *testSessionRepository, 
 		repository,
 		operatorsessions.VerifyFunc(func(string, string) (bool, error) { return true, nil }),
 	)
-	cookie := CookieConfig{Name: "__Host-nebula_session", Secure: true}
+	cookie := CookieConfig{Name: "__Host-cresora_session", Secure: true}
 	provider := NewSessionProvider(service, cookie)
 	return NewWithRateLimiter(service, provider, "https://example.test", cookie, limiter)
 }
@@ -93,7 +93,7 @@ func TestLoginRotatesSessionAndSetsHostCookiePolicy(t *testing.T) {
 	assertAntiFramingHeaders(t, response)
 	var sessionCookie *http.Cookie
 	for _, cookie := range response.Result().Cookies() {
-		if cookie.Name == "__Host-nebula_session" && cookie.MaxAge > 0 {
+		if cookie.Name == "__Host-cresora_session" && cookie.MaxAge > 0 {
 			sessionCookie = cookie
 		}
 	}
@@ -243,25 +243,25 @@ func TestThrottledLoginIsGenericAndDoesNotCallAuthenticator(t *testing.T) {
 }
 
 func TestCookieConfigRequiresExplicitLocalInsecureModeAndHostPolicy(t *testing.T) {
-	if err := validateCookieConfig(CookieConfig{Name: "__Host-nebula_session", Secure: true}); err != nil {
+	if err := validateCookieConfig(CookieConfig{Name: "__Host-cresora_session", Secure: true}); err != nil {
 		t.Fatalf("valid host cookie rejected: %v", err)
 	}
-	if err := validateCookieConfig(CookieConfig{Name: "nebula_session", AllowInsecureLocal: true}); err != nil {
+	if err := validateCookieConfig(CookieConfig{Name: "cresora_session", AllowInsecureLocal: true}); err != nil {
 		t.Fatalf("valid explicit local cookie rejected: %v", err)
 	}
 	for _, cookie := range []CookieConfig{
-		{Name: "nebula_session", Secure: true},
-		{Name: "__Host-nebula_session"},
-		{Name: "nebula_session"},
-		{Name: "nebula_session", Secure: false, AllowInsecureLocal: true},
+		{Name: "cresora_session", Secure: true},
+		{Name: "__Host-cresora_session"},
+		{Name: "cresora_session"},
+		{Name: "cresora_session", Secure: false, AllowInsecureLocal: true},
 	} {
-		if cookie.Name == "nebula_session" && !cookie.AllowInsecureLocal {
+		if cookie.Name == "cresora_session" && !cookie.AllowInsecureLocal {
 			if err := validateCookieConfig(cookie); err == nil {
 				t.Fatalf("insecure cookie without local opt-in was accepted: %#v", cookie)
 			}
 			continue
 		}
-		if cookie.Name == "nebula_session" && cookie.AllowInsecureLocal {
+		if cookie.Name == "cresora_session" && cookie.AllowInsecureLocal {
 			continue
 		}
 		if err := validateCookieConfig(cookie); err == nil {
@@ -282,13 +282,13 @@ func TestLogoutRequiresSessionBoundCSRFAndRevokes(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://example.test/logout", strings.NewReader(form.Encode()))
 	request.Header.Set("Origin", "https://example.test")
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.AddCookie(&http.Cookie{Name: "__Host-nebula_session", Value: token})
+	request.AddCookie(&http.Cookie{Name: "__Host-cresora_session", Value: token})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login" || len(repository.revoked) != 32 {
 		t.Fatalf("logout: status=%d location=%q revoked=%d", response.Code, response.Header().Get("Location"), len(repository.revoked))
 	}
-	if cookieValue(response.Result().Cookies(), "__Host-nebula_session") != "" {
+	if cookieValue(response.Result().Cookies(), "__Host-cresora_session") != "" {
 		t.Fatal("logout did not expire session cookie")
 	}
 }
@@ -310,7 +310,7 @@ func TestLogoutInvalidCSRFOrOriginRecoversWithoutRevoking(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "https://example.test/logout", strings.NewReader(url.Values{csrfFormField: {test.csrf}}.Encode()))
 			request.Header.Set("Origin", test.origin)
 			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			request.AddCookie(&http.Cookie{Name: "__Host-nebula_session", Value: strings.Repeat("a", 43)})
+			request.AddCookie(&http.Cookie{Name: "__Host-cresora_session", Value: strings.Repeat("a", 43)})
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
 

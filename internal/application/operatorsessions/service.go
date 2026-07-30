@@ -118,9 +118,6 @@ func NewService(credentials CredentialRepository, sessions SessionRepository) Se
 // NewServiceWithVerifier is useful for server-side tests and controlled
 // adapters. The default production constructor always uses Argon2id.
 func NewServiceWithVerifier(credentials CredentialRepository, sessions SessionRepository, verifier PasswordVerifier) Service {
-	if verifier == nil {
-		panic("create operator session service without password verifier")
-	}
 	return Service{credentials: credentials, sessions: sessions, verifier: verifier}
 }
 
@@ -128,10 +125,6 @@ func NewServiceWithVerifier(credentials CredentialRepository, sessions SessionRe
 // is never reused, including when the caller supplied a pre-authentication
 // cookie. The repository receives only the digest.
 func (service Service) Login(context context.Context, username, plaintext string) (Session, error) {
-	if context == nil || service.credentials == nil || service.sessions == nil || service.verifier == nil {
-		return Session{}, ErrAuthentication
-	}
-
 	credential, lookupFailure := service.credentials.FindCredential(context, username)
 	if lookupFailure != nil {
 		service.dummyVerify()
@@ -183,9 +176,6 @@ func (service Service) Login(context context.Context, username, plaintext string
 // Validate authenticates an opaque cookie value against the server-side
 // session row. Invalid encodings never reach persistence.
 func (service Service) Validate(context context.Context, token string) (Session, error) {
-	if context == nil || service.sessions == nil {
-		return Session{}, ErrSessionInvalid
-	}
 	raw, ok := decodeToken(token)
 	if !ok {
 		return Session{}, ErrSessionInvalid
@@ -208,9 +198,6 @@ func (service Service) Validate(context context.Context, token string) (Session,
 // Revoke invalidates the server-side row. A malformed value is treated as
 // already logged out and does not produce a database query.
 func (service Service) Revoke(context context.Context, token string) error {
-	if context == nil || service.sessions == nil {
-		return nil
-	}
 	raw, ok := decodeToken(token)
 	if !ok {
 		return nil
@@ -222,7 +209,7 @@ func (service Service) Revoke(context context.Context, token string) error {
 // RevokeOperatorSessions is used by administrative credential reset paths in
 // addition to the database tokens_invalid_before boundary.
 func (service Service) RevokeOperatorSessions(context context.Context, operatorID uuid.UUID) error {
-	if context == nil || service.sessions == nil || operatorID == uuid.Nil {
+	if operatorID == uuid.Nil {
 		return nil
 	}
 	return service.sessions.RevokeOperatorSessions(context, operatorID)
@@ -246,7 +233,7 @@ func SessionCSRFToken(token string) (string, bool) {
 		return "", false
 	}
 	mac := hmac.New(sha256.New, []byte(token))
-	_, _ = mac.Write([]byte("nebula/operator-session/csrf/v1"))
+	_, _ = mac.Write([]byte("cresora/operator-session/csrf/v1"))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), true
 }
 
@@ -276,7 +263,7 @@ func decodeToken(token string) ([]byte, bool) {
 }
 
 const (
-	dummyPassword = "nebula-invalid-login-dummy"
+	dummyPassword = "cresora-invalid-login-dummy"
 	// This is a valid Argon2id PHC string using exactly DefaultParameters and
 	// Argon2Version. It is used solely to consume comparable verification work
 	// for an unknown username and contains no live secret. The parameter

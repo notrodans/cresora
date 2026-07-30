@@ -46,7 +46,6 @@ type Service struct {
 // NewService creates a stateless mailing console service. Operator ownership
 // is selected for every operation from its explicit actor.
 func NewService(console Console, mailings Mailings) Service {
-	validateServiceDependencies(console, mailings)
 	return Service{
 		console:  console,
 		mailings: mailings,
@@ -55,7 +54,6 @@ func NewService(console Console, mailings Mailings) Service {
 
 // Dashboard returns the operator's accounts, sendable dialogs, and mailings.
 func (service Service) Dashboard(context context.Context, actor application.Actor) (Dashboard, error) {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return Dashboard{}, failure
 	}
@@ -73,7 +71,6 @@ func (service Service) Dashboard(context context.Context, actor application.Acto
 
 // ListAccounts returns the operator's Telegram accounts.
 func (service Service) ListAccounts(context context.Context, actor application.Actor) ([]Account, error) {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return nil, failure
 	}
@@ -95,7 +92,6 @@ func (service Service) ListSharedDialogs(
 	actor application.Actor,
 	accountID uuid.UUID,
 ) ([]SharedDialog, error) {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return nil, failure
 	}
@@ -126,7 +122,6 @@ func (service Service) SharedDialogs(
 
 // ListMailings returns summaries for the actor's operator.
 func (service Service) ListMailings(context context.Context, actor application.Actor) ([]MailingSummary, error) {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return nil, failure
 	}
@@ -148,7 +143,6 @@ func (service Service) CreateDraft(
 	actor application.Actor,
 	input CreateDraftInput,
 ) (mailing.ID, error) {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return mailing.ID{}, failure
 	}
@@ -170,7 +164,6 @@ func (service Service) CreateDraft(
 // VerifyOperator confirms that the actor's operator exists before serving the
 // console.
 func (service Service) VerifyOperator(context context.Context, actor application.Actor) error {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return failure
 	}
@@ -186,7 +179,6 @@ func (service Service) VerifyOperator(context context.Context, actor application
 
 // Queue queues one mailing through the operator-scoped mailing row.
 func (service Service) Queue(context context.Context, actor application.Actor, mailingID uuid.UUID) error {
-	service.validateContext(context)
 	if failure := validateActor(actor); failure != nil {
 		return failure
 	}
@@ -201,27 +193,6 @@ func (service Service) Queue(context context.Context, actor application.Actor, m
 		return fmt.Errorf("queue mailing console mailing %s: %w", mailingID, translateLifecycleFailure(failure))
 	}
 	return nil
-}
-
-func (service Service) validateContext(context context.Context) {
-	if context == nil {
-		panic("use mailing console service without context")
-	}
-	if service.console == nil {
-		panic("use mailing console service without console projection")
-	}
-	if service.mailings == nil {
-		panic("use mailing console service without mailing table")
-	}
-}
-
-func validateServiceDependencies(console Console, mailings Mailings) {
-	if console == nil {
-		panic("create mailing console service without console projection")
-	}
-	if mailings == nil {
-		panic("create mailing console service without mailing table")
-	}
 }
 
 func validateActor(actor application.Actor) error {

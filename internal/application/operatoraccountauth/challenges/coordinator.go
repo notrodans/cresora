@@ -518,9 +518,6 @@ func (coordinator *Coordinator) StartPhone(ctx context.Context, actor applicatio
 
 // StartPhoneChallenge returns the full safe phone projection.
 func (coordinator *Coordinator) StartPhoneChallenge(ctx context.Context, actor applicationroot.Actor, phone string) (PhoneProjection, error) {
-	if coordinator == nil {
-		return PhoneProjection{}, ErrProviderUnavailable
-	}
 	if coordinator.isClosed() {
 		return PhoneProjection{}, ErrCoordinatorClosed
 	}
@@ -592,9 +589,6 @@ func (coordinator *Coordinator) StartQR(ctx context.Context, actor applicationro
 
 // StartQRChallenge returns the safe QR projection.
 func (coordinator *Coordinator) StartQRChallenge(ctx context.Context, actor applicationroot.Actor) (QRProjection, error) {
-	if coordinator == nil {
-		return QRProjection{}, ErrProviderUnavailable
-	}
 	if coordinator.isClosed() {
 		return QRProjection{}, ErrCoordinatorClosed
 	}
@@ -657,9 +651,6 @@ func (coordinator *Coordinator) VerifyPhone(ctx context.Context, actor applicati
 // SubmitPhoneCode atomically reserves one of the five attempts before calling
 // the provider. Concurrent submissions therefore cannot exceed the cap.
 func (coordinator *Coordinator) SubmitPhoneCode(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID, code string) (Submission, error) {
-	if coordinator == nil {
-		return Submission{}, ErrChallengeUnavailable
-	}
 	if coordinator.isClosed() {
 		return Submission{}, ErrCoordinatorClosed
 	}
@@ -737,9 +728,6 @@ func (coordinator *Coordinator) RefreshQR(ctx context.Context, actor application
 
 // RefreshQRChallenge refreshes the safe QR projection.
 func (coordinator *Coordinator) RefreshQRChallenge(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID) (QRProjection, error) {
-	if coordinator == nil {
-		return QRProjection{}, ErrChallengeUnavailable
-	}
 	if coordinator.isClosed() {
 		return QRProjection{}, ErrCoordinatorClosed
 	}
@@ -786,9 +774,6 @@ func (coordinator *Coordinator) RefreshQRChallenge(ctx context.Context, actor ap
 // the same actor succeeds via a bounded tombstone; another actor receives the
 // same unavailable result as a random ID.
 func (coordinator *Coordinator) Cancel(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID) error {
-	if coordinator == nil {
-		return ErrChallengeUnavailable
-	}
 	if coordinator.isClosed() {
 		return ErrCoordinatorClosed
 	}
@@ -834,9 +819,6 @@ func (coordinator *Coordinator) CancelQR(ctx context.Context, actor applicationr
 }
 
 func (coordinator *Coordinator) cancelKind(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID, kind Kind) error {
-	if coordinator == nil {
-		return ErrChallengeUnavailable
-	}
 	if coordinator.isClosed() {
 		return ErrCoordinatorClosed
 	}
@@ -872,9 +854,6 @@ func (coordinator *Coordinator) cancelKind(ctx context.Context, actor applicatio
 // Query returns an actor-scoped safe snapshot with no account or provider
 // identity fields.
 func (coordinator *Coordinator) Query(ctx context.Context, actor applicationroot.Actor) (StatusProjection, error) {
-	if coordinator == nil {
-		return StatusProjection{}, ErrChallengeUnavailable
-	}
 	if coordinator.isClosed() {
 		return StatusProjection{}, ErrCoordinatorClosed
 	}
@@ -1360,9 +1339,6 @@ func (coordinator *Coordinator) finishCleanupOffer() {
 }
 
 func validateCommandContext(ctx context.Context, actor applicationroot.Actor) error {
-	if ctx == nil {
-		return ErrInvalidInput
-	}
 	if failure := ctx.Err(); failure != nil {
 		return failure
 	}

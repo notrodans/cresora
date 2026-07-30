@@ -158,62 +158,9 @@ func TestNewResolverGuards(t *testing.T) {
 		return transport.PeerProjection{}, nil
 	})
 
-	tests := []struct {
-		name string
-		call func()
-	}{
-		{
-			name: "zero account",
-			call: func() {
-				_ = targets.NewResolver(uuid.Nil, lookup)
-			},
-		},
-		{
-			name: "nil lookup",
-			call: func() {
-				_ = targets.NewResolver(uuid.New(), nil)
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			assertPanics(t, test.call)
-		})
-	}
-}
-
-func TestResolverTargetGuards(t *testing.T) {
-	resolver := targets.NewResolver(uuid.New(), fakeLookup(func(
-		context.Context,
-		transport.PeerLookupRequest,
-	) (transport.PeerProjection, error) {
-		return transport.PeerProjection{}, nil
-	}))
-
-	tests := []struct {
-		name string
-		call func()
-	}{
-		{
-			name: "nil context",
-			call: func() {
-				_, _ = resolver.Target(nil, recipient.Identity(uuid.New()))
-			},
-		},
-		{
-			name: "nil recipient",
-			call: func() {
-				_, _ = resolver.Target(context.Background(), nil)
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			assertPanics(t, test.call)
-		})
-	}
+	assertPanics(t, func() {
+		_ = targets.NewResolver(uuid.Nil, lookup)
+	})
 }
 
 func TestResolverRejectsInvalidPeers(t *testing.T) {

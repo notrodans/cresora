@@ -172,9 +172,6 @@ func NewLoginRateLimiter(config LoginRateLimitConfig) *LoginRateLimiter {
 // Allow records one login attempt. A false result is intentionally
 // indistinguishable from bad credentials to the HTTP caller.
 func (limiter *LoginRateLimiter) Allow(username, remoteAddr string) bool {
-	if limiter == nil {
-		return false
-	}
 	now := limiter.now()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
@@ -221,9 +218,6 @@ func (limiter *LoginRateLimiter) Allow(username, remoteAddr string) bool {
 
 // Len is a diagnostic/test seam for the bounded accounting guarantee.
 func (limiter *LoginRateLimiter) Len() int {
-	if limiter == nil {
-		return 0
-	}
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 	return len(limiter.entries)
@@ -281,18 +275,12 @@ func Register(router chi.Router, service Authenticator, provider principal.Provi
 }
 
 func RegisterWithRateLimiter(router chi.Router, service Authenticator, provider principal.Provider, publicOrigin string, cookie CookieConfig, limiter *LoginRateLimiter) {
-	if router == nil || service == nil || provider == nil {
-		panic("register authentication routes with missing dependency")
-	}
 	origin, failure := parsePublicOrigin(publicOrigin)
 	if failure != nil {
 		panic(failure)
 	}
 	if failure := validateCookieConfig(cookie); failure != nil {
 		panic(failure)
-	}
-	if limiter == nil {
-		panic("register authentication routes without login rate limiter")
 	}
 	handler := &Handler{
 		service:      service,
@@ -317,9 +305,6 @@ func NewWithTemplate(service Authenticator, provider principal.Provider, publicO
 }
 
 func NewWithTemplateAndRateLimiter(service Authenticator, provider principal.Provider, publicOrigin string, cookie CookieConfig, loginTemplate *template.Template, limiter *LoginRateLimiter) chi.Router {
-	if loginTemplate == nil {
-		panic("create authentication routes without login template")
-	}
 	router := chi.NewRouter()
 	origin, failure := parsePublicOrigin(publicOrigin)
 	if failure != nil {
@@ -327,9 +312,6 @@ func NewWithTemplateAndRateLimiter(service Authenticator, provider principal.Pro
 	}
 	if failure := validateCookieConfig(cookie); failure != nil {
 		panic(failure)
-	}
-	if limiter == nil {
-		panic("create authentication routes without login rate limiter")
 	}
 	handler := &Handler{service: service, provider: provider, publicOrigin: origin, cookie: cookie, rateLimiter: limiter, template: loginTemplate}
 	router.HandleFunc("/login", handler.loginDispatch)
@@ -601,9 +583,7 @@ func safeLocalRedirect(value string) string {
 
 func randomValue(size int) string {
 	raw := make([]byte, size)
-	if _, failure := rand.Read(raw); failure != nil {
-		panic("operator authentication entropy unavailable")
-	}
+	rand.Read(raw)
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 

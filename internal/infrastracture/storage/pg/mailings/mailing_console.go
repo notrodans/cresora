@@ -27,12 +27,11 @@ type pgMailingConsole struct {
 var _ mailingconsole.Console = pgMailingConsole{}
 
 func NewMailingConsole(database *pgxpool.Pool) pgMailingConsole {
-	validatePool(database, "mailing console")
 	return pgMailingConsole{database: database}
 }
 
 func (all pgMailingConsole) OperatorExists(context context.Context, operatorID uuid.UUID) (bool, error) {
-	all.validate(context, operatorID)
+	all.validate(operatorID)
 	var exists bool
 	if failure := all.database.QueryRow(
 		context,
@@ -48,7 +47,7 @@ func (all pgMailingConsole) Dashboard(
 	context context.Context,
 	operatorID uuid.UUID,
 ) ([]mailingconsole.Account, []mailingconsole.SharedDialog, []mailingconsole.PrivateDialog, []mailingconsole.MailingSummary, error) {
-	all.validate(context, operatorID)
+	all.validate(operatorID)
 	accounts, failure := all.accounts(context, operatorID)
 	if failure != nil {
 		return nil, nil, nil, nil, failure
@@ -290,9 +289,6 @@ func (all pgOperatorMailings) CreateDraft(
 	input mailingconsole.CreateDraftInput,
 ) (mailing.ID, error) {
 	all.validate()
-	if context == nil {
-		panic("create mailing draft without context")
-	}
 	operatorID := all.operatorID
 	transaction, failure := all.database.Begin(context)
 	if failure != nil {
@@ -497,12 +493,6 @@ func (all pgOperatorMailings) CreateDraft(
 	return mailing.Identity(draftID), nil
 }
 
-func (all pgMailingConsole) validate(context context.Context, operatorID uuid.UUID) {
-	if context == nil {
-		panic("use mailing console PostgreSQL projection without context")
-	}
-	if all.database == nil {
-		panic("use mailing console PostgreSQL projection without database")
-	}
+func (all pgMailingConsole) validate(operatorID uuid.UUID) {
 	validateOperatorID(operatorID, "use mailing console PostgreSQL projection")
 }

@@ -52,11 +52,8 @@ func (store *OperatorWebSessionStore) CreateSession(
 	verifiedPasswordHash string,
 	tokenHash []byte,
 ) (operatorsessions.StoredSession, error) {
-	if context == nil || operatorID == uuid.Nil || verifiedUsername == "" || verifiedPasswordHash == "" || len(tokenHash) != sha256Size {
+	if operatorID == uuid.Nil || verifiedUsername == "" || verifiedPasswordHash == "" || len(tokenHash) != sha256Size {
 		return operatorsessions.StoredSession{}, errors.New("create operator web session: invalid input")
-	}
-	if store == nil || store.database == nil {
-		return operatorsessions.StoredSession{}, errors.New("create operator web session: database is required")
 	}
 
 	transaction, failure := store.database.Begin(context)
@@ -159,11 +156,8 @@ func (store *OperatorWebSessionStore) FindValidSession(
 	context context.Context,
 	tokenHash []byte,
 ) (operatorsessions.StoredSession, error) {
-	if context == nil || len(tokenHash) != sha256Size {
+	if len(tokenHash) != sha256Size {
 		return operatorsessions.StoredSession{}, errors.New("find operator web session: invalid input")
-	}
-	if store == nil || store.database == nil {
-		return operatorsessions.StoredSession{}, errors.New("find operator web session: database is required")
 	}
 
 	transaction, failure := store.database.Begin(context)
@@ -223,7 +217,7 @@ func (store *OperatorWebSessionStore) FindValidSession(
 }
 
 func (store *OperatorWebSessionStore) RevokeSession(context context.Context, tokenHash []byte) error {
-	if context == nil || len(tokenHash) != sha256Size || store == nil || store.database == nil {
+	if len(tokenHash) != sha256Size {
 		return nil
 	}
 	_, failure := store.database.Exec(
@@ -240,7 +234,7 @@ func (store *OperatorWebSessionStore) RevokeSession(context context.Context, tok
 }
 
 func (store *OperatorWebSessionStore) RevokeOperatorSessions(context context.Context, operatorID uuid.UUID) error {
-	if context == nil || operatorID == uuid.Nil || store == nil || store.database == nil {
+	if operatorID == uuid.Nil {
 		return nil
 	}
 	_, failure := store.database.Exec(

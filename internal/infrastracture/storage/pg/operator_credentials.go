@@ -39,12 +39,6 @@ func (store *OperatorCredentialStore) BootstrapOrReset(
 	username string,
 	passwordHash string,
 ) (operatorcredentials.Operator, error) {
-	if context == nil {
-		return operatorcredentials.Operator{}, errors.New("bootstrap operator credential: context is required")
-	}
-	if store == nil || store.database == nil {
-		return operatorcredentials.Operator{}, errors.New("bootstrap operator credential: database is required")
-	}
 	if username == "" || strings.TrimSpace(username) != username || passwordHash == "" {
 		return operatorcredentials.Operator{}, errors.New("bootstrap operator credential: invalid update")
 	}
@@ -83,12 +77,6 @@ func (store *OperatorCredentialStore) FindCredential(
 	context context.Context,
 	username string,
 ) (operatorsessions.Credential, error) {
-	if context == nil {
-		return operatorsessions.Credential{}, errors.New("find operator credential: context is required")
-	}
-	if store == nil || store.database == nil {
-		return operatorsessions.Credential{}, errors.New("find operator credential: database is required")
-	}
 	if username == "" || strings.TrimSpace(username) != username {
 		return operatorsessions.Credential{}, operatorsessions.ErrCredentialNotFound
 	}

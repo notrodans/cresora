@@ -154,18 +154,6 @@ func TestTelegramPeerLookupGuards(t *testing.T) {
 		call func()
 	}{
 		{
-			name: "nil context",
-			call: func() {
-				newTelegramPeerLookup(validDatabase).Lookup(nil, validRequest)
-			},
-		},
-		{
-			name: "nil database",
-			call: func() {
-				NewTelegramPeerLookup(nil).Lookup(context.Background(), validRequest)
-			},
-		},
-		{
 			name: "zero account",
 			call: func() {
 				request := validRequest

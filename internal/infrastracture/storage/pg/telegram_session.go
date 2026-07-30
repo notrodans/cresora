@@ -54,9 +54,6 @@ func NewTelegramSessionStore(
 	keyID string,
 	key []byte,
 ) (telegram.SessionStore, error) {
-	if database == nil {
-		return nil, errors.New("create telegram session store: database is required")
-	}
 	return newTelegramSessionStore(database, keyID, key)
 }
 
@@ -65,9 +62,6 @@ func newTelegramSessionStore(
 	keyID string,
 	key []byte,
 ) (telegram.SessionStore, error) {
-	if database == nil {
-		return nil, errors.New("create telegram session store: database is required")
-	}
 	if err := validateTelegramSessionKeyID(keyID); err != nil {
 		return nil, err
 	}
@@ -95,9 +89,6 @@ func (store *telegramSessionStore) Load(
 	context context.Context,
 	scope telegram.SessionScope,
 ) (telegram.Session, error) {
-	if context == nil {
-		return telegram.Session{}, errors.New("load telegram session: context is required")
-	}
 	if !validSessionScope(scope) {
 		return telegram.Session{}, fmt.Errorf("load telegram session: %w", telegram.ErrSessionInvalid)
 	}
@@ -108,9 +99,6 @@ func (store *telegramSessionStore) Load(
 		nonce         bytesNullable
 		ciphertext    bytesNullable
 	)
-	if store == nil || store.database == nil || store.aead == nil {
-		return telegram.Session{}, errors.New("load telegram session: store is not initialized")
-	}
 	failure := store.database.QueryRow(
 		context,
 		`SELECT session.format_version,
@@ -162,12 +150,6 @@ func (store *telegramSessionStore) Store(
 	scope telegram.SessionScope,
 	plaintext []byte,
 ) error {
-	if context == nil {
-		return errors.New("store telegram session: context is required")
-	}
-	if store == nil || store.database == nil || store.aead == nil {
-		return errors.New("store telegram session: store is not initialized")
-	}
 	if !validSessionScope(scope) {
 		return fmt.Errorf("store telegram session: %w", telegram.ErrSessionInvalid)
 	}
@@ -242,7 +224,7 @@ func encryptTelegramSession(
 	if len(plaintext) > telegramSessionMaxBytes {
 		return nil, nil, telegram.ErrSessionTooLarge
 	}
-	if aead == nil || !validSessionScope(scope) {
+	if !validSessionScope(scope) {
 		return nil, nil, telegram.ErrSessionInvalid
 	}
 	nonce := make([]byte, aead.NonceSize())
@@ -262,7 +244,7 @@ func decryptTelegramSession(
 	nonce []byte,
 	ciphertext []byte,
 ) ([]byte, error) {
-	if aead == nil || !validSessionScope(scope) || formatVersion != telegramSessionFormatVersion || storedKeyID != currentKeyID {
+	if !validSessionScope(scope) || formatVersion != telegramSessionFormatVersion || storedKeyID != currentKeyID {
 		return nil, telegram.ErrSessionInvalid
 	}
 	if len(nonce) != aead.NonceSize() || len(ciphertext) < aead.Overhead() || len(ciphertext) > telegramSessionMaxBytes+aead.Overhead() {
