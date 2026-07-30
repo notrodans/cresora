@@ -23,8 +23,10 @@
 * Use type assertions and type switches when they are clearer than additional abstractions.
 * Avoid reflection unless static typing, generics, or explicit code would be substantially worse.
 * Use generics only for genuinely reusable algorithms or data structures.
-* Validate nil at construction and external boundaries, not defensively in every method.
-* Required dependencies and context.Context must be non-nil by contract.
+* Validate nil at genuine external boundaries and when nil is documented or represents optional behavior.
+* Trusted internal required arguments and dependencies, including constructor arguments and context.Context, must be non-nil by contract; do not add defensive nil checks solely to improve a later panic.
+* Keep nil handling for HTTP/CLI input, database/SDK/interface results, typed-nil hazards, optional dependencies, and cleanup or shutdown paths that can legitimately observe nil.
+* Constructors validate domain/configuration values and establish invariants; they need not validate trusted required dependencies for nil.
 * Private methods may rely on established invariants.
 * Nil receivers are unsupported unless explicitly documented.
 * Avoid typed nil values stored in interfaces.
