@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pressly/goose/v3"
 
 	"github.com/notrodans/cresora/config"
 )
@@ -40,17 +40,14 @@ func TestCurrentBaselinePostgres(t *testing.T) {
 
 	applyCurrentBaseline(t, context, databaseURL)
 	var (
-		appliedCount int
-		version      sql.NullInt64
+		repeatedAppliedCount int
+		repeatedVersion      sql.NullInt64
 	)
-	if failure := database.QueryRowContext(
-		context,
-		`SELECT count(*), max(version_id) FROM goose_db_version WHERE is_applied`,
-	).Scan(&appliedCount, &version); failure != nil {
+	if failure := database.QueryRowContext(context, `SELECT count(*), max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&repeatedAppliedCount, &repeatedVersion); failure != nil {
 		t.Fatalf("read repeated baseline history: %v", failure)
 	}
-	if appliedCount != firstAppliedCount || !version.Valid || version.Int64 != currentBaselineVersion {
-		t.Fatalf("repeated baseline history = count %d version %v, want count %d version %d", appliedCount, version, firstAppliedCount, currentBaselineVersion)
+	if repeatedAppliedCount != firstAppliedCount || !repeatedVersion.Valid || repeatedVersion.Int64 != currentBaselineVersion {
+		t.Fatalf("repeated baseline history = count %d version %v, want count %d version %d", repeatedAppliedCount, repeatedVersion, firstAppliedCount, currentBaselineVersion)
 	}
 
 	assertOperatorAccountCatalog(t, context, database)
@@ -93,57 +90,57 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 		},
 		{
 			name:  "zero identity",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, telegram_user_id) VALUES ($1, $2, 'active', $3)`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id) VALUES ($1, $2, 'active', 1, $3)`,
 			args:  []any{uuid.New(), operatorID, int64(0)},
 		},
 		{
 			name:  "negative identity",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, telegram_user_id) VALUES ($1, $2, 'active', $3)`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id) VALUES ($1, $2, 'active', 1, $3)`,
 			args:  []any{uuid.New(), operatorID, int64(-1)},
 		},
 		{
 			name:  "active without identity",
-			query: `INSERT INTO operator_accounts (id, operator_id, status) VALUES ($1, $2, 'active')`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version) VALUES ($1, $2, 'active', 1)`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "reauthentication without identity",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, failure_code) VALUES ($1, $2, 'reauth_required', 'auth_expired')`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, failure_code) VALUES ($1, $2, 'reauth_required', 1, 'auth_expired')`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "reauthentication without failure code",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, telegram_user_id) VALUES ($1, $2, 'reauth_required', 2001)`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id) VALUES ($1, $2, 'reauth_required', 1, 2001)`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "reauthentication with unsupported failure code",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, telegram_user_id, failure_code) VALUES ($1, $2, 'reauth_required', 2002, 'unsupported')`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id, failure_code) VALUES ($1, $2, 'reauth_required', 1, 2002, 'unsupported')`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "failure code outside reauthentication",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, failure_code) VALUES ($1, $2, 'disconnected', 'auth_expired')`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, failure_code) VALUES ($1, $2, 'disconnected', 1, 'auth_expired')`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "authentication expiry outside authenticating",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, auth_expires_at) VALUES ($1, $2, 'disconnected', CURRENT_TIMESTAMP)`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, auth_expires_at) VALUES ($1, $2, 'disconnected', 1, CURRENT_TIMESTAMP)`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "authenticating without expiry",
-			query: `INSERT INTO operator_accounts (id, operator_id, status) VALUES ($1, $2, 'authenticating')`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version) VALUES ($1, $2, 'authenticating', 1)`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "invalid non-null phone",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, phone) VALUES ($1, $2, 'disconnected', 'not-a-phone')`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, phone) VALUES ($1, $2, 'disconnected', 1, 'not-a-phone')`,
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
 			name:  "timestamp inversion",
-			query: `INSERT INTO operator_accounts (id, operator_id, status, created_at, updated_at) VALUES ($1, $2, 'disconnected', $3, $4)`,
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, created_at, updated_at) VALUES ($1, $2, 'disconnected', 1, $3, $4)`,
 			args: []any{
 				uuid.New(),
 				operatorID,
@@ -160,10 +157,10 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 	}
 
 	firstIdentity := uuid.New()
-	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, telegram_user_id) VALUES ($1, $2, 'active', 3001)`, firstIdentity, operatorID); failure != nil {
+	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id) VALUES ($1, $2, 'active', 1, 3001)`, firstIdentity, operatorID); failure != nil {
 		t.Fatalf("insert first identified account: %v", failure)
 	}
-	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, telegram_user_id) VALUES ($1, $2, 'active', 3001)`, uuid.New(), operatorID); failure == nil {
+	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id) VALUES ($1, $2, 'active', 1, 3001)`, uuid.New(), operatorID); failure == nil {
 		t.Fatal("duplicate Telegram identity was accepted")
 	}
 }
@@ -300,12 +297,20 @@ func openMigrationDatabase(t *testing.T, context context.Context, databaseURL st
 
 func applyCurrentBaseline(t *testing.T, context context.Context, databaseURL string) {
 	t.Helper()
-	if failure := ExecuteMigrations(
-		context,
-		&config.Config{DbUrl: databaseURL},
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		migrationsPathForTest(t),
-	); failure != nil {
+	database, failure := sql.Open("pgx", databaseURL)
+	if failure != nil {
+		t.Fatalf("open migration database: %v", failure)
+	}
+	defer database.Close()
+	if failure = database.PingContext(context); failure != nil {
+		t.Fatalf("ping migration database: %v", failure)
+	}
+	provider, failure := goose.NewProvider(goose.DialectPostgres, database, os.DirFS(migrationsPathForTest(t)))
+	if failure != nil {
+		t.Fatalf("create migration provider: %v", failure)
+	}
+	defer provider.Close()
+	if _, failure = provider.Up(context); failure != nil {
 		t.Fatalf("apply current baseline: %v", failure)
 	}
 }

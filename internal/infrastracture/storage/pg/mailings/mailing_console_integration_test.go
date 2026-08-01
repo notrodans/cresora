@@ -329,11 +329,11 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 	if failure = exec(
 		`INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, telegram_user_id, status, status_version)
 		 VALUES ($1, $2, '+12025551001', $3, 'Console A', 100001, 'active', 1),
-		        ($4, $2, NULL, NULL, NULL, 100002, 'active', 2),
-		        ($6, $7, '+12025551003', $8, 'Console B', 100003, 'active', 3),
-		        ($9, $2, NULL, NULL, NULL, 100004, 'disconnected', 1)`,
+		        ($4, $2, NULL::varchar, NULL::varchar, NULL::varchar, 100002, 'active', 2),
+		        ($5, $6, '+12025551003', $7, 'Console B', 100003, 'active', 3),
+		        ($8, $2, NULL::varchar, NULL::varchar, NULL::varchar, 100004, 'disconnected', 1)`,
 		fixture.accountA, fixture.operatorA, "console-a-"+fixture.accountA.String()[:8],
-		fixture.accountA2, "console-a2-"+fixture.accountA2.String()[:8],
+		fixture.accountA2,
 		fixture.accountB, fixture.operatorB, "console-b-"+fixture.accountB.String()[:8],
 		fixture.inactiveAccountA,
 	); failure != nil {

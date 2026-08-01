@@ -2,10 +2,9 @@ package operatoraccounts
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,8 +16,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
-	"github.com/notrodans/cresora/config"
 	application "github.com/notrodans/cresora/internal/application"
 	applicationoperatoraccounts "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
@@ -44,9 +44,9 @@ func TestOperatorAccountStorePostgresLifecycleOwnershipAndSessionDeletion(t *tes
 	}
 	if _, failure := database.Exec(
 		context,
-		`INSERT INTO operator_accounts (id, operator_id, status) VALUES
-			($1, $2, 'disconnected'),
-			($3, $4, 'disconnected')`,
+		`INSERT INTO operator_accounts (id, operator_id, status, status_version) VALUES
+			($1, $2, 'disconnected', 1),
+			($3, $4, 'disconnected', 1)`,
 		accountA,
 		operatorA,
 		accountB,
@@ -242,15 +242,30 @@ func newOperatorAccountsIntegrationDatabase(t *testing.T) (context.Context, *pgx
 		admin.Close()
 		t.Fatalf("create isolated database URL: %v", failure)
 	}
-	if failure = pgstorage.ExecuteMigrations(
-		ctx,
-		&config.Config{DbUrl: isolatedURL},
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		migrationsPath(t),
-	); failure != nil {
+	migrationDatabase, failure := sql.Open("pgx", isolatedURL)
+	if failure != nil {
+		admin.Close()
+		t.Fatalf("open migration database: %v", failure)
+	}
+	if failure = migrationDatabase.PingContext(ctx); failure != nil {
+		migrationDatabase.Close()
+		admin.Close()
+		t.Fatalf("ping migration database: %v", failure)
+	}
+	provider, failure := goose.NewProvider(goose.DialectPostgres, migrationDatabase, os.DirFS(migrationsPath(t)))
+	if failure != nil {
+		migrationDatabase.Close()
+		admin.Close()
+		t.Fatalf("create migration provider: %v", failure)
+	}
+	if _, failure = provider.Up(ctx); failure != nil {
+		provider.Close()
+		migrationDatabase.Close()
 		admin.Close()
 		t.Fatalf("apply current baseline: %v", failure)
 	}
+	provider.Close()
+	migrationDatabase.Close()
 	database, failure := pgxpool.New(ctx, isolatedURL)
 	if failure != nil {
 		admin.Close()
