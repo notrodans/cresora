@@ -163,6 +163,18 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id) VALUES ($1, $2, 'active', 1, 3001)`, uuid.New(), operatorID); failure == nil {
 		t.Fatal("duplicate Telegram identity was accepted")
 	}
+	phoneAccount := uuid.New()
+	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, phone, status, status_version) VALUES ($1, $2, '+12025550301', 'disconnected', 1)`, phoneAccount, operatorID); failure != nil {
+		t.Fatalf("insert first normalized phone account: %v", failure)
+	}
+	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, phone, status, status_version) VALUES ($1, $2, '+12025550301', 'disconnected', 1)`, uuid.New(), operatorID); failure == nil {
+		t.Fatal("duplicate operator phone was accepted")
+	}
+	for range 2 {
+		if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version) VALUES ($1, $2, 'disconnected', 1)`, uuid.New(), operatorID); failure != nil {
+			t.Fatalf("insert null phone account: %v", failure)
+		}
+	}
 }
 
 func TestCurrentDeliveryAndSessionTriggersPostgres(t *testing.T) {
@@ -340,6 +352,7 @@ func assertOperatorAccountCatalog(t *testing.T, context context.Context, databas
 	for _, index := range []string{
 		"ix_operator_accounts_operator_status",
 		"uq_operator_accounts_telegram_user_id",
+		"uq_operator_accounts_operator_phone",
 	} {
 		var count int
 		if failure := database.QueryRowContext(context, `
@@ -352,6 +365,21 @@ func assertOperatorAccountCatalog(t *testing.T, context context.Context, databas
 		}
 		if count != 1 {
 			t.Fatalf("operator account index %q count = %d, want 1", index, count)
+		}
+	}
+	var phoneIndexDefinition string
+	if failure := database.QueryRowContext(context, `
+		SELECT indexdef
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'operator_accounts'
+		  AND indexname = 'uq_operator_accounts_operator_phone'`).Scan(&phoneIndexDefinition); failure != nil {
+		t.Fatalf("inspect operator account phone index definition: %v", failure)
+	}
+	phoneIndexDefinition = strings.ToLower(phoneIndexDefinition)
+	for _, fragment := range []string{"(operator_id, phone)", "where (phone is not null)"} {
+		if !strings.Contains(phoneIndexDefinition, fragment) {
+			t.Fatalf("operator account phone index definition = %q, missing %q", phoneIndexDefinition, fragment)
 		}
 	}
 }

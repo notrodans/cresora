@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/base64"
+	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"testing"
@@ -27,6 +29,64 @@ func TestSessionEncryptionKeyUnmarshalText(t *testing.T) {
 	}
 	if key.String() != "[redacted]" {
 		t.Fatalf("String() = %q, want redacted value", key.String())
+	}
+	if formatted := fmt.Sprintf("%s", key); strings.Contains(formatted, string(keyBytes)) {
+		t.Fatalf("formatted key exposed secret: %q", formatted)
+	}
+}
+
+func TestSecretStringRedactsFormattingAndLogging(t *testing.T) {
+	secretValue := "telegram-api-hash-secret"
+	var secret SecretString
+	if err := secret.UnmarshalText([]byte(secretValue)); err != nil {
+		t.Fatalf("unmarshal secret: %v", err)
+	}
+
+	for _, formatted := range []string{
+		secret.String(),
+		fmt.Sprintf("%v", secret),
+		fmt.Sprintf("%+v", secret),
+		fmt.Sprintf("%#v", secret),
+		fmt.Sprintf("%s", secret),
+		fmt.Sprintf("%q", secret),
+	} {
+		if strings.Contains(formatted, secretValue) {
+			t.Fatalf("formatted secret exposed value: %q", formatted)
+		}
+	}
+
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	logger.Info("configuration", "telegram_api_hash", secret)
+	if strings.Contains(logs.String(), secretValue) {
+		t.Fatalf("structured log exposed secret: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "[redacted]") {
+		t.Fatalf("structured log did not use redacted representation: %q", logs.String())
+	}
+}
+
+func TestSecretStringRejectsBoundaryWhitespaceAndControlCharacters(t *testing.T) {
+	const secretValue = "telegram-api-hash-secret"
+	for _, input := range []string{
+		" " + secretValue,
+		secretValue + " ",
+		"\t" + secretValue,
+		secretValue + "\n",
+		secretValue + "\x00suffix",
+		"prefix\x7fsuffix",
+	} {
+		t.Run(fmt.Sprintf("%q", input), func(t *testing.T) {
+			var secret SecretString
+			if err := secret.UnmarshalText([]byte(input)); err == nil {
+				t.Fatalf("unmarshal invalid API hash %q succeeded", input)
+			} else if strings.Contains(err.Error(), input) || strings.Contains(err.Error(), secretValue) {
+				t.Fatalf("error %q exposed API hash value", err)
+			}
+			if secret.Configured() || secret.Value() != "" {
+				t.Fatalf("rejected API hash retained state: configured=%t value=%q", secret.Configured(), secret.Value())
+			}
+		})
 	}
 }
 
@@ -59,6 +119,12 @@ func TestLoadFromAllowsTelegramSessionConfigurationToBeAbsent(t *testing.T) {
 	}
 	if config.TelegramSessionEncryptionKey.Configured() {
 		t.Fatal("expected absent Telegram session key to remain unconfigured")
+	}
+	if config.TelegramAuthEnabled {
+		t.Fatal("expected Telegram auth to remain disabled by default")
+	}
+	if config.TelegramAPIID != 0 || config.TelegramAPIHash.Configured() {
+		t.Fatalf("Telegram API settings = (%d, %s), want absent settings", config.TelegramAPIID, config.TelegramAPIHash)
 	}
 	if config.DeliveryReaperInterval != DefaultDeliveryReaperInterval {
 		t.Fatalf("delivery reaper interval = %s, want default %s", config.DeliveryReaperInterval, DefaultDeliveryReaperInterval)
@@ -135,6 +201,91 @@ func TestLoadFromRequiresTelegramSessionKeyPairWhenConfigured(t *testing.T) {
 	if !strings.Contains(err.Error(), telegramSessionEncryptionKeyEnv) {
 		t.Fatalf("error %q does not name %s", err, telegramSessionEncryptionKeyEnv)
 	}
+}
+
+func TestLoadFromRequiresTelegramAuthenticationConfigurationWhenEnabled(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(telegramAuthEnabledEnv, "true")
+	t.Setenv(telegramAPIIDEnv, "12345")
+	t.Setenv(telegramAPIHashEnv, "telegram-api-hash-secret")
+
+	_, err := loadFrom(t.TempDir())
+	if err == nil {
+		t.Fatal("load configuration succeeded without encrypted session configuration")
+	}
+	if !strings.Contains(err.Error(), telegramSessionKeyIDEnv) && !strings.Contains(err.Error(), telegramSessionEncryptionKeyEnv) {
+		t.Fatalf("error %q does not name a required Telegram session setting", err)
+	}
+}
+
+func TestLoadFromAcceptsCompleteTelegramAuthenticationConfiguration(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(telegramAuthEnabledEnv, "true")
+	t.Setenv(telegramAPIIDEnv, "12345")
+	t.Setenv(telegramAPIHashEnv, "telegram-api-hash-secret")
+	t.Setenv(telegramSessionKeyIDEnv, "current")
+	t.Setenv(telegramSessionEncryptionKeyEnv, base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901")))
+
+	config, err := loadFrom(t.TempDir())
+	if err != nil {
+		t.Fatalf("load complete Telegram authentication configuration: %v", err)
+	}
+	if !config.TelegramAuthEnabled || config.TelegramAPIID != 12345 {
+		t.Fatalf("Telegram authentication configuration = enabled:%t api ID:%d", config.TelegramAuthEnabled, config.TelegramAPIID)
+	}
+	if config.TelegramAPIHash.Value() != "telegram-api-hash-secret" {
+		t.Fatalf("Telegram API hash value was not retained for integration use")
+	}
+	if !config.TelegramSessionEncryptionKey.Configured() || config.TelegramSessionKeyID != "current" {
+		t.Fatal("complete Telegram session configuration was not retained")
+	}
+}
+
+func TestValidateTelegramConfigurationRequiresAPISettingsWhenEnabled(t *testing.T) {
+	key := configuredSessionKey(t)
+	base := Config{
+		TelegramAuthEnabled:          true,
+		TelegramAPIID:                12345,
+		TelegramAPIHash:              configuredSecret("telegram-api-hash-secret"),
+		TelegramSessionKeyID:         "current",
+		TelegramSessionEncryptionKey: key,
+	}
+
+	for _, test := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{name: "missing API ID", cfg: Config{TelegramAuthEnabled: true, TelegramAPIHash: base.TelegramAPIHash, TelegramSessionKeyID: base.TelegramSessionKeyID, TelegramSessionEncryptionKey: key}, want: telegramAPIIDEnv},
+		{name: "missing API hash", cfg: Config{TelegramAuthEnabled: true, TelegramAPIID: base.TelegramAPIID, TelegramSessionKeyID: base.TelegramSessionKeyID, TelegramSessionEncryptionKey: key}, want: telegramAPIHashEnv},
+		{name: "missing session key ID", cfg: Config{TelegramAuthEnabled: true, TelegramAPIID: base.TelegramAPIID, TelegramAPIHash: base.TelegramAPIHash, TelegramSessionEncryptionKey: key}, want: telegramSessionKeyIDEnv},
+		{name: "missing session key", cfg: Config{TelegramAuthEnabled: true, TelegramAPIID: base.TelegramAPIID, TelegramAPIHash: base.TelegramAPIHash, TelegramSessionKeyID: base.TelegramSessionKeyID}, want: telegramSessionEncryptionKeyEnv},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateTelegramConfiguration(test.cfg)
+			if err == nil {
+				t.Fatalf("validate Telegram configuration succeeded, want %s error", test.want)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error %q does not name %s", err, test.want)
+			}
+		})
+	}
+}
+
+func configuredSecret(value string) SecretString {
+	var secret SecretString
+	_ = secret.UnmarshalText([]byte(value))
+	return secret
+}
+
+func configuredSessionKey(t *testing.T) SessionEncryptionKey {
+	t.Helper()
+	var key SessionEncryptionKey
+	if err := key.UnmarshalText([]byte(base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901")))); err != nil {
+		t.Fatalf("create test session key: %v", err)
+	}
+	return key
 }
 
 func TestValidateTelegramSessionConfigurationRejectsInvalidKeyID(t *testing.T) {
@@ -251,4 +402,9 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("OPERATOR_ID", "11111111-1111-4111-8111-111111111111")
 	t.Setenv("WEB_ADDR", "http://127.0.0.1:8080")
 	t.Setenv("PUBLIC_ORIGIN", "http://127.0.0.1:8080")
+	t.Setenv(telegramAuthEnabledEnv, "false")
+	t.Setenv(telegramAPIIDEnv, "")
+	t.Setenv(telegramAPIHashEnv, "")
+	t.Setenv(telegramSessionKeyIDEnv, "")
+	t.Setenv(telegramSessionEncryptionKeyEnv, "")
 }

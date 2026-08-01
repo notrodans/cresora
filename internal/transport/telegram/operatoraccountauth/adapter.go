@@ -1,93 +1,307 @@
 // Package operatoraccountauth is the Telegram transport boundary for
-// operator-account authentication. The methods are deliberately unimplemented
-// until live authentication and session persistence are wired in.
+// operator-account phone authentication.
 package operatoraccountauth
 
 import (
 	"context"
 	"errors"
+	"time"
 
-	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/auth"
-	"github.com/gotd/td/telegram/auth/qrlogin"
+	gotdtelegram "github.com/gotd/td/telegram"
+	gotdauth "github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
-	"github.com/google/uuid"
-	applicationroot "github.com/notrodans/cresora/internal/application"
 	application "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	"github.com/notrodans/cresora/internal/transport/telegram/accountowner"
 )
 
-// ErrLiveAuthenticationDisabled is the safe result of the intentionally inert
-// Telegram auth adapter. Live gotd auth, session writes, and account
-// persistence are not part of the challenge-coordinator composition yet.
-var ErrLiveAuthenticationDisabled = errors.New("live Telegram operator authentication is disabled")
-
-// Adapter owns the gotd client configuration needed by the eventual Telegram
-// authentication implementation. It performs no network calls and stores no
-// session data in this scaffold.
-type Adapter struct {
-	client  *telegram.Client
-	appID   int
-	appHash string
-
-	// These fields make the intended gotd integration explicit without
-	// constructing live auth flows in the scaffold.
-	phoneAuth *auth.Client
-	qrLogin   *qrlogin.QR
+// Runtime admits one callback against the account runtime.
+type Runtime interface {
+	Execute(context.Context, application.AuthTarget, accountowner.ClientCallback) error
 }
 
-// New constructs an adapter around a gotd Telegram client.
-func New(client *telegram.Client, appID int, appHash string) Adapter {
+// Adapter implements the application phone-auth provider. Every public method
+// performs one independent runtime operation and keeps all gotd values inside
+// this transport package.
+type Adapter struct {
+	runtime       Runtime
+	clientFactory func(*gotdtelegram.Client) phoneClient
+}
+
+var _ application.PhoneProvider = Adapter{}
+var _ Runtime = (*accountowner.Registry)(nil)
+
+// New constructs a provider backed by the account runtime. It does not start
+// a client or perform network I/O.
+func New(runtime Runtime) Adapter {
 	return Adapter{
-		client:  client,
-		appID:   appID,
-		appHash: appHash,
+		runtime:       runtime,
+		clientFactory: newGotdPhoneClient,
 	}
 }
 
-// NewAdapter is an explicit constructor alias.
-func NewAdapter(client *telegram.Client, appID int, appHash string) Adapter {
-	return New(client, appID, appHash)
+// SendCode sends one Telegram phone code and returns only its opaque
+// coordinator hash and safe challenge metadata.
+func (adapter Adapter) SendCode(
+	ctx context.Context,
+	target application.AuthTarget,
+	phone string,
+) (application.SendCodeResult, error) {
+	var sent sentCode
+	failure := adapter.runtime.Execute(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+		client := adapter.clientFactory(raw)
+		if client == nil {
+			return application.ErrProviderUnavailable
+		}
+		var err error
+		sent, err = client.sendCode(callbackContext, phone)
+		return err
+	})
+	if failure != nil {
+		return application.SendCodeResult{}, mapProviderError(failure)
+	}
+	if sent.hash == "" {
+		return application.SendCodeResult{}, application.ErrProviderUnavailable
+	}
+	return application.SendCodeResult{
+		PhoneCodeHash: application.NewPhoneCodeHash(sent.hash),
+		Delivery:      sent.delivery,
+		ExpiresAt:     sent.expiresAt,
+	}, nil
 }
 
-// StartPhone is the future phone-code authentication entry point. Wire an
-// auth.Client.SendCode call here and map its response to PhoneChallenge.
-func (adapter Adapter) StartPhone(
-	context.Context,
-	applicationroot.Actor,
-	string,
-) (application.PhoneChallenge, error) {
-	return application.PhoneChallenge{}, ErrLiveAuthenticationDisabled
+// SignIn submits one phone code and, only after successful sign-in, fetches
+// Self in the same runtime callback.
+func (adapter Adapter) SignIn(
+	ctx context.Context,
+	target application.AuthTarget,
+	phone string,
+	code string,
+	hash application.PhoneCodeHash,
+) (application.Profile, error) {
+	var profile application.Profile
+	failure := adapter.runtime.Execute(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+		client := adapter.clientFactory(raw)
+		if client == nil {
+			return application.ErrProviderUnavailable
+		}
+		if err := client.signIn(callbackContext, phone, code, hash.Value()); err != nil {
+			return err
+		}
+		var err error
+		profile, err = client.self(callbackContext)
+		return err
+	})
+	if failure != nil {
+		return application.Profile{}, mapProviderError(failure)
+	}
+	if profile.UserID <= 0 {
+		return application.Profile{}, application.ErrSessionUnavailable
+	}
+	return profile, nil
 }
 
-// VerifyPhone is the future phone-code authentication completion point. Wire
-// auth.Client.SignIn here, then map the authorized Telegram user to Account.
-func (adapter Adapter) VerifyPhone(
-	context.Context,
-	applicationroot.Actor,
-	uuid.UUID,
-	string,
-) (application.Account, error) {
-	return application.Account{}, ErrLiveAuthenticationDisabled
+// Password submits one Telegram 2FA password and then fetches Self in the
+// same runtime callback.
+func (adapter Adapter) Password(
+	ctx context.Context,
+	target application.AuthTarget,
+	password string,
+) (application.Profile, error) {
+	var profile application.Profile
+	failure := adapter.runtime.Execute(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+		client := adapter.clientFactory(raw)
+		if client == nil {
+			return application.ErrProviderUnavailable
+		}
+		if err := client.password(callbackContext, password); err != nil {
+			return err
+		}
+		var err error
+		profile, err = client.self(callbackContext)
+		return err
+	})
+	if failure != nil {
+		return application.Profile{}, mapProviderError(failure)
+	}
+	if profile.UserID <= 0 {
+		return application.Profile{}, application.ErrSessionUnavailable
+	}
+	return profile, nil
 }
 
-// StartQR is the future QR authentication entry point. Wire qrlogin.NewQR,
-// followed by token export, here.
-func (adapter Adapter) StartQR(context.Context, applicationroot.Actor) (application.QRChallenge, error) {
-	return application.QRChallenge{}, ErrLiveAuthenticationDisabled
+type sentCode struct {
+	hash      string
+	delivery  string
+	expiresAt time.Time
 }
 
-// RefreshQR is the future QR token refresh point. Wire QR token export/import
-// and expiry mapping here.
-func (adapter Adapter) RefreshQR(
-	context.Context,
-	applicationroot.Actor,
-	uuid.UUID,
-) (application.QRChallenge, error) {
-	return application.QRChallenge{}, ErrLiveAuthenticationDisabled
+// phoneClient is deliberately transport-local. It lets provider tests use a
+// deterministic fake without constructing a gotd client or making a network
+// request, while gotd request and response types remain private to this file.
+type phoneClient interface {
+	sendCode(context.Context, string) (sentCode, error)
+	signIn(context.Context, string, string, string) error
+	password(context.Context, string) error
+	self(context.Context) (application.Profile, error)
 }
 
-// Status is the future account projection endpoint. It intentionally does not
-// read persistence in this scaffold.
-func (adapter Adapter) Status(context.Context, applicationroot.Actor) (application.Status, error) {
-	return application.Status{}, ErrLiveAuthenticationDisabled
+type gotdPhoneClient struct {
+	client *gotdtelegram.Client
 }
+
+func newGotdPhoneClient(client *gotdtelegram.Client) phoneClient {
+	if client == nil {
+		return nil
+	}
+	return gotdPhoneClient{client: client}
+}
+
+func (client gotdPhoneClient) sendCode(ctx context.Context, phone string) (sentCode, error) {
+	result, err := client.client.Auth().SendCode(ctx, phone, gotdauth.SendCodeOptions{})
+	if err != nil {
+		return sentCode{}, err
+	}
+	sent, ok := result.(*tg.AuthSentCode)
+	if !ok || sent == nil || sent.PhoneCodeHash == "" {
+		return sentCode{}, errInvalidSendCodeResponse
+	}
+	return sentCode{
+		hash:      sent.PhoneCodeHash,
+		delivery:  delivery(sent.Type),
+		expiresAt: codeExpiry(sent.Timeout),
+	}, nil
+}
+
+func (client gotdPhoneClient) signIn(ctx context.Context, phone, code, hash string) error {
+	_, err := client.client.Auth().SignIn(ctx, phone, code, hash)
+	return err
+}
+
+func (client gotdPhoneClient) password(ctx context.Context, password string) error {
+	_, err := client.client.Auth().Password(ctx, password)
+	return err
+}
+
+func (client gotdPhoneClient) self(ctx context.Context) (application.Profile, error) {
+	user, err := client.client.Self(ctx)
+	if err != nil {
+		return application.Profile{}, err
+	}
+	return profile(user)
+}
+
+func delivery(codeType tg.AuthSentCodeTypeClass) string {
+	switch codeType.(type) {
+	case *tg.AuthSentCodeTypeApp:
+		return "APP"
+	case *tg.AuthSentCodeTypeSMS:
+		return "SMS"
+	case *tg.AuthSentCodeTypeCall:
+		return "CALL"
+	case *tg.AuthSentCodeTypeFlashCall:
+		return "FLASH_CALL"
+	case *tg.AuthSentCodeTypeMissedCall:
+		return "MISSED_CALL"
+	case *tg.AuthSentCodeTypeEmailCode:
+		return "EMAIL"
+	case *tg.AuthSentCodeTypeFragmentSMS, *tg.AuthSentCodeTypeFirebaseSMS,
+		*tg.AuthSentCodeTypeSMSWord, *tg.AuthSentCodeTypeSMSPhrase:
+		return "SMS"
+	default:
+		return "Telegram code"
+	}
+}
+
+func codeExpiry(timeout int) time.Time {
+	if timeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(time.Duration(timeout) * time.Second)
+}
+
+func profile(user *tg.User) (application.Profile, error) {
+	if user == nil || user.ID <= 0 {
+		return application.Profile{}, application.ErrSessionUnavailable
+	}
+	return application.Profile{
+		UserID:    user.ID,
+		Username:  user.Username,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+	}, nil
+}
+
+func mapProviderError(failure error) error {
+	if failure == nil {
+		return nil
+	}
+	if errors.Is(failure, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(failure, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	var retry *application.RetryAfterError
+	if errors.As(failure, &retry) {
+		return retry
+	}
+	if errors.Is(failure, accountowner.ErrRegistryStopped) || errors.Is(failure, accountowner.ErrAccountStopped) {
+		return application.ErrProviderUnavailable
+	}
+	if errors.Is(failure, accountowner.ErrStaleAdmission) || errors.Is(failure, accountowner.ErrInvalidAdmission) {
+		return application.ErrSessionUnavailable
+	}
+	for _, approved := range []error{
+		application.ErrInvalidCode,
+		application.ErrPasswordRequired,
+		application.ErrInvalidPassword,
+		application.ErrProviderUnavailable,
+		application.ErrProviderTransient,
+		application.ErrUnauthorized,
+		application.ErrSessionUnavailable,
+		application.ErrFloodWait,
+	} {
+		if errors.Is(failure, approved) {
+			return approved
+		}
+	}
+	if after, ok := tgerr.AsFloodWait(failure); ok {
+		safe, err := application.NewRetryAfterError(after)
+		if err == nil {
+			return safe
+		}
+		return application.ErrFloodWait
+	}
+	if errors.Is(failure, gotdauth.ErrPasswordAuthNeeded) || tgerr.Is(failure, "SESSION_PASSWORD_NEEDED") {
+		return application.ErrPasswordRequired
+	}
+	if errors.Is(failure, gotdauth.ErrPasswordInvalid) || tgerr.Is(failure, "PASSWORD_HASH_INVALID") {
+		return application.ErrInvalidPassword
+	}
+	if tgerr.Is(failure,
+		"PHONE_CODE_EMPTY",
+		"PHONE_CODE_INVALID",
+		"PHONE_CODE_EXPIRED",
+		"PHONE_CODE_HASH_EMPTY",
+		"PHONE_CODE_HASH_INVALID",
+	) {
+		return application.ErrInvalidCode
+	}
+	if tgerr.Is(failure,
+		"AUTH_KEY_UNREGISTERED",
+		"AUTH_KEY_INVALID",
+		"SESSION_REVOKED",
+		"SESSION_EXPIRED",
+		"AUTH_KEY_DUPLICATED",
+	) {
+		return application.ErrSessionUnavailable
+	}
+	if gotdauth.IsUnauthorized(failure) || tgerr.Is(failure, "UNAUTHORIZED") {
+		return application.ErrUnauthorized
+	}
+	return application.ErrProviderTransient
+}
+
+var errInvalidSendCodeResponse = errors.New("telegram authentication send-code response is invalid")
