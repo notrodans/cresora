@@ -2,12 +2,9 @@ package pg_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pressly/goose/v3"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
@@ -30,146 +26,7 @@ import (
 	"github.com/notrodans/cresora/internal/infrastracture/transport/faketelegram"
 )
 
-const preDeliveryExecutionV2Migration int64 = 20260726100000
-
-func TestDeliveryExecutionV2MigrationCutover(t *testing.T) {
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	migrationDatabase, database, _, provider, failure := newPreV2MigrationDatabase(ctx, t, databaseURL)
-	if failure != nil {
-		t.Fatalf("prepare pre-v2 schema: %v", failure)
-	}
-	operatorID, accountID, failure := createPreV2LifecycleAccount(ctx, database)
-	if failure != nil {
-		t.Fatalf("create cutover account: %v", failure)
-	}
-	draftID := uuid.New()
-	activeID := uuid.New()
-	if _, failure = database.Exec(ctx, `INSERT INTO mailings (id, operator_id, name, message_text, status) VALUES ($1, $3, 'draft to preserve', 'draft message', 'draft'), ($2, $3, 'active to stop', 'active message', 'running')`, draftID, activeID, operatorID); failure != nil {
-		t.Fatalf("insert cutover mailings: %v", failure)
-	}
-	if _, failure = database.Exec(ctx, `INSERT INTO telegram_mailing_routes (mailing_id, account_id) VALUES ($1, $3), ($2, $3)`, draftID, activeID, accountID); failure != nil {
-		t.Fatalf("insert cutover routes: %v", failure)
-	}
-	draftRecipientID := uuid.New()
-	activeRecipientID := uuid.New()
-	if _, failure = database.Exec(ctx, `INSERT INTO mailing_recipients (mailing_id, id, position) VALUES ($1, $3, 0), ($2, $4, 0)`, draftID, activeID, draftRecipientID, activeRecipientID); failure != nil {
-		t.Fatalf("insert cutover recipients: %v", failure)
-	}
-	runID := uuid.New()
-	if _, failure = database.Exec(ctx, `INSERT INTO mailing_runs (mailing_id, id, number, status) VALUES ($1, $2, 1, 'queued')`, activeID, runID); failure != nil {
-		t.Fatalf("insert legacy run: %v", failure)
-	}
-	if _, failure = database.Exec(ctx, `INSERT INTO mailing_deliveries (mailing_id, run_id, recipient_id) VALUES ($1, $2, $3)`, activeID, runID, activeRecipientID); failure != nil {
-		t.Fatalf("insert legacy delivery: %v", failure)
-	}
-	if _, failure = database.Exec(ctx, `INSERT INTO telegram_mailing_deliveries (mailing_id, run_id, recipient_id, random_id) VALUES ($1, $2, $3, nextval('mailing_delivery_random_id_seq'))`, activeID, runID, activeRecipientID); failure != nil {
-		t.Fatalf("insert legacy Telegram delivery: %v", failure)
-	}
-	var sequenceBefore int64
-	if failure = database.QueryRow(ctx, `SELECT last_value FROM mailing_delivery_random_id_seq`).Scan(&sequenceBefore); failure != nil {
-		t.Fatalf("read random-ID sequence before cutover: %v", failure)
-	}
-	if _, failure = provider.Up(ctx); failure == nil {
-		t.Fatal("delivery execution v2 migration succeeded without operator acknowledgement")
-	}
-	var remainingRuns, remainingDeliveries int
-	if failure = database.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM mailing_runs), (SELECT COUNT(*) FROM mailing_deliveries)`).Scan(&remainingRuns, &remainingDeliveries); failure != nil {
-		t.Fatalf("read graph after rejected cutover: %v", failure)
-	}
-	if remainingRuns != 1 || remainingDeliveries != 1 {
-		t.Fatalf("rejected cutover deleted legacy graph: runs %d deliveries %d", remainingRuns, remainingDeliveries)
-	}
-	if _, failure = migrationDatabase.ExecContext(ctx, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
-		t.Fatalf("acknowledge delivery execution v2 cutover: %v", failure)
-	}
-	if _, failure = provider.Up(ctx); failure != nil {
-		t.Fatalf("apply acknowledged delivery execution v2 migration: %v", failure)
-	}
-	var draftStatus, activeStatus string
-	if failure = database.QueryRow(ctx, `SELECT (SELECT status::text FROM mailings WHERE id = $1), (SELECT status::text FROM mailings WHERE id = $2)`, draftID, activeID).Scan(&draftStatus, &activeStatus); failure != nil {
-		t.Fatalf("read cutover mailing statuses: %v", failure)
-	}
-	if draftStatus != "draft" || activeStatus != "stopped" {
-		t.Fatalf("cutover statuses = %s/%s, want draft/stopped", draftStatus, activeStatus)
-	}
-	var runCount, deliveryCount, draftRecipientCount int
-	if failure = database.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM mailing_runs), (SELECT COUNT(*) FROM mailing_deliveries), (SELECT COUNT(*) FROM mailing_recipients WHERE mailing_id = $1)`, draftID).Scan(&runCount, &deliveryCount, &draftRecipientCount); failure != nil {
-		t.Fatalf("read cutover graph: %v", failure)
-	}
-	if runCount != 0 || deliveryCount != 0 || draftRecipientCount != 1 {
-		t.Fatalf("cutover graph = runs %d deliveries %d draft recipients %d", runCount, deliveryCount, draftRecipientCount)
-	}
-	var sequenceAfter int64
-	if failure = database.QueryRow(ctx, `SELECT last_value FROM mailing_delivery_random_id_seq`).Scan(&sequenceAfter); failure != nil {
-		t.Fatalf("read random-ID sequence after cutover: %v", failure)
-	}
-	if sequenceAfter != sequenceBefore {
-		t.Fatalf("random-ID sequence changed from %d to %d", sequenceBefore, sequenceAfter)
-	}
-	var v2RunID uuid.UUID
-	var generation int64
-	if failure = database.QueryRow(ctx, `INSERT INTO mailing_runs (mailing_id, number, status) VALUES ($1, 1, 'queued') RETURNING id, execution_generation`, draftID).Scan(&v2RunID, &generation); failure != nil {
-		t.Fatalf("insert v2 run with default generation: %v", failure)
-	}
-	if generation != 1 {
-		t.Fatalf("new run generation = %d, want 1", generation)
-	}
-	if _, failure = database.Exec(ctx, `INSERT INTO mailing_deliveries (mailing_id, run_id, recipient_id) VALUES ($1, $2, $3)`, draftID, v2RunID, draftRecipientID); failure != nil {
-		t.Fatalf("insert v2 constraint fixture delivery: %v", failure)
-	}
-	if _, failure = database.Exec(ctx, `INSERT INTO telegram_mailing_deliveries (mailing_id, run_id, recipient_id, random_id) VALUES ($1, $2, $3, nextval('mailing_delivery_random_id_seq'))`, draftID, v2RunID, draftRecipientID); failure != nil {
-		t.Fatalf("insert v2 Telegram constraint fixture delivery: %v", failure)
-	}
-	_, failure = database.Exec(ctx, `UPDATE telegram_mailing_deliveries SET random_id = random_id + 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
-	assertConstraintViolation(t, failure, "ck_telegram_mailing_deliveries_random_id_immutable")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = NULL WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_lease")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = CURRENT_TIMESTAMP WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_lease")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sent', sent_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_terminal_lease")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_unknown_evidence")
-	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown', attempt_count = 1, started_at = CURRENT_TIMESTAMP, error_message = 'expired sending lease' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
-		t.Fatalf("insert valid unknown delivery: %v", failure)
-	}
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET error_message = '   ' WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID)
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_unknown_evidence")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 0, started_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_evidence")
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = NULL, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_sending_evidence")
-	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'pending', attempt_count = 0, started_at = NULL, error_message = NULL, lease_token = NULL, lease_until = NULL, lease_execution_generation = NULL WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
-		t.Fatalf("persist valid pending delivery: %v", failure)
-	}
-	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'sending', attempt_count = 1, started_at = CURRENT_TIMESTAMP, lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New()); failure != nil {
-		t.Fatalf("persist valid sending delivery: %v", failure)
-	}
-	if _, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET status = 'unknown', error_message = 'expired sending lease', lease_token = NULL, lease_until = NULL, lease_execution_generation = NULL WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID); failure != nil {
-		t.Fatalf("persist valid unknown delivery: %v", failure)
-	}
-	_, failure = database.Exec(ctx, `UPDATE mailing_deliveries SET lease_token = $4, lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute', lease_execution_generation = 1 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID, uuid.New())
-	assertConstraintViolation(t, failure, "ck_mailing_deliveries_terminal_lease")
-	var constraintStatus string
-	if failure = database.QueryRow(ctx, `SELECT status::text FROM mailing_deliveries WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`, draftID, v2RunID, draftRecipientID).Scan(&constraintStatus); failure != nil {
-		t.Fatalf("read v2 constraint fixture delivery: %v", failure)
-	}
-	if constraintStatus != "unknown" {
-		t.Fatalf("constraint fixture status after rejected updates = %q, want unknown", constraintStatus)
-	}
-	if _, failure = provider.Down(ctx); failure == nil {
-		t.Fatal("v2 migration Down returned nil, want irreversible migration failure")
-	}
-	migrationDatabase.Close()
-}
-
-func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
+func TestDeliveryLifecyclePostgreSQL(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not set")
@@ -928,95 +785,6 @@ func TestDeliveryLifecycleV2PostgreSQL(t *testing.T) {
 	})
 }
 
-func newPreV2MigrationDatabase(
-	ctx context.Context,
-	t *testing.T,
-	databaseURL string,
-) (*sql.DB, *pgxpool.Pool, string, *goose.Provider, error) {
-	t.Helper()
-	baseConfig, failure := pgxpool.ParseConfig(databaseURL)
-	if failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("parse PostgreSQL URL: %w", failure)
-	}
-	adminDatabase, failure := pgxpool.NewWithConfig(ctx, baseConfig)
-	if failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("open PostgreSQL admin pool: %w", failure)
-	}
-	if failure = adminDatabase.Ping(ctx); failure != nil {
-		adminDatabase.Close()
-		return nil, nil, "", nil, fmt.Errorf("ping PostgreSQL admin pool: %w", failure)
-	}
-	schema := "delivery_v2_cutover_" + uuid.NewString()
-	quotedSchema := `"` + schema + `"`
-	if _, failure = adminDatabase.Exec(ctx, "CREATE SCHEMA "+quotedSchema); failure != nil {
-		adminDatabase.Close()
-		return nil, nil, "", nil, fmt.Errorf("create cutover schema: %w", failure)
-	}
-
-	var migrationDatabase *sql.DB
-	var database *pgxpool.Pool
-	t.Cleanup(func() {
-		if database != nil {
-			database.Close()
-		}
-		if migrationDatabase != nil {
-			migrationDatabase.Close()
-		}
-		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		if _, cleanupFailure := adminDatabase.Exec(cleanupContext, "DROP SCHEMA "+quotedSchema+" CASCADE"); cleanupFailure != nil {
-			t.Errorf("drop cutover schema %q: %v", schema, cleanupFailure)
-		}
-		adminDatabase.Close()
-	})
-
-	isolatedURL, failure := deliveryPipelineDatabaseURL(databaseURL, schema)
-	if failure != nil {
-		return nil, nil, "", nil, failure
-	}
-	migrationDatabase, failure = sql.Open("pgx", isolatedURL)
-	if failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("open migration database: %w", failure)
-	}
-	if failure = migrationDatabase.PingContext(ctx); failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("ping migration database: %w", failure)
-	}
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return nil, nil, "", nil, errors.New("locate cutover integration test")
-	}
-	provider, failure := goose.NewProvider(
-		goose.DialectPostgres,
-		migrationDatabase,
-		os.DirFS(filepath.Join(filepath.Dir(filename), "../../../../migrations")),
-		goose.WithAllowOutofOrder(true),
-	)
-	if failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("create migration provider: %w", failure)
-	}
-	if _, failure = provider.UpTo(ctx, preDeliveryExecutionV2Migration); failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("apply pre-v2 migrations: %w", failure)
-	}
-	isolatedConfig := baseConfig.Copy()
-	if isolatedConfig.ConnConfig.RuntimeParams == nil {
-		isolatedConfig.ConnConfig.RuntimeParams = make(map[string]string)
-	}
-	isolatedConfig.ConnConfig.RuntimeParams["search_path"] = schema
-	options := isolatedConfig.ConnConfig.RuntimeParams["options"]
-	if options != "" {
-		options += " "
-	}
-	isolatedConfig.ConnConfig.RuntimeParams["options"] = options + "-c search_path=" + schema
-	database, failure = pgxpool.NewWithConfig(ctx, isolatedConfig)
-	if failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("open cutover pool: %w", failure)
-	}
-	if failure = database.Ping(ctx); failure != nil {
-		return nil, nil, "", nil, fmt.Errorf("ping cutover pool: %w", failure)
-	}
-	return migrationDatabase, database, schema, provider, nil
-}
-
 type lifecycleDelivery struct {
 	pipelineDelivery
 	otherRecipientID uuid.UUID
@@ -1028,21 +796,7 @@ func createLifecycleAccount(context context.Context, database *pgxpool.Pool) (uu
 	if _, failure := database.Exec(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "lifecycle-"+operatorID.String()); failure != nil {
 		return uuid.Nil, uuid.Nil, failure
 	}
-	if _, failure := database.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id) VALUES ($1, $2, $3, $4, $5, 1)`, accountID, operatorID, "+19990000009", "lifecycle_"+accountID.String()[:8], "Lifecycle Test"); failure != nil {
-		return uuid.Nil, uuid.Nil, failure
-	}
-	return operatorID, accountID, nil
-}
-
-func createPreV2LifecycleAccount(context context.Context, database *pgxpool.Pool) (uuid.UUID, uuid.UUID, error) {
-	operatorID := uuid.New()
-	accountID := uuid.New()
-	// This fixture targets the schema before 20260729000300_secure_operator_credentials,
-	// where operators.password is required. Post-cutover fixtures stay password-free.
-	if _, failure := database.Exec(context, `INSERT INTO operators (id, username, password) VALUES ($1, $2, $3)`, operatorID, "lifecycle-"+operatorID.String(), "test-password"); failure != nil {
-		return uuid.Nil, uuid.Nil, failure
-	}
-	if _, failure := database.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id) VALUES ($1, $2, $3, $4, $5, 1)`, accountID, operatorID, "+19990000009", "lifecycle_"+accountID.String()[:8], "Lifecycle Test"); failure != nil {
+	if _, failure := database.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, telegram_user_id, status, status_version) VALUES ($1, $2, $3, $4, $5, $6, 'active', 1)`, accountID, operatorID, "+19990000009", "lifecycle_"+accountID.String()[:8], "Lifecycle Test", int64(100009)); failure != nil {
 		return uuid.Nil, uuid.Nil, failure
 	}
 	return operatorID, accountID, nil

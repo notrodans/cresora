@@ -1,4 +1,5 @@
 -- +goose Up
+
 CREATE TYPE telegram_peer_type AS ENUM (
     'user',
     'chat',
@@ -23,15 +24,23 @@ CREATE TYPE proxy_protocol AS ENUM (
     'http'
 );
 
+CREATE TYPE operator_account_status_type AS ENUM (
+    'authenticating',
+    'active',
+    'reauth_required',
+    'disconnected',
+    'disconnecting'
+);
+
 CREATE TABLE proxy_credentials (
-    id uuid PRIMARY KEY DEFAULT uuidv7 (),
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
     username varchar(255) NOT NULL,
     password varchar(255) NOT NULL,
-    CONSTRAINT uq_proxy_credentials_unique_auth UNIQUE (username, PASSWORD)
+    CONSTRAINT uq_proxy_credentials_unique_auth UNIQUE (username, password)
 );
 
 CREATE TABLE proxies (
-    id uuid PRIMARY KEY DEFAULT uuidv7 (),
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
     protocol proxy_protocol NOT NULL,
     ip inet NOT NULL,
     port integer NOT NULL,
@@ -42,32 +51,66 @@ CREATE TABLE proxies (
 );
 
 CREATE TABLE operators (
-    id uuid PRIMARY KEY DEFAULT uuidv7 (),
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
     username varchar(255) NOT NULL,
-    password varchar(255) NOT NULL,
+    password_hash text,
+    password_changed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     tokens_invalid_before timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_operators_username UNIQUE (username)
+    enabled boolean NOT NULL DEFAULT TRUE,
+    CONSTRAINT uq_operators_username UNIQUE (username),
+    CONSTRAINT ck_operators_password_hash_state CHECK (
+        (password_hash IS NULL AND password_changed_at IS NULL)
+        OR (password_hash IS NOT NULL AND password_changed_at IS NOT NULL)
+    ),
+    CONSTRAINT ck_operators_password_hash_format CHECK (
+        password_hash IS NULL OR (
+            length(password_hash) BETWEEN 64 AND 512
+            AND password_hash ~ $phc$^\$argon2id\$v=19\$m=[1-9][0-9]*,t=[1-9][0-9]*,p=[1-9][0-9]*\$[A-Za-z0-9+/]{11,86}\$[A-Za-z0-9+/]{22,86}$$phc$
+        )
+    )
 );
 
 CREATE TABLE operator_accounts (
-    id uuid PRIMARY KEY DEFAULT uuidv7 (),
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
     operator_id uuid NOT NULL,
-    -- Оставляй NOT NULL + UNIQUE, только если это внутренний
-    -- username оператора, а не изменяемый Telegram username.
-    phone varchar(20) NOT NULL,
-    telegram_username varchar(32) NOT NULL,
-    telegram_first_name varchar(64) NOT NULL,
+    phone varchar(20),
+    telegram_username varchar(32),
+    telegram_first_name varchar(64),
     telegram_last_name varchar(64),
-    api_id integer NOT NULL,
+    telegram_user_id bigint,
+    status operator_account_status_type NOT NULL,
+    status_version bigint NOT NULL DEFAULT 1,
+    auth_expires_at timestamptz,
+    failure_code varchar(32),
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_used timestamptz DEFAULT NULL,
+    last_used timestamptz,
     CONSTRAINT fk_operator_accounts_operator FOREIGN KEY (operator_id) REFERENCES operators (id) ON DELETE CASCADE,
-    CONSTRAINT ck_operator_accounts_first_name CHECK (length(telegram_first_name) >= 1),
-    CONSTRAINT ck_operator_accounts_phone CHECK (phone ~ '^\+[1-9]\d{1,14}$')
+    CONSTRAINT ck_operator_accounts_timestamp_order CHECK (updated_at >= created_at),
+    CONSTRAINT ck_operator_accounts_phone CHECK (phone IS NULL OR phone ~ '^\+[1-9][0-9]{1,14}$'),
+    CONSTRAINT ck_operator_accounts_first_name CHECK (telegram_first_name IS NULL OR length(telegram_first_name) >= 1),
+    CONSTRAINT ck_operator_accounts_status_version_positive CHECK (status_version > 0),
+    CONSTRAINT ck_operator_accounts_telegram_user_id_positive CHECK (telegram_user_id IS NULL OR telegram_user_id > 0),
+    CONSTRAINT ck_operator_accounts_identity_required CHECK (
+        status NOT IN ('active', 'reauth_required') OR telegram_user_id IS NOT NULL
+    ),
+    CONSTRAINT ck_operator_accounts_auth_expiry CHECK (
+        (status = 'authenticating') = (auth_expires_at IS NOT NULL)
+    ),
+    CONSTRAINT ck_operator_accounts_failure_code CHECK (
+        (status = 'reauth_required' AND failure_code IS NOT NULL AND failure_code IN ('auth_expired', 'session_invalid', 'authorization_revoked'))
+        OR (status <> 'reauth_required' AND failure_code IS NULL)
+    )
 );
+
+CREATE INDEX ix_operator_accounts_operator_status
+    ON operator_accounts (operator_id, status, id);
+
+CREATE UNIQUE INDEX uq_operator_accounts_telegram_user_id
+    ON operator_accounts (telegram_user_id)
+    WHERE telegram_user_id IS NOT NULL;
 
 CREATE TABLE operator_accounts_proxies (
     account_id uuid NOT NULL,
@@ -78,18 +121,72 @@ CREATE TABLE operator_accounts_proxies (
 );
 
 CREATE TABLE sessions (
-    account_id uuid NOT NULL,
-    session varchar(255) NOT NULL,
+    account_id uuid PRIMARY KEY,
+    format_version integer NOT NULL,
+    key_id varchar(128) NOT NULL,
+    nonce bytea NOT NULL,
+    ciphertext bytea NOT NULL,
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT pk_sessions PRIMARY KEY (account_id),
-    CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES operator_accounts (id) ON DELETE CASCADE
+    CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES operator_accounts (id) ON DELETE CASCADE,
+    CONSTRAINT ck_sessions_format_version CHECK (format_version = 1),
+    CONSTRAINT ck_sessions_key_id CHECK (btrim(key_id) = key_id AND length(key_id) BETWEEN 1 AND 128),
+    CONSTRAINT ck_sessions_nonce CHECK (octet_length(nonce) = 12),
+    CONSTRAINT ck_sessions_ciphertext CHECK (octet_length(ciphertext) BETWEEN 16 AND 1048592)
 );
 
+CREATE TABLE operator_web_sessions (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    operator_id uuid NOT NULL,
+    token_hash bytea NOT NULL,
+    created_at timestamptz NOT NULL,
+    last_seen_at timestamptz NOT NULL,
+    idle_expires_at timestamptz NOT NULL,
+    absolute_expires_at timestamptz NOT NULL,
+    revoked_at timestamptz,
+    CONSTRAINT fk_operator_web_sessions_operator
+        FOREIGN KEY (operator_id) REFERENCES operators (id) ON DELETE CASCADE,
+    CONSTRAINT uq_operator_web_sessions_token_hash UNIQUE (token_hash),
+    CONSTRAINT ck_operator_web_sessions_token_hash_length
+        CHECK (octet_length(token_hash) = 32),
+    CONSTRAINT ck_operator_web_sessions_expiry_order
+        CHECK (created_at <= last_seen_at
+            AND last_seen_at <= idle_expires_at
+            AND idle_expires_at <= absolute_expires_at)
+);
+
+CREATE INDEX ix_operator_web_sessions_operator_live
+    ON operator_web_sessions (operator_id, last_seen_at DESC, created_at DESC)
+    WHERE revoked_at IS NULL;
+
+CREATE INDEX ix_operator_web_sessions_expiry
+    ON operator_web_sessions (idle_expires_at, absolute_expires_at)
+    WHERE revoked_at IS NULL;
+
+-- +goose StatementBegin
+CREATE FUNCTION revoke_operator_web_sessions_after_credential_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.tokens_invalid_before > OLD.tokens_invalid_before THEN
+        UPDATE operator_web_sessions
+        SET revoked_at = clock_timestamp()
+        WHERE operator_id = NEW.id
+          AND revoked_at IS NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+-- +goose StatementEnd
+
+CREATE TRIGGER operators_revoke_web_sessions_after_credential_change
+AFTER UPDATE OF tokens_invalid_before ON operators
+FOR EACH ROW
+EXECUTE FUNCTION revoke_operator_web_sessions_after_credential_change();
+
 CREATE TABLE telegram_shared_dialogs (
-    id uuid PRIMARY KEY DEFAULT uuidv7 (),
-    -- Все shared-диалоги являются Telegram Channel peer:
-    -- либо supergroup, либо broadcast channel.
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
     telegram_peer_id bigint NOT NULL,
     dialog_kind shared_dialog_kind NOT NULL,
     title varchar(255) NOT NULL,
@@ -102,10 +199,13 @@ CREATE TABLE telegram_shared_dialogs (
     CONSTRAINT ck_telegram_shared_dialog_participants_nonnegative CHECK (participants_count IS NULL OR participants_count >= 0)
 );
 
+CREATE UNIQUE INDEX uq_telegram_shared_dialogs_canonical_username
+    ON telegram_shared_dialogs (lower(canonical_username))
+    WHERE canonical_username IS NOT NULL;
+
 CREATE TABLE operator_accounts_shared_dialogs (
     account_id uuid NOT NULL,
     shared_dialog_id uuid NOT NULL,
-    -- Может быть ещё не получен при частичной синхронизации.
     access_hash bigint,
     membership_status membership_status_type NOT NULL DEFAULT 'unknown',
     last_joined_at timestamptz,
@@ -119,19 +219,16 @@ CREATE TABLE operator_accounts_shared_dialogs (
     CONSTRAINT ck_operator_account_shared_dialog_joined_at CHECK (membership_status <> 'joined' OR last_joined_at IS NOT NULL)
 );
 
--- PK начинается с account_id, поэтому для операций по shared_dialog_id
--- нужен отдельный индекс.
-CREATE INDEX ix_operator_accounts_shared_dialogs_shared_dialog ON operator_accounts_shared_dialogs (shared_dialog_id);
+CREATE INDEX ix_operator_accounts_shared_dialogs_shared_dialog
+    ON operator_accounts_shared_dialogs (shared_dialog_id);
 
 CREATE TABLE operator_accounts_private_dialogs (
     account_id uuid NOT NULL,
-    -- Нужен, потому что user/chat/channel имеют разные пространства ID.
     peer_type telegram_peer_type NOT NULL,
     telegram_peer_id bigint NOT NULL,
     title varchar(255) NOT NULL,
     username varchar(32),
     access_hash bigint,
-    -- Для user peer эти поля могут быть неприменимы.
     membership_status membership_status_type,
     last_joined_at timestamptz,
     can_send boolean NOT NULL DEFAULT FALSE,
@@ -163,7 +260,7 @@ CREATE TYPE mailing_repeat_mode_type AS ENUM (
 );
 
 CREATE TABLE mailings (
-    id uuid PRIMARY KEY DEFAULT uuidv7 (),
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
     operator_id uuid NOT NULL,
     name varchar(255) NOT NULL,
     message_text text NOT NULL,
@@ -214,10 +311,11 @@ CREATE INDEX ix_telegram_mailing_routes_account ON telegram_mailing_routes (acco
 
 CREATE TABLE mailing_recipients (
     mailing_id uuid NOT NULL,
-    id uuid NOT NULL DEFAULT uuidv7 (),
+    id uuid NOT NULL DEFAULT uuidv7(),
     position integer NOT NULL,
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT pk_mailing_recipients PRIMARY KEY (mailing_id, id),
+    CONSTRAINT uq_mailing_recipients_id UNIQUE (id),
     CONSTRAINT fk_mailing_recipients_mailing FOREIGN KEY (mailing_id) REFERENCES mailings (id) ON DELETE CASCADE,
     CONSTRAINT uq_mailing_recipients_position UNIQUE (mailing_id, position),
     CONSTRAINT ck_mailing_recipients_position_positive CHECK (position >= 0)
@@ -238,12 +336,10 @@ CREATE TABLE telegram_mailing_recipients (
 );
 
 CREATE INDEX ix_telegram_mailing_recipients_shared ON telegram_mailing_recipients (shared_dialog_id)
-WHERE
-    shared_dialog_id IS NOT NULL;
+WHERE shared_dialog_id IS NOT NULL;
 
 CREATE INDEX ix_telegram_mailing_recipients_private ON telegram_mailing_recipients (private_account_id, private_peer_type, private_peer_id)
-WHERE
-    private_account_id IS NOT NULL;
+WHERE private_account_id IS NOT NULL;
 
 CREATE TYPE mailing_run_status_type AS ENUM (
     'queued',
@@ -255,9 +351,10 @@ CREATE TYPE mailing_run_status_type AS ENUM (
 
 CREATE TABLE mailing_runs (
     mailing_id uuid NOT NULL,
-    id uuid NOT NULL DEFAULT uuidv7 (),
+    id uuid NOT NULL DEFAULT uuidv7(),
     number integer NOT NULL,
     status mailing_run_status_type NOT NULL DEFAULT 'queued',
+    execution_generation bigint NOT NULL DEFAULT 1,
     queued_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at timestamptz,
     finished_at timestamptz,
@@ -267,18 +364,40 @@ CREATE TABLE mailing_runs (
     CONSTRAINT fk_mailing_runs_mailing FOREIGN KEY (mailing_id) REFERENCES mailings (id) ON DELETE CASCADE,
     CONSTRAINT uq_mailing_runs_number UNIQUE (mailing_id, number),
     CONSTRAINT ck_mailing_runs_number_positive CHECK (number >= 1),
+    CONSTRAINT ck_mailing_runs_execution_generation_positive CHECK (execution_generation >= 1),
     CONSTRAINT ck_mailing_runs_started CHECK (started_at IS NULL OR started_at >= queued_at),
-    CONSTRAINT ck_mailing_runs_finished CHECK (finished_at IS NULL OR (started_at IS NOT NULL AND finished_at >= started_at))
+    CONSTRAINT ck_mailing_runs_finished CHECK (
+        finished_at IS NULL
+        OR (
+            status = 'cancelled'
+            AND started_at IS NULL
+            AND finished_at >= queued_at
+        )
+        OR (
+            started_at IS NOT NULL
+            AND finished_at >= started_at
+        )
+    ),
+    CONSTRAINT ck_mailing_runs_cancelled_before_start CHECK (
+        status <> 'cancelled'
+        OR started_at IS NOT NULL
+        OR finished_at IS NOT NULL
+    )
 );
 
 CREATE INDEX ix_mailing_runs_status ON mailing_runs (status, queued_at);
+
+CREATE UNIQUE INDEX uq_mailing_runs_active
+    ON mailing_runs (mailing_id)
+    WHERE status IN ('queued', 'running');
 
 CREATE TYPE mailing_delivery_status_type AS ENUM (
     'pending',
     'sending',
     'sent',
     'skipped',
-    'failed'
+    'failed',
+    'unknown'
 );
 
 CREATE TABLE mailing_deliveries (
@@ -295,6 +414,7 @@ CREATE TABLE mailing_deliveries (
     error_message text,
     lease_token uuid,
     lease_until timestamptz,
+    lease_execution_generation bigint,
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT pk_mailing_deliveries PRIMARY KEY (mailing_id, run_id, recipient_id),
@@ -304,18 +424,64 @@ CREATE TABLE mailing_deliveries (
     CONSTRAINT ck_mailing_deliveries_sent CHECK (status <> 'sent' OR sent_at IS NOT NULL),
     CONSTRAINT ck_mailing_deliveries_skipped CHECK (status <> 'skipped' OR skip_reason IS NOT NULL),
     CONSTRAINT ck_mailing_deliveries_attempts CHECK (attempt_count >= 0 AND max_attempts >= 1),
-    CONSTRAINT ck_mailing_deliveries_lease CHECK ((lease_until IS NULL) = (lease_token IS NULL))
+    CONSTRAINT ck_mailing_deliveries_lease CHECK (
+        (
+            lease_token IS NULL
+            AND lease_until IS NULL
+            AND lease_execution_generation IS NULL
+        )
+        OR (
+            lease_token IS NOT NULL
+            AND lease_until IS NOT NULL
+            AND lease_execution_generation IS NOT NULL
+            AND lease_execution_generation >= 1
+        )
+    ),
+    CONSTRAINT ck_mailing_deliveries_sending_lease CHECK (
+        status <> 'sending'
+        OR (
+            lease_token IS NOT NULL
+            AND lease_until IS NOT NULL
+            AND lease_execution_generation IS NOT NULL
+        )
+    ),
+    CONSTRAINT ck_mailing_deliveries_terminal_lease CHECK (
+        status NOT IN ('sent', 'skipped', 'failed', 'unknown')
+        OR (
+            lease_token IS NULL
+            AND lease_until IS NULL
+            AND lease_execution_generation IS NULL
+        )
+    ),
+    CONSTRAINT ck_mailing_deliveries_unknown_evidence CHECK (
+        status <> 'unknown'
+        OR (
+            attempt_count >= 1
+            AND started_at IS NOT NULL
+            AND error_message IS NOT NULL
+            AND btrim(error_message) <> ''
+        )
+    ),
+    CONSTRAINT ck_mailing_deliveries_sending_evidence CHECK (
+        status <> 'sending'
+        OR (
+            attempt_count >= 1
+            AND started_at IS NOT NULL
+        )
+    )
 );
 
 CREATE INDEX ix_mailing_deliveries_pending ON mailing_deliveries (ready_at, mailing_id, run_id)
-WHERE
-    status = 'pending';
+WHERE status = 'pending';
 
 CREATE INDEX ix_mailing_deliveries_recipient ON mailing_deliveries (mailing_id, recipient_id);
 
 CREATE INDEX ix_mailing_deliveries_claim ON mailing_deliveries (ready_at, mailing_id, run_id, recipient_id)
-WHERE
-    status IN ('pending', 'sending');
+WHERE status = 'pending';
+
+CREATE INDEX ix_mailing_deliveries_expired_sending_reaper
+    ON mailing_deliveries (lease_until, mailing_id, run_id, recipient_id)
+    WHERE status = 'sending' AND lease_until IS NOT NULL;
 
 CREATE TABLE telegram_mailing_deliveries (
     mailing_id uuid NOT NULL,
@@ -329,10 +495,32 @@ CREATE TABLE telegram_mailing_deliveries (
     CONSTRAINT ck_telegram_mailing_deliveries_random_nonzero CHECK (random_id <> 0)
 );
 
--- Telegram usernames регистронезависимы.
-CREATE UNIQUE INDEX uq_telegram_shared_dialogs_canonical_username ON telegram_shared_dialogs (lower(canonical_username))
-WHERE
-    canonical_username IS NOT NULL;
+CREATE SEQUENCE mailing_delivery_random_id_seq
+    AS bigint
+    MINVALUE 1
+    START WITH 1
+    NO CYCLE;
+
+-- +goose StatementBegin
+CREATE FUNCTION prevent_telegram_mailing_delivery_random_id_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.random_id IS DISTINCT FROM OLD.random_id THEN
+        RAISE EXCEPTION 'telegram_mailing_deliveries.random_id is immutable'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'ck_telegram_mailing_deliveries_random_id_immutable';
+    END IF;
+    RETURN NEW;
+END
+$$;
+-- +goose StatementEnd
+
+CREATE TRIGGER trg_telegram_mailing_deliveries_random_id_immutable
+    BEFORE UPDATE OF random_id ON telegram_mailing_deliveries
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_telegram_mailing_delivery_random_id_update();
 
 CREATE TABLE telegram_subscription_requirements (
     target_dialog_id uuid NOT NULL,
@@ -343,6 +531,5 @@ CREATE TABLE telegram_subscription_requirements (
     CONSTRAINT ck_subscription_requirement_not_self CHECK (target_dialog_id <> required_dialog_id)
 );
 
--- PK индекс начинается с target_dialog_id.
--- Для каскадного удаления по required_dialog_id нужен отдельный индекс.
-CREATE INDEX ix_subscription_requirements_required_dialog ON telegram_subscription_requirements (required_dialog_id);
+CREATE INDEX ix_subscription_requirements_required_dialog
+    ON telegram_subscription_requirements (required_dialog_id);
