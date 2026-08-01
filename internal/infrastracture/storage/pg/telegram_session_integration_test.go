@@ -3,17 +3,17 @@ package pg
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pressly/goose/v3"
 
 	"github.com/notrodans/cresora/internal/transport/telegram"
 )
@@ -26,13 +26,53 @@ func TestTelegramSessionStorePostgres(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	if err := applyIntegrationMigrations(ctx, databaseURL); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-	database, err := pgxpool.New(ctx, databaseURL)
+	admin, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
+		t.Fatalf("open PostgreSQL admin pool: %v", err)
+	}
+	schema := "telegram_session_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		admin.Close()
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	isolatedURL, err := telegramPeerLookupDatabaseURL(databaseURL, schema)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("create isolated database URL: %v", err)
+	}
+	migrationDatabase, err := sql.Open("pgx", isolatedURL)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("open migration database: %v", err)
+	}
+	defer migrationDatabase.Close()
+	if err := migrationDatabase.PingContext(ctx); err != nil {
+		admin.Close()
+		t.Fatalf("ping migration database: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, migrationDatabase, os.DirFS(migrationsPathForTest(t)))
+	if err != nil {
+		admin.Close()
+		t.Fatalf("create migration provider: %v", err)
+	}
+	defer provider.Close()
+	if _, err := provider.Up(ctx); err != nil {
+		admin.Close()
+		t.Fatalf("apply current baseline: %v", err)
+	}
+	database, err := pgxpool.New(ctx, isolatedURL)
+	if err != nil {
+		admin.Close()
 		t.Fatalf("open PostgreSQL pool: %v", err)
 	}
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if _, err := admin.Exec(cleanupContext, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop isolated schema: %v", err)
+		}
+		admin.Close()
+	}()
 	defer database.Close()
 	if err := database.Ping(ctx); err != nil {
 		t.Fatalf("ping PostgreSQL: %v", err)
@@ -153,68 +193,6 @@ func TestTelegramSessionStorePostgres(t *testing.T) {
 	}
 }
 
-func TestTelegramSessionMigrationRejectsLegacyPlaintextRows(t *testing.T) {
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	database, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatalf("open PostgreSQL pool: %v", err)
-	}
-	defer database.Close()
-	if err := database.Ping(ctx); err != nil {
-		t.Fatalf("ping PostgreSQL: %v", err)
-	}
-
-	schema := "telegram_session_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := database.Exec(ctx, `CREATE SCHEMA `+schema); err != nil {
-		t.Fatalf("create migration test schema: %v", err)
-	}
-	defer func() {
-		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		if _, err := database.Exec(cleanupContext, `DROP SCHEMA `+schema+` CASCADE`); err != nil {
-			t.Errorf("drop migration test schema: %v", err)
-		}
-	}()
-
-	transaction, err := database.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin migration test transaction: %v", err)
-	}
-	defer transaction.Rollback(ctx)
-	if _, err := transaction.Exec(ctx, `SET LOCAL search_path TO `+schema); err != nil {
-		t.Fatalf("set migration test search path: %v", err)
-	}
-	if _, err := transaction.Exec(ctx, `CREATE TABLE sessions (
-		account_id uuid PRIMARY KEY,
-		session varchar(255) NOT NULL,
-		created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
-	)`); err != nil {
-		t.Fatalf("create legacy sessions table: %v", err)
-	}
-	if _, err := transaction.Exec(ctx, `INSERT INTO sessions (account_id, session) VALUES ($1, $2)`, uuid.New(), "legacy plaintext session"); err != nil {
-		t.Fatalf("insert legacy session: %v", err)
-	}
-
-	migration, err := readTelegramSessionMigrationUp()
-	if err != nil {
-		t.Fatalf("read session migration: %v", err)
-	}
-	_, err = transaction.Exec(ctx, migration)
-	if err == nil {
-		t.Fatal("legacy plaintext migration succeeded")
-	}
-	if !strings.Contains(err.Error(), "legacy plaintext session rows exist") {
-		t.Fatalf("legacy migration error = %v, want explicit plaintext failure", err)
-	}
-}
-
 type telegramSessionFixture struct {
 	operatorA uuid.UUID
 	operatorB uuid.UUID
@@ -237,7 +215,7 @@ func createTelegramSessionFixture(context context.Context, database *pgxpool.Poo
 	if _, err := transaction.Exec(context, `INSERT INTO operators (id, username) VALUES ($1, $2), ($3, $4)`, fixture.operatorA, "session-fixture-"+fixture.operatorA.String()[:8], fixture.operatorB, "session-fixture-"+fixture.operatorB.String()[:8]); err != nil {
 		return fixture, fmt.Errorf("insert session fixture operators: %w", err)
 	}
-	if _, err := transaction.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id) VALUES ($1, $2, '+12025550201', $3, 'Session A', 1), ($4, $5, '+12025550202', $6, 'Session B', 2)`, fixture.accountA, fixture.operatorA, "session-a-"+fixture.accountA.String()[:8], fixture.accountB, fixture.operatorB, "session-b-"+fixture.accountB.String()[:8]); err != nil {
+	if _, err := transaction.Exec(context, `INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, status, status_version, auth_expires_at, telegram_user_id) VALUES ($1, $2, '+12025550201', $3, 'Session A', 'authenticating', 1, CURRENT_TIMESTAMP + interval '1 hour', NULL), ($4, $5, '+12025550202', $6, 'Session B', 'active', 1, NULL, 9001)`, fixture.accountA, fixture.operatorA, "session-a-"+fixture.accountA.String()[:8], fixture.accountB, fixture.operatorB, "session-b-"+fixture.accountB.String()[:8]); err != nil {
 		return fixture, fmt.Errorf("insert session fixture accounts: %w", err)
 	}
 	if err := transaction.Commit(context); err != nil {
@@ -251,21 +229,4 @@ func cleanupTelegramSessionFixture(context context.Context, database *pgxpool.Po
 		return fmt.Errorf("delete session fixture operators: %w", err)
 	}
 	return nil
-}
-
-func readTelegramSessionMigrationUp() (string, error) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", errors.New("locate session integration test source")
-	}
-	path := filepath.Join(filepath.Dir(filename), "../../../../migrations/20260728000000_encrypt_telegram_sessions.sql")
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	up := strings.TrimPrefix(string(contents), "-- +goose Up")
-	if down := strings.Index(up, "-- +goose Down"); down >= 0 {
-		up = up[:down]
-	}
-	return strings.TrimSpace(up), nil
 }

@@ -91,7 +91,9 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	log := slog.SetupLogger(cfg)
 
 	migrationsPath := filepath.Join(rootDir, "migrations")
-	pg.ExecuteMigrations(rootContext, cfg, log, migrationsPath)
+	if failure := pg.ExecuteMigrations(rootContext, cfg, log, migrationsPath); failure != nil {
+		return fmt.Errorf("execute database migrations: %w", failure)
+	}
 
 	// Создаём пул соединений с PostgreSQL для повторного использования подключений.
 	database, failure := pgxpool.New(rootContext, cfg.DbUrl)

@@ -156,6 +156,19 @@ func TestValidateTelegramSessionKeyIDDoesNotRevealValue(t *testing.T) {
 	}
 }
 
+func TestTelegramSessionStoreAllowsOnlySessionOwningAccountStatuses(t *testing.T) {
+	for _, status := range []string{"authenticating", "active"} {
+		if !validTelegramSessionAccountStatus(status) {
+			t.Fatalf("session status %q was rejected", status)
+		}
+	}
+	for _, status := range []string{"disconnected", "disconnecting", "reauth_required", "unknown", ""} {
+		if validTelegramSessionAccountStatus(status) {
+			t.Fatalf("non-owning session status %q was accepted", status)
+		}
+	}
+}
+
 func testSessionAEAD(t *testing.T) cipher.AEAD {
 	t.Helper()
 	block, err := aes.NewCipher([]byte("01234567890123456789012345678901"))

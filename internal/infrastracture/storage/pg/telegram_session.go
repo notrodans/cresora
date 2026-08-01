@@ -150,7 +150,36 @@ func (store *telegramSessionStore) Store(
 		return fmt.Errorf("store telegram session: %w", failure)
 	}
 
-	result, failure := store.database.Exec(
+	transaction, failure := store.database.Begin(context)
+	if failure != nil {
+		return fmt.Errorf("store telegram session: begin transaction: %w", failure)
+	}
+	defer func() { _ = transaction.Rollback(context) }()
+
+	var status string
+	failure = transaction.QueryRow(
+		context,
+		`SELECT account.status::text
+		 FROM operator_accounts AS account
+		 WHERE account.id = $2
+		   AND account.operator_id = $1
+		 FOR UPDATE`,
+		scope.OperatorID,
+		scope.AccountID,
+	).Scan(&status)
+	if errors.Is(failure, pgx.ErrNoRows) {
+		// Unknown accounts, foreign accounts, and accounts that cannot own a
+		// session intentionally have the same transport error.
+		return telegram.ErrSessionUnauthorized
+	}
+	if failure != nil {
+		return fmt.Errorf("store telegram session: check account: %w", failure)
+	}
+	if !validTelegramSessionAccountStatus(status) {
+		return telegram.ErrSessionUnauthorized
+	}
+
+	_, failure = transaction.Exec(
 		context,
 		`INSERT INTO sessions (
 			account_id,
@@ -159,23 +188,13 @@ func (store *telegramSessionStore) Store(
 			nonce,
 			ciphertext
 		)
-		SELECT $2, $3, $4, $5, $6
-		FROM operator_accounts AS account
-		WHERE account.id = $2
-		  AND account.operator_id = $1
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (account_id) DO UPDATE
 		SET format_version = EXCLUDED.format_version,
 		    key_id = EXCLUDED.key_id,
 		    nonce = EXCLUDED.nonce,
 		    ciphertext = EXCLUDED.ciphertext,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE EXISTS (
-			SELECT 1
-			FROM operator_accounts AS owned_account
-			WHERE owned_account.id = EXCLUDED.account_id
-			  AND owned_account.operator_id = $1
-		)`,
-		scope.OperatorID,
+		    updated_at = CURRENT_TIMESTAMP`,
 		scope.AccountID,
 		telegramSessionFormatVersion,
 		store.keyID,
@@ -185,8 +204,8 @@ func (store *telegramSessionStore) Store(
 	if failure != nil {
 		return fmt.Errorf("store telegram session: %w", failure)
 	}
-	if result.RowsAffected() != 1 {
-		return telegram.ErrSessionUnauthorized
+	if failure = transaction.Commit(context); failure != nil {
+		return fmt.Errorf("store telegram session: commit transaction: %w", failure)
 	}
 	return nil
 }
@@ -205,6 +224,10 @@ func validateTelegramSessionKeyID(keyID string) error {
 
 func validSessionScope(scope telegram.SessionScope) bool {
 	return scope.OperatorID != uuid.Nil && scope.AccountID != uuid.Nil
+}
+
+func validTelegramSessionAccountStatus(status string) bool {
+	return status == "authenticating" || status == "active"
 }
 
 func encryptTelegramSession(

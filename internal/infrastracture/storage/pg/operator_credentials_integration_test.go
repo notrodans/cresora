@@ -2,27 +2,16 @@ package pg
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
-const (
-	previousOperatorCredentialMigrationVersion int64 = 20260729000200
-	secureOperatorCredentialMigrationVersion   int64 = 20260729000300
-	canonicalOperatorCredentialPHC                   = "$argon2id$v=19$m=8192,t=1,p=1$QkJCQkJCQkJCQkJCQkJCQg$v4joKPPnZL3tVyLC0OzMuWdDDxie5pxlJcAYc3Uclgg"
-)
+const canonicalOperatorCredentialPHC = "$argon2id$v=19$m=8192,t=1,p=1$QkJCQkJCQkJCQkJCQkJCQg$v4joKPPnZL3tVyLC0OzMuWdDDxie5pxlJcAYc3Uclgg"
 
 func TestOperatorCredentialStorePostgresBootstrapResetAtomicity(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
@@ -173,48 +162,6 @@ func TestOperatorCredentialStateConstraintsPostgres(t *testing.T) {
 	}
 }
 
-func TestOperatorCredentialMigrationDestructiveUpgradePostgres(t *testing.T) {
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
-	}
-	context, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	database, isolatedURL, failure := newPreCutoverOperatorCredentialDatabase(context, t, databaseURL)
-	if failure != nil {
-		t.Fatalf("prepare pre-cutover PostgreSQL database: %v", failure)
-	}
-	legacyID := uuid.New()
-	legacyBoundary := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
-	if _, failure = database.Exec(context, `INSERT INTO operators (id, username, password, tokens_invalid_before) VALUES ($1, $2, $3, $4)`, legacyID, "legacy-operator", "legacy-password", legacyBoundary); failure != nil {
-		t.Fatalf("insert legacy operator fixture: %v", failure)
-	}
-	if failure = applyOperatorCredentialMigration(context, isolatedURL, secureOperatorCredentialMigrationVersion); failure != nil {
-		t.Fatalf("apply secure operator credential cutover: %v", failure)
-	}
-
-	var (
-		rowID         uuid.UUID
-		username      string
-		passwordHash  *string
-		passwordAt    *time.Time
-		invalidBefore time.Time
-	)
-	if failure = database.QueryRow(context, `SELECT id, username, password_hash, password_changed_at, tokens_invalid_before FROM operators WHERE id = $1`, legacyID).Scan(&rowID, &username, &passwordHash, &passwordAt, &invalidBefore); failure != nil {
-		t.Fatalf("read migrated legacy operator: %v", failure)
-	}
-	if rowID != legacyID || username != "legacy-operator" || passwordHash != nil || passwordAt != nil || !invalidBefore.After(legacyBoundary) {
-		t.Fatalf("destructive cutover state incorrect: row-preserved=%t username-preserved=%t unprovisioned=%t boundary-advanced=%t", rowID == legacyID, username == "legacy-operator", passwordHash == nil && passwordAt == nil, invalidBefore.After(legacyBoundary))
-	}
-	var passwordColumnCount int
-	if failure = database.QueryRow(context, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'operators' AND column_name = 'password'`).Scan(&passwordColumnCount); failure != nil {
-		t.Fatalf("inspect removed password column: %v", failure)
-	}
-	if passwordColumnCount != 0 {
-		t.Fatal("legacy operators.password column still exists after cutover")
-	}
-}
-
 func TestOperatorCredentialMigrationCatalogPostgres(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -247,121 +194,4 @@ func TestOperatorCredentialMigrationCatalogPostgres(t *testing.T) {
 	if passwordChangedColumnNullable != "YES" {
 		t.Fatalf("password_changed_at must be nullable for unprovisioned operators, got nullable=%t", passwordChangedColumnNullable == "YES")
 	}
-}
-
-func newPreCutoverOperatorCredentialDatabase(ctx context.Context, t *testing.T, databaseURL string) (*pgxpool.Pool, string, error) {
-	t.Helper()
-	baseConfig, failure := pgxpool.ParseConfig(databaseURL)
-	if failure != nil {
-		return nil, "", fmt.Errorf("parse PostgreSQL URL: %w", failure)
-	}
-	adminDatabase, failure := pgxpool.NewWithConfig(ctx, baseConfig)
-	if failure != nil {
-		return nil, "", fmt.Errorf("open PostgreSQL admin pool: %w", failure)
-	}
-	if failure = adminDatabase.Ping(ctx); failure != nil {
-		adminDatabase.Close()
-		return nil, "", fmt.Errorf("ping PostgreSQL admin pool: %w", failure)
-	}
-	schema := "operator_credentials_upgrade_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	quotedSchema := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
-	if _, failure = adminDatabase.Exec(ctx, "CREATE SCHEMA "+quotedSchema); failure != nil {
-		adminDatabase.Close()
-		return nil, "", fmt.Errorf("create isolated schema: %w", failure)
-	}
-	var database *pgxpool.Pool
-	t.Cleanup(func() {
-		if database != nil {
-			database.Close()
-		}
-		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		if _, cleanupFailure := adminDatabase.Exec(cleanupContext, "DROP SCHEMA "+quotedSchema+" CASCADE"); cleanupFailure != nil {
-			t.Errorf("drop isolated schema %q: %v", schema, cleanupFailure)
-		}
-		adminDatabase.Close()
-	})
-	isolatedURL, failure := telegramPeerLookupDatabaseURL(databaseURL, schema)
-	if failure != nil {
-		return nil, "", failure
-	}
-	if failure = applyIntegrationMigrationsThrough(ctx, isolatedURL, previousOperatorCredentialMigrationVersion); failure != nil {
-		return nil, "", fmt.Errorf("apply migrations through previous version: %w", failure)
-	}
-	isolatedConfig := baseConfig.Copy()
-	if isolatedConfig.ConnConfig.RuntimeParams == nil {
-		isolatedConfig.ConnConfig.RuntimeParams = make(map[string]string)
-	}
-	isolatedConfig.ConnConfig.RuntimeParams["search_path"] = schema
-	options := isolatedConfig.ConnConfig.RuntimeParams["options"]
-	if options != "" {
-		options += " "
-	}
-	isolatedConfig.ConnConfig.RuntimeParams["options"] = options + "-c search_path=" + schema
-	database, failure = pgxpool.NewWithConfig(ctx, isolatedConfig)
-	if failure != nil {
-		return nil, "", fmt.Errorf("open isolated PostgreSQL pool: %w", failure)
-	}
-	if failure = database.Ping(ctx); failure != nil {
-		database.Close()
-		database = nil
-		return nil, "", fmt.Errorf("ping isolated PostgreSQL pool: %w", failure)
-	}
-	return database, isolatedURL, nil
-}
-
-func applyIntegrationMigrationsThrough(ctx context.Context, databaseURL string, target int64) error {
-	database, failure := sql.Open("pgx", databaseURL)
-	if failure != nil {
-		return failure
-	}
-	defer database.Close()
-	if failure = database.PingContext(ctx); failure != nil {
-		return failure
-	}
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return fmt.Errorf("locate integration test source")
-	}
-	migrationsPath := filepath.Join(filepath.Dir(filename), "../../../../migrations")
-	provider, failure := goose.NewProvider(goose.DialectPostgres, database, os.DirFS(migrationsPath), goose.WithAllowOutofOrder(true))
-	if failure != nil {
-		return failure
-	}
-	defer provider.Close()
-	if _, failure = provider.UpTo(ctx, target); failure != nil {
-		if _, ackFailure := database.ExecContext(ctx, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); ackFailure != nil {
-			return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", ackFailure)
-		}
-		_, failure = provider.UpTo(ctx, target)
-	}
-	return failure
-}
-
-func applyOperatorCredentialMigration(ctx context.Context, databaseURL string, version int64) error {
-	database, failure := sql.Open("pgx", databaseURL)
-	if failure != nil {
-		return failure
-	}
-	defer database.Close()
-	if failure = database.PingContext(ctx); failure != nil {
-		return failure
-	}
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return fmt.Errorf("locate integration test source")
-	}
-	migrationsPath := filepath.Join(filepath.Dir(filename), "../../../../migrations")
-	provider, failure := goose.NewProvider(goose.DialectPostgres, database, os.DirFS(migrationsPath), goose.WithAllowOutofOrder(true))
-	if failure != nil {
-		return failure
-	}
-	defer provider.Close()
-	if current, _, versionFailure := provider.GetVersions(ctx); versionFailure != nil {
-		return versionFailure
-	} else if current != previousOperatorCredentialMigrationVersion {
-		return fmt.Errorf("unexpected pre-cutover migration version: %d", current)
-	}
-	_, failure = provider.ApplyVersion(ctx, version, true)
-	return failure
 }

@@ -138,8 +138,13 @@ func TestMailingConsolePostgres(t *testing.T) {
 		for _, account := range accounts {
 			accountIDs[account.ID] = true
 		}
-		if !accountIDs[fixture.accountA] || !accountIDs[fixture.accountA2] || accountIDs[fixture.accountB] {
+		if !accountIDs[fixture.accountA] || !accountIDs[fixture.accountA2] || accountIDs[fixture.accountB] || accountIDs[fixture.inactiveAccountA] {
 			t.Fatalf("unexpected operator A accounts: %#v", accounts)
+		}
+		for _, account := range accounts {
+			if account.ID == fixture.accountA2 && (account.Phone != "" || account.TelegramUsername != "" || account.TelegramFirstName != "" || account.TelegramLastName != "") {
+				t.Fatalf("expected nullable account metadata to render as empty values: %#v", account)
+			}
 		}
 		sharedIDs := make(map[uuid.UUID]bool, len(sharedDialogs))
 		for _, dialog := range sharedDialogs {
@@ -148,7 +153,7 @@ func TestMailingConsolePostgres(t *testing.T) {
 				t.Fatalf("dashboard leaked shared dialog account: %#v", dialog)
 			}
 		}
-		if !sharedIDs[fixture.sharedUsable] || !sharedIDs[fixture.sharedWrongAccount] || sharedIDs[fixture.sharedLeft] || sharedIDs[fixture.sharedNoSend] || sharedIDs[fixture.sharedNoHash] || sharedIDs[fixture.sharedZeroHash] || sharedIDs[fixture.sharedOperatorB] {
+		if !sharedIDs[fixture.sharedUsable] || !sharedIDs[fixture.sharedWrongAccount] || sharedIDs[fixture.sharedLeft] || sharedIDs[fixture.sharedNoSend] || sharedIDs[fixture.sharedNoHash] || sharedIDs[fixture.sharedZeroHash] || sharedIDs[fixture.sharedOperatorB] || sharedIDs[fixture.sharedInactive] {
 			t.Fatalf("unexpected operator A shared dialogs: %#v", sharedDialogs)
 		}
 		privateKeys := make(map[string]bool, len(privateDialogs))
@@ -158,7 +163,7 @@ func TestMailingConsolePostgres(t *testing.T) {
 				t.Fatalf("dashboard leaked private dialog account: %#v", dialog)
 			}
 		}
-		if !privateKeys[consolePrivateKey(mailingconsole.PeerTypeUser, fixture.privateUserPeer)] || !privateKeys[consolePrivateKey(mailingconsole.PeerTypeChat, fixture.privateChatPeer)] || privateKeys[consolePrivateKey(mailingconsole.PeerTypeUser, fixture.privateOperatorBPeer)] {
+		if !privateKeys[consolePrivateKey(mailingconsole.PeerTypeUser, fixture.privateUserPeer)] || !privateKeys[consolePrivateKey(mailingconsole.PeerTypeChat, fixture.privateChatPeer)] || privateKeys[consolePrivateKey(mailingconsole.PeerTypeUser, fixture.privateOperatorBPeer)] || privateKeys[consolePrivateKey(mailingconsole.PeerTypeUser, fixture.privateInactivePeer)] {
 			t.Fatalf("unexpected operator A private dialogs: %#v", privateDialogs)
 		}
 		for _, summary := range dashboardMailings {
@@ -177,6 +182,19 @@ func TestMailingConsolePostgres(t *testing.T) {
 			Name: "wrong account", MessageText: "message", AccountID: fixture.accountB, SharedDialogIDs: []uuid.UUID{fixture.sharedOperatorB},
 		})
 		assertMailingConsoleError(t, failure, mailingconsole.ErrNotFound)
+	})
+	t.Run("inactive account is indistinguishable from a foreign account", func(t *testing.T) {
+		foreignFailure := createFailure(mailingconsole.CreateDraftInput{
+			Name: "foreign account", MessageText: "message", AccountID: fixture.accountB, SharedDialogIDs: []uuid.UUID{fixture.sharedOperatorB},
+		})
+		inactiveFailure := createFailure(mailingconsole.CreateDraftInput{
+			Name: "inactive account", MessageText: "message", AccountID: fixture.inactiveAccountA, SharedDialogIDs: []uuid.UUID{fixture.sharedInactive},
+		})
+		assertMailingConsoleError(t, foreignFailure, mailingconsole.ErrNotFound)
+		assertMailingConsoleError(t, inactiveFailure, mailingconsole.ErrNotFound)
+		if foreignFailure.Error() != inactiveFailure.Error() {
+			t.Fatalf("expected foreign and inactive account failures to match: foreign=%v inactive=%v", foreignFailure, inactiveFailure)
+		}
 	})
 	t.Run("wrong selected-account shared dialog is rejected", func(t *testing.T) {
 		failure := createFailure(mailingconsole.CreateDraftInput{
@@ -259,6 +277,7 @@ type mailingConsoleFixture struct {
 	accountA             uuid.UUID
 	accountA2            uuid.UUID
 	accountB             uuid.UUID
+	inactiveAccountA     uuid.UUID
 	sharedUsable         uuid.UUID
 	sharedWrongAccount   uuid.UUID
 	sharedLeft           uuid.UUID
@@ -266,9 +285,11 @@ type mailingConsoleFixture struct {
 	sharedNoHash         uuid.UUID
 	sharedZeroHash       uuid.UUID
 	sharedOperatorB      uuid.UUID
+	sharedInactive       uuid.UUID
 	privateUserPeer      int64
 	privateChatPeer      int64
 	privateOperatorBPeer int64
+	privateInactivePeer  int64
 }
 
 func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool) (mailingConsoleFixture, error) {
@@ -278,6 +299,7 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 		accountA:           uuid.New(),
 		accountA2:          uuid.New(),
 		accountB:           uuid.New(),
+		inactiveAccountA:   uuid.New(),
 		sharedUsable:       uuid.New(),
 		sharedWrongAccount: uuid.New(),
 		sharedLeft:         uuid.New(),
@@ -285,10 +307,12 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 		sharedNoHash:       uuid.New(),
 		sharedZeroHash:     uuid.New(),
 		sharedOperatorB:    uuid.New(),
+		sharedInactive:     uuid.New(),
 	}
 	fixture.privateUserPeer = consolePeerID(uuid.New())
 	fixture.privateChatPeer = consolePeerID(uuid.New())
 	fixture.privateOperatorBPeer = consolePeerID(uuid.New())
+	fixture.privateInactivePeer = consolePeerID(uuid.New())
 
 	transaction, failure := database.Begin(context)
 	if failure != nil {
@@ -303,13 +327,15 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 		return fixture, fmt.Errorf("insert operators: %w", failure)
 	}
 	if failure = exec(
-		`INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id)
-		 VALUES ($1, $2, '+12025551001', $3, 'Console A', 1),
-		        ($4, $2, '+12025551002', $5, 'Console A2', 2),
-		        ($6, $7, '+12025551003', $8, 'Console B', 3)`,
+		`INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, telegram_user_id, status, status_version)
+		 VALUES ($1, $2, '+12025551001', $3, 'Console A', 100001, 'active', 1),
+		        ($4, $2, NULL::varchar, NULL::varchar, NULL::varchar, 100002, 'active', 2),
+		        ($5, $6, '+12025551003', $7, 'Console B', 100003, 'active', 3),
+		        ($8, $2, NULL::varchar, NULL::varchar, NULL::varchar, 100004, 'disconnected', 1)`,
 		fixture.accountA, fixture.operatorA, "console-a-"+fixture.accountA.String()[:8],
-		fixture.accountA2, "console-a2-"+fixture.accountA2.String()[:8],
+		fixture.accountA2,
 		fixture.accountB, fixture.operatorB, "console-b-"+fixture.accountB.String()[:8],
+		fixture.inactiveAccountA,
 	); failure != nil {
 		return fixture, fmt.Errorf("insert accounts: %w", failure)
 	}
@@ -334,6 +360,7 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 		{fixture.sharedNoHash, fixture.accountA, "joined", true, nil},
 		{fixture.sharedZeroHash, fixture.accountA, "joined", true, consoleInt64(0)},
 		{fixture.sharedOperatorB, fixture.accountB, "joined", true, consoleInt64(2001)},
+		{fixture.sharedInactive, fixture.inactiveAccountA, "joined", true, consoleInt64(5001)},
 	}
 	for _, shared := range sharedFixtures {
 		if failure = insertShared(shared.id, shared.account, shared.status, shared.canSend, shared.hash); failure != nil {
@@ -352,6 +379,9 @@ func createMailingConsoleFixture(context context.Context, database *pgxpool.Pool
 	}
 	if failure = insertPrivate(fixture.accountB, mailingconsole.PeerTypeUser, fixture.privateOperatorBPeer, consoleInt64(4001)); failure != nil {
 		return fixture, fmt.Errorf("insert operator B private user: %w", failure)
+	}
+	if failure = insertPrivate(fixture.inactiveAccountA, mailingconsole.PeerTypeUser, fixture.privateInactivePeer, consoleInt64(5002)); failure != nil {
+		return fixture, fmt.Errorf("insert inactive private user: %w", failure)
 	}
 	if failure = transaction.Commit(context); failure != nil {
 		return fixture, fmt.Errorf("commit fixture: %w", failure)
@@ -382,7 +412,7 @@ func cleanupMailingConsoleFixture(context context.Context, database *pgxpool.Poo
 	if _, failure = transaction.Exec(context, `DELETE FROM operators WHERE id IN ($1, $2)`, fixture.operatorA, fixture.operatorB); failure != nil {
 		return fmt.Errorf("delete fixture operators: %w", failure)
 	}
-	sharedIDs := []uuid.UUID{fixture.sharedUsable, fixture.sharedWrongAccount, fixture.sharedLeft, fixture.sharedNoSend, fixture.sharedNoHash, fixture.sharedZeroHash, fixture.sharedOperatorB}
+	sharedIDs := []uuid.UUID{fixture.sharedUsable, fixture.sharedWrongAccount, fixture.sharedLeft, fixture.sharedNoSend, fixture.sharedNoHash, fixture.sharedZeroHash, fixture.sharedOperatorB, fixture.sharedInactive}
 	if _, failure = transaction.Exec(context, `DELETE FROM telegram_shared_dialogs WHERE id = ANY($1::uuid[])`, sharedIDs); failure != nil {
 		return fmt.Errorf("delete fixture shared dialogs: %w", failure)
 	}
@@ -657,17 +687,11 @@ func applyMailingConsoleMigrations(context context.Context, databaseURL string) 
 		goose.DialectPostgres,
 		database,
 		os.DirFS(filepath.Join(filepath.Dir(filename), "../../../../../migrations")),
-		goose.WithAllowOutofOrder(true),
 	)
 	if failure != nil {
 		return failure
 	}
-	if _, failure = provider.Up(context); failure == nil {
-		return errors.New("apply migrations without delivery execution v2 acknowledgement")
-	}
-	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
-		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
-	}
+	defer provider.Close()
 	_, failure = provider.Up(context)
 	return failure
 }

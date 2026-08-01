@@ -76,6 +76,7 @@ func (all pgMailingConsole) accounts(
 		`SELECT id, phone, telegram_username, telegram_first_name, telegram_last_name
 		 FROM operator_accounts
 		 WHERE operator_id = $1
+		   AND status = 'active'
 		 ORDER BY id`,
 		operatorID,
 	)
@@ -86,17 +87,29 @@ func (all pgMailingConsole) accounts(
 	accounts := make([]mailingconsole.Account, 0)
 	for rows.Next() {
 		var (
-			account  mailingconsole.Account
-			lastName pgtype.Text
+			account   mailingconsole.Account
+			phone     pgtype.Text
+			username  pgtype.Text
+			firstName pgtype.Text
+			lastName  pgtype.Text
 		)
 		if failure = rows.Scan(
 			&account.ID,
-			&account.Phone,
-			&account.TelegramUsername,
-			&account.TelegramFirstName,
+			&phone,
+			&username,
+			&firstName,
 			&lastName,
 		); failure != nil {
 			return nil, fmt.Errorf("scan operator Telegram account: %w", failure)
+		}
+		if phone.Valid {
+			account.Phone = phone.String
+		}
+		if username.Valid {
+			account.TelegramUsername = username.String
+		}
+		if firstName.Valid {
+			account.TelegramFirstName = firstName.String
 		}
 		if lastName.Valid {
 			account.TelegramLastName = lastName.String
@@ -128,6 +141,7 @@ func (all pgMailingConsole) sharedDialogs(
 		 JOIN telegram_shared_dialogs AS dialog
 		   ON dialog.id = shared_access.shared_dialog_id
 		 WHERE account.operator_id = $1
+		   AND account.status = 'active'
 		   AND shared_access.membership_status = 'joined'
 		   AND shared_access.can_send
 		   AND shared_access.access_hash IS NOT NULL
@@ -183,6 +197,7 @@ func (all pgMailingConsole) privateDialogs(
 		 JOIN operator_accounts_private_dialogs AS private_dialog
 		   ON private_dialog.account_id = account.id
 		 WHERE account.operator_id = $1
+		   AND account.status = 'active'
 		   AND private_dialog.can_send
 		   AND (
 			private_dialog.peer_type = 'chat'
@@ -305,6 +320,7 @@ func (all pgOperatorMailings) CreateDraft(
 		 FROM operator_accounts
 		 WHERE id = $1
 		   AND operator_id = $2
+		   AND status = 'active'
 		 FOR UPDATE`,
 		input.AccountID,
 		operatorID,
@@ -326,6 +342,7 @@ func (all pgOperatorMailings) CreateDraft(
 		   ON account.id = shared_access.account_id
 		 WHERE account.operator_id = $2
 		   AND shared_access.account_id = $1
+		   AND account.status = 'active'
 		   AND shared_access.membership_status = 'joined'
 		   AND shared_access.can_send
 		   AND shared_access.access_hash IS NOT NULL
@@ -365,6 +382,7 @@ func (all pgOperatorMailings) CreateDraft(
 		   ON account.id = private_dialog.account_id
 		 WHERE account.operator_id = $2
 		   AND private_dialog.account_id = $1
+		   AND account.status = 'active'
 		   AND private_dialog.can_send
 		   AND (
 			private_dialog.peer_type = 'chat'
