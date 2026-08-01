@@ -17,8 +17,10 @@ import (
 //     profile.
 //
 // No method waits for a later HTTP operation, and no gotd type crosses this
-// boundary. The provider must scope every call to the supplied actor,
-// account, and observed lifecycle version.
+// boundary. Implementations must not return vendor errors, raw errors, or
+// provider error strings. They may return only application sentinels or a
+// validated ProviderFailureError. The provider must scope every call to the
+// supplied actor, account, and observed lifecycle version.
 type PhoneProvider interface {
 	SendCode(context.Context, AuthTarget, string) (SendCodeResult, error)
 	SignIn(context.Context, AuthTarget, string, string, PhoneCodeHash) (Profile, error)

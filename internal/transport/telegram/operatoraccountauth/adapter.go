@@ -62,7 +62,7 @@ func (adapter Adapter) SendCode(
 		return application.SendCodeResult{}, mapProviderError(failure)
 	}
 	if sent.hash == "" {
-		return application.SendCodeResult{}, application.ErrProviderUnavailable
+		return application.SendCodeResult{}, newProviderFailure(application.ProviderFailureProtocol)
 	}
 	return application.SendCodeResult{
 		PhoneCodeHash: application.NewPhoneCodeHash(sent.hash),
@@ -243,15 +243,21 @@ func mapProviderError(failure error) error {
 	if errors.Is(failure, context.DeadlineExceeded) {
 		return context.DeadlineExceeded
 	}
-	var retry *application.RetryAfterError
-	if errors.As(failure, &retry) {
+	if retry, ok := errors.AsType[*application.RetryAfterError](failure); ok {
 		return retry
 	}
 	if errors.Is(failure, accountowner.ErrRegistryStopped) || errors.Is(failure, accountowner.ErrAccountStopped) {
 		return application.ErrProviderUnavailable
 	}
+	if errors.Is(failure, accountowner.ErrRuntimeCapacity) {
+		return newProviderFailure(application.ProviderFailureRuntimeCapacity)
+	}
 	if errors.Is(failure, accountowner.ErrStaleAdmission) || errors.Is(failure, accountowner.ErrInvalidAdmission) {
 		return application.ErrSessionUnavailable
+	}
+	var providerFailure *application.ProviderFailureError
+	if errors.As(failure, &providerFailure) && providerFailure != nil {
+		return newProviderFailure(providerFailure.Kind())
 	}
 	for _, approved := range []error{
 		application.ErrInvalidCode,
@@ -272,13 +278,18 @@ func mapProviderError(failure error) error {
 		if err == nil {
 			return safe
 		}
-		return application.ErrFloodWait
 	}
 	if errors.Is(failure, gotdauth.ErrPasswordAuthNeeded) || tgerr.Is(failure, "SESSION_PASSWORD_NEEDED") {
 		return application.ErrPasswordRequired
 	}
 	if errors.Is(failure, gotdauth.ErrPasswordInvalid) || tgerr.Is(failure, "PASSWORD_HASH_INVALID") {
 		return application.ErrInvalidPassword
+	}
+	if tgerr.Is(failure, "API_ID_INVALID") {
+		return newProviderFailure(application.ProviderFailureConfigurationRejected)
+	}
+	if tgerr.Is(failure, "PHONE_NUMBER_INVALID", "PHONE_NUMBER_BANNED", "PHONE_NUMBER_FLOOD") {
+		return newProviderFailure(application.ProviderFailurePhoneRejected)
 	}
 	if tgerr.Is(failure,
 		"PHONE_CODE_EMPTY",
@@ -301,7 +312,26 @@ func mapProviderError(failure error) error {
 	if gotdauth.IsUnauthorized(failure) || tgerr.Is(failure, "UNAUTHORIZED") {
 		return application.ErrUnauthorized
 	}
-	return application.ErrProviderTransient
+	if errors.Is(failure, errInvalidSendCodeResponse) {
+		return newProviderFailure(application.ProviderFailureProtocol)
+	}
+	if rpcFailure, ok := tgerr.As(failure); ok {
+		switch {
+		case rpcFailure.Code >= 400 && rpcFailure.Code < 500:
+			return newProviderFailure(application.ProviderFailureRemoteRejected)
+		case rpcFailure.Code >= 500 && rpcFailure.Code < 600:
+			return newProviderFailure(application.ProviderFailureRemoteFailure)
+		}
+	}
+	return newProviderFailure(application.ProviderFailureTransportUnknown)
+}
+
+func newProviderFailure(kind application.ProviderFailureKind) error {
+	failure, err := application.NewProviderFailureError(kind)
+	if err != nil {
+		return application.ErrProviderTransient
+	}
+	return failure
 }
 
 var errInvalidSendCodeResponse = errors.New("telegram authentication send-code response is invalid")

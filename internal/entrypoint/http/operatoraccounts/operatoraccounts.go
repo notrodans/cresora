@@ -3,6 +3,7 @@ package operatoraccounts
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"html/template"
 	"io"
+	slogger "log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +27,7 @@ import (
 	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
+	"github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 )
 
 const (
@@ -149,22 +152,34 @@ type RouteOptions struct {
 
 const unavailableMessage = "Раздел управления аккаунтами временно недоступен. Попробуйте позже."
 
+const (
+	canonicalOperationSendCode = "send_code"
+	canonicalOperationSignIn   = "sign_in"
+	canonicalOperationPassword = "password"
+	canonicalOperationCancel   = "cancel"
+
+	canonicalFailureApplication      = "application_failure"
+	canonicalFailureInvalidResult    = "invalid_application_result"
+	canonicalFailureRequestCancelled = "request_cancelled"
+)
+
 //go:embed templates/authenticate.html style.css authenticate.js
 var assets embed.FS
 
 type handler struct {
-	startPhone   commands.StartPhone
-	verifyPhone  commands.VerifyPhone
-	start        commands.Start
-	codeCommand  commands.Code
-	password     commands.Password
-	cancel       commands.Cancel
-	status       requests.Status
-	tmpl         *template.Template
-	publicOrigin *url.URL
-	disabled     bool
-	cookie       CookieConfig
-	canonical    bool
+	startPhone                     commands.StartPhone
+	verifyPhone                    commands.VerifyPhone
+	start                          commands.Start
+	codeCommand                    commands.Code
+	password                       commands.Password
+	cancel                         commands.Cancel
+	status                         requests.Status
+	tmpl                           *template.Template
+	publicOrigin                   *url.URL
+	disabled                       bool
+	cookie                         CookieConfig
+	canonical                      bool
+	allowLocalNullOriginNativeForm bool
 }
 
 type page struct {
@@ -375,7 +390,26 @@ func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Co
 	if options.Mode == RouteLive && (options.Environment == EnvironmentProduction || options.Environment == EnvironmentStaging) && !options.Cookie.Secure {
 		panic("live operator account routes require Secure cookies in production and staging")
 	}
-	h := &handler{start: start, codeCommand: code, password: password, cancel: cancel, status: status, canonical: true, publicOrigin: origin, disabled: options.Mode == RouteDisabled, cookie: options.Cookie}
+	allowLocalNullOriginNativeForm := options.Mode == RouteLive &&
+		options.Environment == EnvironmentDevelopment &&
+		!options.Cookie.Secure &&
+		options.Cookie.AllowInsecureLocal &&
+		options.Cookie.CSRFCookieName == localCSRFCookie &&
+		options.Cookie.SessionCookieName == localSessionCookie &&
+		strings.EqualFold(origin.Scheme, "http") &&
+		isLocalOriginHost(origin)
+	h := &handler{
+		start:                          start,
+		codeCommand:                    code,
+		password:                       password,
+		cancel:                         cancel,
+		status:                         status,
+		canonical:                      true,
+		publicOrigin:                   origin,
+		disabled:                       options.Mode == RouteDisabled,
+		cookie:                         options.Cookie,
+		allowLocalNullOriginNativeForm: allowLocalNullOriginNativeForm,
+	}
 	h.tmpl = template.Must(template.New("authenticate.html").ParseFS(assets, "templates/authenticate.html"))
 	protected := router.With(principal.Middleware(provider))
 	protected.Get("/operator-accounts/authenticate", h.authenticate)
@@ -445,11 +479,13 @@ func (h *handler) phoneCanonical(w http.ResponseWriter, r *http.Request) {
 	}
 	phone := strings.TrimSpace(r.FormValue("phone"))
 	if phone == "" || len(phone) > 32 {
+		logCanonicalFailure(r, canonicalOperationSendCode, common.ErrInvalidInput)
 		redirectError(w, "phone")
 		return
 	}
 	result, err := h.start.Execute(r.Context(), actor, phone)
 	if err != nil {
+		logCanonicalFailure(r, canonicalOperationSendCode, err)
 		if isFloodWait(err) {
 			redirectError(w, "flood-wait")
 			return
@@ -458,6 +494,7 @@ func (h *handler) phoneCanonical(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Validate() != nil {
+		logCanonicalFailure(r, canonicalOperationSendCode, common.ErrInvalidResult)
 		redirectError(w, "send-code")
 		return
 	}
@@ -480,6 +517,7 @@ func (h *handler) codeCanonical(w http.ResponseWriter, r *http.Request) {
 	requestID, err := uuid.Parse(strings.TrimSpace(r.FormValue("challenge_request_id")))
 	code := strings.TrimSpace(r.FormValue("code"))
 	if err != nil || requestID == uuid.Nil || code == "" || len(code) > 16 {
+		logCanonicalFailure(r, canonicalOperationSignIn, common.ErrInvalidInput)
 		redirectError(w, "code")
 		return
 	}
@@ -489,6 +527,7 @@ func (h *handler) codeCanonical(w http.ResponseWriter, r *http.Request) {
 			h.redirect(w, "/operator-accounts/authenticate?notice=password-required")
 			return
 		}
+		logCanonicalFailure(r, canonicalOperationSignIn, err)
 		if isFloodWait(err) {
 			redirectError(w, "flood-wait")
 			return
@@ -497,6 +536,7 @@ func (h *handler) codeCanonical(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Validate() != nil {
+		logCanonicalFailure(r, canonicalOperationSignIn, common.ErrInvalidResult)
 		redirectError(w, "code")
 		return
 	}
@@ -515,11 +555,13 @@ func (h *handler) passwordStep(w http.ResponseWriter, r *http.Request) {
 	requestID, err := uuid.Parse(strings.TrimSpace(r.FormValue("challenge_request_id")))
 	password := r.FormValue("password")
 	if err != nil || requestID == uuid.Nil || password == "" || len(password) > 256 {
+		logCanonicalFailure(r, canonicalOperationPassword, common.ErrInvalidInput)
 		redirectError(w, "password")
 		return
 	}
 	result, err := h.password.Execute(r.Context(), actor, requestID, password)
 	if err != nil {
+		logCanonicalFailure(r, canonicalOperationPassword, err)
 		if isFloodWait(err) {
 			redirectError(w, "flood-wait")
 			return
@@ -528,6 +570,7 @@ func (h *handler) passwordStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Validate() != nil {
+		logCanonicalFailure(r, canonicalOperationPassword, common.ErrInvalidResult)
 		redirectError(w, "password")
 		return
 	}
@@ -545,10 +588,12 @@ func (h *handler) cancelStep(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID, err := uuid.Parse(strings.TrimSpace(r.FormValue("challenge_request_id")))
 	if err != nil || requestID == uuid.Nil {
+		logCanonicalFailure(r, canonicalOperationCancel, common.ErrInvalidInput)
 		redirectError(w, "invalid")
 		return
 	}
 	if err := h.cancel.Execute(r.Context(), actor, requestID); err != nil {
+		logCanonicalFailure(r, canonicalOperationCancel, err)
 		redirectError(w, "cancel")
 		return
 	}
@@ -740,7 +785,7 @@ func requestActor(w http.ResponseWriter, r *http.Request) (application.Actor, bo
 }
 
 func (h *handler) protectPost(w http.ResponseWriter, r *http.Request) bool {
-	if !h.sameOrigin(r) {
+	if !h.sameOrigin(r) && !h.localNullOriginNativeForm(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return false
 	}
@@ -790,6 +835,37 @@ func (h *handler) newCookie(name, value string, maxAge int) *http.Cookie {
 func (h *handler) redirect(w http.ResponseWriter, target string) {
 	http.Redirect(w, &http.Request{URL: &url.URL{}}, target, http.StatusSeeOther)
 }
+
+func logCanonicalFailure(r *http.Request, operation string, failure error) {
+	failureClass := canonicalFailureApplication
+	if errors.Is(failure, common.ErrInvalidResult) {
+		failureClass = canonicalFailureInvalidResult
+	} else {
+		var providerFailure *common.ProviderFailureError
+		if errors.As(failure, &providerFailure) && providerFailure != nil {
+			if kind := providerFailure.Kind(); kind != common.ProviderFailureUnknown {
+				failureClass = string(kind)
+			}
+		}
+	}
+
+	level := slogger.LevelError
+	if errors.Is(failure, context.Canceled) {
+		if failureClass == canonicalFailureApplication {
+			failureClass = canonicalFailureRequestCancelled
+		}
+		level = slogger.LevelInfo
+	}
+	sloggerForRequest := slog.LoggerOr(r.Context(), slogger.Default())
+	sloggerForRequest.LogAttrs(
+		r.Context(),
+		level,
+		"operator account authentication failed",
+		slogger.String("operation", operation),
+		slogger.String("failure_class", failureClass),
+	)
+}
+
 func redirectError(w http.ResponseWriter, code string) {
 	http.Redirect(w, &http.Request{URL: &url.URL{}}, "/operator-accounts/authenticate?error="+url.QueryEscape(code), http.StatusSeeOther)
 }
@@ -819,6 +895,42 @@ func (h *handler) sameOrigin(r *http.Request) bool {
 		}
 	}
 	return seen
+}
+
+func (h *handler) localNullOriginNativeForm(r *http.Request) bool {
+	if !h.allowLocalNullOriginNativeForm || r == nil || r.URL == nil || h.publicOrigin == nil {
+		return false
+	}
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		return false
+	}
+	switch r.URL.EscapedPath() {
+	case "/operator-accounts/authenticate/phone",
+		"/operator-accounts/authenticate/phone/code",
+		"/operator-accounts/authenticate/phone/password",
+		"/operator-accounts/authenticate/phone/cancel":
+	default:
+		return false
+	}
+	if r.Host != h.publicOrigin.Host {
+		return false
+	}
+	if values := r.Header.Values("Origin"); len(values) != 1 || values[0] != "null" {
+		return false
+	}
+	if len(r.Header.Values("Referer")) != 0 {
+		return false
+	}
+	if values := r.Header.Values("Sec-Fetch-Site"); len(values) != 1 || values[0] != "same-origin" {
+		return false
+	}
+	if values := r.Header.Values("Sec-Fetch-Mode"); len(values) != 1 || values[0] != "navigate" {
+		return false
+	}
+	if values := r.Header.Values("Sec-Fetch-Dest"); len(values) != 1 || values[0] != "document" {
+		return false
+	}
+	return true
 }
 
 func parsePublicOrigin(value string) (*url.URL, error) {

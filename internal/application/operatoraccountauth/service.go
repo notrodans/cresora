@@ -587,8 +587,11 @@ func classifyProviderFailure(err error, expiresAt, now time.Time) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
 	}
 	var retry *RetryAfterError
 	if errors.As(err, &retry) {
@@ -605,6 +608,10 @@ func classifyProviderFailure(err error, expiresAt, now time.Time) error {
 			return bounded
 		}
 		return ErrFloodWait
+	}
+	var providerFailure *ProviderFailureError
+	if errors.As(err, &providerFailure) && providerFailure != nil && validProviderFailureKind(providerFailure.Kind()) {
+		return providerFailure
 	}
 	switch {
 	case errors.Is(err, ErrInvalidCode):

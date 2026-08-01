@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,6 +334,187 @@ func TestServiceInvalidCodePreservesChallenge(t *testing.T) {
 	}
 	if result.Challenge == nil || result.Challenge.RequestID != start.Challenge.RequestID {
 		t.Fatalf("invalid code removed challenge: %+v", result)
+	}
+}
+
+func TestProviderFailureErrorValidatesAndExposesOnlySafeKind(t *testing.T) {
+	if failure, err := NewProviderFailureError(ProviderFailureUnknown); failure != nil || !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("NewProviderFailureError(unknown) = (%v, %v), want nil and ErrInvalidInput", failure, err)
+	}
+
+	const canary = "provider-secret"
+	failure, err := NewProviderFailureError(ProviderFailureRemoteRejected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure.Kind() != ProviderFailureRemoteRejected {
+		t.Fatalf("ProviderFailureError.Kind() = %v, want remote rejected", failure.Kind())
+	}
+	if !errors.Is(failure, ErrProviderTransient) {
+		t.Fatal("ProviderFailureError does not unwrap to ErrProviderTransient")
+	}
+	if errors.Is(failure, errors.New(canary)) {
+		t.Fatal("ProviderFailureError unexpectedly retained a raw cause")
+	}
+	for _, format := range []string{"%s", "%v", "%+v"} {
+		if message := fmt.Sprintf(format, failure); strings.Contains(message, canary) {
+			t.Fatalf("formatted %s error disclosed provider data: %q", format, message)
+		}
+	}
+
+	protocolFailure, err := NewProviderFailureError(ProviderFailureProtocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(protocolFailure, ErrProviderUnavailable) {
+		t.Fatal("protocol diagnostic does not retain ErrProviderUnavailable")
+	}
+	if errors.Is(protocolFailure, ErrProviderTransient) {
+		t.Fatal("protocol diagnostic unexpectedly retained ErrProviderTransient")
+	}
+}
+
+func TestServicePreservesSafeProviderFailureAndStripsOuterWrapper(t *testing.T) {
+	const canary = "provider-secret-must-not-escape"
+	tests := []struct {
+		name string
+		call func(*Service, applicationroot.Actor, uuid.UUID, error) (Result, error)
+	}{
+		{
+			name: "code",
+			call: func(service *Service, actor applicationroot.Actor, requestID uuid.UUID, failure error) (Result, error) {
+				serviceProvider := service.provider.(*serviceProvider)
+				serviceProvider.signInError = failure
+				return service.Code(context.Background(), actor, requestID, "12345")
+			},
+		},
+		{
+			name: "password",
+			call: func(service *Service, actor applicationroot.Actor, requestID uuid.UUID, failure error) (Result, error) {
+				serviceProvider := service.provider.(*serviceProvider)
+				serviceProvider.signInError = ErrPasswordRequired
+				if _, err := service.Code(context.Background(), actor, requestID, "12345"); !errors.Is(err, ErrPasswordRequired) {
+					return Result{}, err
+				}
+				serviceProvider.signInError = nil
+				serviceProvider.passwordErr = failure
+				return service.Password(context.Background(), actor, requestID, "password")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, _, _, stopper, actor := newServiceFixture(t)
+			start, err := service.Start(context.Background(), actor, "+15551234567")
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure, err := NewProviderFailureError(ProviderFailureRemoteRejected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, operationErr := test.call(service, actor, start.Challenge.RequestID, fmt.Errorf("unsafe outer: %w", failure))
+			if result.Challenge == nil {
+				t.Fatalf("result = %+v, want preserved challenge", result)
+			}
+			var diagnostic *ProviderFailureError
+			if !errors.As(operationErr, &diagnostic) {
+				t.Fatalf("operation error = %T %v, want ProviderFailureError", operationErr, operationErr)
+			}
+			if diagnostic != failure || diagnostic.Kind() != ProviderFailureRemoteRejected {
+				t.Fatalf("operation error diagnostic = %p, kind %v, want %p, kind %v", diagnostic, diagnostic.Kind(), failure, failure.Kind())
+			}
+			if strings.Contains(fmt.Sprintf("%s %v %+v", operationErr, operationErr, operationErr), canary) {
+				t.Fatal("provider failure error disclosed a provider canary")
+			}
+			if len(stopper.accounts) != 0 {
+				t.Fatalf("safe provider diagnostic triggered abort: %+v", stopper.accounts)
+			}
+		})
+	}
+}
+
+func TestServiceStartAbortsOnJoinedEmptySendCodeResponse(t *testing.T) {
+	const canary = "joined-provider-secret"
+	service, persistence, provider, stopper, actor := newServiceFixture(t)
+	failure, err := NewProviderFailureError(ProviderFailureProtocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.sendError = errors.Join(
+		fmt.Errorf("unsafe outer: %w", failure),
+		errors.New(canary),
+	)
+	_, operationErr := service.Start(context.Background(), actor, "+15551234567")
+	var diagnostic *ProviderFailureError
+	if !errors.As(operationErr, &diagnostic) {
+		t.Fatalf("Start() error = %T %v, want ProviderFailureError", operationErr, operationErr)
+	}
+	if diagnostic != failure || diagnostic.Kind() != ProviderFailureProtocol {
+		t.Fatalf("Start() diagnostic = %p, kind %v, want %p, kind %v", diagnostic, diagnostic.Kind(), failure, failure.Kind())
+	}
+	if strings.Contains(fmt.Sprintf("%s %v %+v", operationErr, operationErr, operationErr), canary) {
+		t.Fatal("Start() provider failure disclosed a provider canary")
+	}
+	if !errors.Is(operationErr, ErrProviderUnavailable) {
+		t.Fatal("Start() error does not retain ErrProviderUnavailable")
+	}
+	if !errors.Is(operationErr, ErrAuthenticationAborted) {
+		t.Fatal("Start() error does not report the completed authentication abort")
+	}
+	if persistence.beginAborts != 1 || len(stopper.accounts) != 1 || persistence.completeAborts != 1 {
+		t.Fatalf("empty SendCode response abort calls: begin=%d stop=%d complete=%d", persistence.beginAborts, len(stopper.accounts), persistence.completeAborts)
+	}
+	if len(persistence.log) < 2 || persistence.log[len(persistence.log)-2] != "begin-abort" || persistence.log[len(persistence.log)-1] != "complete-abort" {
+		t.Fatalf("abort persistence order = %v, want begin-abort then complete-abort", persistence.log)
+	}
+}
+
+func TestServiceUnknownProviderFailureReturnsBareTransientSentinel(t *testing.T) {
+	const canary = "unknown-provider-secret"
+	tests := []struct {
+		name string
+		call func(*Service, applicationroot.Actor, uuid.UUID, error) (Result, error)
+	}{
+		{
+			name: "code",
+			call: func(service *Service, actor applicationroot.Actor, requestID uuid.UUID, failure error) (Result, error) {
+				service.provider.(*serviceProvider).signInError = failure
+				return service.Code(context.Background(), actor, requestID, "12345")
+			},
+		},
+		{
+			name: "password",
+			call: func(service *Service, actor applicationroot.Actor, requestID uuid.UUID, failure error) (Result, error) {
+				provider := service.provider.(*serviceProvider)
+				provider.signInError = ErrPasswordRequired
+				if _, err := service.Code(context.Background(), actor, requestID, "12345"); err != nil && !errors.Is(err, ErrPasswordRequired) {
+					return Result{}, err
+				}
+				provider.signInError = nil
+				provider.passwordErr = failure
+				return service.Password(context.Background(), actor, requestID, "password")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, _, _, _, actor := newServiceFixture(t)
+			start, err := service.Start(context.Background(), actor, "+15551234567")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, operationErr := test.call(service, actor, start.Challenge.RequestID, fmt.Errorf("unsafe outer: %w", errors.New(canary)))
+			if result.Challenge == nil {
+				t.Fatalf("result = %+v, want preserved challenge", result)
+			}
+			if operationErr != ErrProviderTransient {
+				t.Fatalf("operation error = %v (%T), want bare ErrProviderTransient", operationErr, operationErr)
+			}
+			if strings.Contains(fmt.Sprintf("%s %v %+v", operationErr, operationErr, operationErr), canary) {
+				t.Fatal("unknown provider failure disclosed a provider canary")
+			}
+		})
 	}
 }
 

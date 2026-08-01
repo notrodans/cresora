@@ -1,8 +1,11 @@
 package operatoraccounts
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"html/template"
+	slogger "log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +22,7 @@ import (
 	authmock "github.com/notrodans/cresora/internal/application/operatoraccountauth/mock"
 	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
+	requestlogger "github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 )
 
 type testActorProvider struct {
@@ -112,6 +116,64 @@ func operatorPostAtOrigin(t *testing.T, handler http.Handler, jar *cookieJar, pa
 	t.Helper()
 	values.Set("csrf_token", jar.csrfNamed(csrfCookieName))
 	return operatorRequestAtOrigin(t, handler, jar, http.MethodPost, path, values, origin)
+}
+
+func operatorPostAtOriginWithLogger(t *testing.T, handler http.Handler, jar *cookieJar, path string, values url.Values, origin, csrfCookieName string, logger *slogger.Logger) *httptest.ResponseRecorder {
+	t.Helper()
+	if values == nil {
+		values = url.Values{}
+	}
+	values.Set("csrf_token", jar.csrfNamed(csrfCookieName))
+	return operatorRequestAtOriginWithLogger(t, handler, jar, http.MethodPost, path, values, origin, logger)
+}
+
+func operatorRequestAtOriginWithLogger(t *testing.T, handler http.Handler, jar *cookieJar, method, path string, values url.Values, origin string, logger *slogger.Logger) *httptest.ResponseRecorder {
+	t.Helper()
+	var body *strings.Reader
+	if values == nil {
+		body = strings.NewReader("")
+	} else {
+		body = strings.NewReader(values.Encode())
+	}
+	request := httptest.NewRequest(method, origin+path, body)
+	if values != nil {
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if method == http.MethodPost {
+		request.Header.Set("Origin", origin)
+	}
+	if logger != nil {
+		request = request.WithContext(context.WithValue(request.Context(), requestlogger.LoggerKey{}, logger))
+	}
+	jar.request(request)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	jar.add(response.Result())
+	return response
+}
+
+func operatorNativePostAtOrigin(t *testing.T, handler http.Handler, jar *cookieJar, path string, values url.Values, origin, csrfCookieName string, includeCSRF bool, modify func(*http.Request)) *httptest.ResponseRecorder {
+	t.Helper()
+	if values == nil {
+		values = url.Values{}
+	}
+	if includeCSRF {
+		values.Set("csrf_token", jar.csrfNamed(csrfCookieName))
+	}
+	request := httptest.NewRequest(http.MethodPost, origin+path, strings.NewReader(values.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "null")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "navigate")
+	request.Header.Set("Sec-Fetch-Dest", "document")
+	if modify != nil {
+		modify(request)
+	}
+	jar.request(request)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	jar.add(response.Result())
+	return response
 }
 
 func operatorPage(t *testing.T, handler http.Handler, jar *cookieJar) string {
@@ -871,33 +933,95 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
 	}
 }
 
-type canonicalStartProbe struct{}
+type canonicalStartProbe struct {
+	calls *int32
+}
 
-func (canonicalStartProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+func (probe canonicalStartProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+	if probe.calls != nil {
+		atomic.AddInt32(probe.calls, 1)
+	}
 	return common.Result{Account: &common.Account{Status: "active"}}, nil
 }
 
-type canonicalChallengeStartProbe struct{}
+type canonicalStartResultProbe struct {
+	result  common.Result
+	failure error
+}
 
-func (canonicalChallengeStartProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+func (probe canonicalStartResultProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+	return probe.result, probe.failure
+}
+
+type canonicalChallengeStartProbe struct {
+	calls *int32
+}
+
+func (probe canonicalChallengeStartProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+	if probe.calls != nil {
+		atomic.AddInt32(probe.calls, 1)
+	}
 	return common.Result{Challenge: &common.Challenge{RequestID: uuid.New(), Phone: "+15551234567", Stage: common.StageCode, ExpiresAt: time.Now().Add(time.Minute)}}, nil
 }
 
-type canonicalCodeProbe struct{}
+type canonicalCodeProbe struct {
+	calls *int32
+}
 
-func (canonicalCodeProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+func (probe canonicalCodeProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+	if probe.calls != nil {
+		atomic.AddInt32(probe.calls, 1)
+	}
 	return common.Result{Account: &common.Account{Status: "active"}}, nil
 }
 
-type canonicalPasswordProbe struct{}
+type canonicalCodeResultProbe struct {
+	result  common.Result
+	failure error
+}
 
-func (canonicalPasswordProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+func (probe canonicalCodeResultProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+	return probe.result, probe.failure
+}
+
+type canonicalPasswordProbe struct {
+	calls *int32
+}
+
+func (probe canonicalPasswordProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+	if probe.calls != nil {
+		atomic.AddInt32(probe.calls, 1)
+	}
 	return common.Result{Account: &common.Account{Status: "active"}}, nil
 }
 
-type canonicalCancelProbe struct{}
+type canonicalPasswordResultProbe struct {
+	result  common.Result
+	failure error
+}
 
-func (canonicalCancelProbe) Execute(context.Context, application.Actor, uuid.UUID) error { return nil }
+func (probe canonicalPasswordResultProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+	return probe.result, probe.failure
+}
+
+type canonicalCancelProbe struct {
+	calls *int32
+}
+
+func (probe canonicalCancelProbe) Execute(context.Context, application.Actor, uuid.UUID) error {
+	if probe.calls != nil {
+		atomic.AddInt32(probe.calls, 1)
+	}
+	return nil
+}
+
+type canonicalCancelFailureProbe struct {
+	failure error
+}
+
+func (probe canonicalCancelFailureProbe) Execute(context.Context, application.Actor, uuid.UUID) error {
+	return probe.failure
+}
 
 type canonicalStatusProbe struct{}
 
@@ -1001,5 +1125,524 @@ func TestCanonicalPhoneRouteDoesNotExposeQR(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("QR endpoint is exposed: status=%d", response.Code)
+	}
+}
+
+func TestCanonicalLocalNullOriginNativeFormAllowsEveryPhoneAction(t *testing.T) {
+	var startCalls, codeCalls, passwordCalls, cancelCalls int32
+	router := NewWithPhoneAuth(
+		canonicalStartProbe{calls: &startCalls},
+		canonicalCodeProbe{calls: &codeCalls},
+		canonicalPasswordProbe{calls: &passwordCalls},
+		canonicalCancelProbe{calls: &cancelCalls},
+		canonicalStatusProbe{},
+		newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+		localOperatorOrigin,
+		RouteOptions{
+			Mode:        RouteLive,
+			Environment: EnvironmentDevelopment,
+			Cookie:      LocalInsecureCookieConfig(),
+		},
+	)
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, router, jar, localOperatorOrigin)
+
+	requestID := uuid.New().String()
+	actions := []struct {
+		name  string
+		path  string
+		form  url.Values
+		calls *int32
+	}{
+		{
+			name:  "phone",
+			path:  "/operator-accounts/authenticate/phone",
+			form:  url.Values{"phone": {"+15551234567"}},
+			calls: &startCalls,
+		},
+		{
+			name:  "code",
+			path:  "/operator-accounts/authenticate/phone/code",
+			form:  url.Values{"challenge_request_id": {requestID}, "code": {"12345"}},
+			calls: &codeCalls,
+		},
+		{
+			name:  "password",
+			path:  "/operator-accounts/authenticate/phone/password",
+			form:  url.Values{"challenge_request_id": {requestID}, "password": {"secret"}},
+			calls: &passwordCalls,
+		},
+		{
+			name:  "cancel",
+			path:  "/operator-accounts/authenticate/phone/cancel",
+			form:  url.Values{"challenge_request_id": {requestID}},
+			calls: &cancelCalls,
+		},
+	}
+	for _, action := range actions {
+		t.Run(action.name, func(t *testing.T) {
+			response := operatorNativePostAtOrigin(t, router, jar, action.path, action.form, localOperatorOrigin, localCSRFCookie, true, nil)
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("native %s POST: expected redirect, got %d", action.name, response.Code)
+			}
+			if calls := atomic.LoadInt32(action.calls); calls != 1 {
+				t.Fatalf("native %s command calls: got %d, want 1", action.name, calls)
+			}
+		})
+	}
+}
+
+func TestCanonicalLocalNormalSameOriginDoesNotRequireFetchMetadata(t *testing.T) {
+	var calls int32
+	router := NewWithPhoneAuth(
+		canonicalStartProbe{calls: &calls},
+		canonicalCodeProbe{},
+		canonicalPasswordProbe{},
+		canonicalCancelProbe{},
+		canonicalStatusProbe{},
+		newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+		localOperatorOrigin,
+		RouteOptions{Mode: RouteLive, Environment: EnvironmentDevelopment, Cookie: LocalInsecureCookieConfig()},
+	)
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, router, jar, localOperatorOrigin)
+	response := operatorPostAtOrigin(t, router, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {"+15551234567"}}, localOperatorOrigin, localCSRFCookie)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("same-origin phone POST: expected redirect, got %d", response.Code)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("same-origin phone command calls: got %d, want 1", got)
+	}
+}
+
+func TestCanonicalLocalNullOriginNativeFormRejectsInvalidProvenance(t *testing.T) {
+	var calls int32
+	router := NewWithPhoneAuth(
+		canonicalStartProbe{calls: &calls},
+		canonicalCodeProbe{},
+		canonicalPasswordProbe{},
+		canonicalCancelProbe{},
+		canonicalStatusProbe{},
+		newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+		localOperatorOrigin,
+		RouteOptions{Mode: RouteLive, Environment: EnvironmentDevelopment, Cookie: LocalInsecureCookieConfig()},
+	)
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, router, jar, localOperatorOrigin)
+
+	tests := []struct {
+		name          string
+		origin        string
+		path          string
+		wantStatus    int
+		modifyRequest func(*http.Request)
+	}{
+		{
+			name:       "missing origin",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Del("Origin")
+			},
+		},
+		{
+			name:       "wrong origin",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Set("Origin", "http://example.test")
+			},
+		},
+		{
+			name:       "duplicate origin",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Add("Origin", "null")
+			},
+		},
+		{
+			name:       "missing fetch site",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Del("Sec-Fetch-Site")
+			},
+		},
+		{
+			name:       "duplicate fetch mode",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Add("Sec-Fetch-Mode", "navigate")
+			},
+		},
+		{
+			name:       "wrong fetch destination",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Set("Sec-Fetch-Dest", "iframe")
+			},
+		},
+		{
+			name:       "referer present",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Set("Referer", localOperatorOrigin+"/operator-accounts/authenticate")
+			},
+		},
+		{
+			name:       "empty referer present",
+			wantStatus: http.StatusForbidden,
+			modifyRequest: func(request *http.Request) {
+				request.Header.Set("Referer", "")
+			},
+		},
+		{
+			name:       "host mismatch",
+			origin:     "http://localhost:8080",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "path mismatch",
+			path:       "/operator-accounts/authenticate/phone/extra",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "query mismatch",
+			path:       "/operator-accounts/authenticate/phone?source=native",
+			wantStatus: http.StatusForbidden,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			origin := test.origin
+			if origin == "" {
+				origin = localOperatorOrigin
+			}
+			path := test.path
+			if path == "" {
+				path = "/operator-accounts/authenticate/phone"
+			}
+			response := operatorNativePostAtOrigin(t, router, jar, path, url.Values{"phone": {"+15551234567"}}, origin, localCSRFCookie, true, test.modifyRequest)
+			if response.Code != test.wantStatus {
+				t.Fatalf("invalid native provenance: got %d, want %d", response.Code, test.wantStatus)
+			}
+			if got := atomic.LoadInt32(&calls); got != 0 {
+				t.Fatalf("invalid native provenance called phone command %d times", got)
+			}
+		})
+	}
+}
+
+func TestCanonicalLocalNullOriginNativeFormStillRequiresCSRF(t *testing.T) {
+	var calls int32
+	router := NewWithPhoneAuth(
+		canonicalStartProbe{calls: &calls},
+		canonicalCodeProbe{},
+		canonicalPasswordProbe{},
+		canonicalCancelProbe{},
+		canonicalStatusProbe{},
+		newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+		localOperatorOrigin,
+		RouteOptions{Mode: RouteLive, Environment: EnvironmentDevelopment, Cookie: LocalInsecureCookieConfig()},
+	)
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, router, jar, localOperatorOrigin)
+
+	for _, test := range []struct {
+		name string
+		form url.Values
+	}{
+		{name: "missing token", form: url.Values{"phone": {"+15551234567"}}},
+		{name: "wrong token", form: url.Values{"phone": {"+15551234567"}, "csrf_token": {"wrong"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := operatorNativePostAtOrigin(t, router, jar, "/operator-accounts/authenticate/phone", test.form, localOperatorOrigin, localCSRFCookie, false, nil)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("invalid CSRF: expected 403, got %d", response.Code)
+			}
+			if got := atomic.LoadInt32(&calls); got != 0 {
+				t.Fatalf("invalid CSRF called phone command %d times", got)
+			}
+		})
+	}
+}
+
+func TestCanonicalLocalNullOriginNativeFormIsCompositionScoped(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        RouteMode
+		environment DeploymentEnvironment
+		origin      string
+		cookie      CookieConfig
+		allowMock   bool
+		wantStatus  int
+	}{
+		{
+			name:        "testing",
+			mode:        RouteLive,
+			environment: EnvironmentTesting,
+			origin:      localOperatorOrigin,
+			cookie:      LocalInsecureCookieConfig(),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "development test mock",
+			mode:        RouteDevelopmentTestMock,
+			environment: EnvironmentDevelopment,
+			origin:      localOperatorOrigin,
+			cookie:      LocalInsecureCookieConfig(),
+			allowMock:   true,
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "secure",
+			mode:        RouteLive,
+			environment: EnvironmentDevelopment,
+			origin:      "https://example.test",
+			cookie:      SecureCookieConfig(),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "staging",
+			mode:        RouteLive,
+			environment: EnvironmentStaging,
+			origin:      "https://example.test",
+			cookie:      SecureCookieConfig(),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "production",
+			mode:        RouteLive,
+			environment: EnvironmentProduction,
+			origin:      "https://example.test",
+			cookie:      SecureCookieConfig(),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "nonlocal",
+			mode:        RouteLive,
+			environment: EnvironmentDevelopment,
+			origin:      "http://dev.example.test",
+			cookie:      SecureCookieConfig(),
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "disabled",
+			mode:        RouteDisabled,
+			environment: EnvironmentDevelopment,
+			origin:      localOperatorOrigin,
+			cookie:      LocalInsecureCookieConfig(),
+			wantStatus:  http.StatusServiceUnavailable,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var start commands.Start
+			if test.mode != RouteDisabled {
+				start = canonicalStartProbe{}
+			}
+			router := NewWithPhoneAuth(
+				start,
+				canonicalCodeProbe{},
+				canonicalPasswordProbe{},
+				canonicalCancelProbe{},
+				canonicalStatusProbe{},
+				newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+				test.origin,
+				RouteOptions{
+					Mode:                     test.mode,
+					Environment:              test.environment,
+					Cookie:                   test.cookie,
+					AllowDevelopmentTestMock: test.allowMock,
+				},
+			)
+			jar := newCookieJar()
+			if test.mode == RouteDisabled {
+				page := operatorRequestAtOrigin(t, router, jar, http.MethodGet, "/operator-accounts/authenticate", nil, test.origin)
+				if page.Code != http.StatusServiceUnavailable {
+					t.Fatalf("disabled authenticate GET: expected 503, got %d", page.Code)
+				}
+			} else {
+				operatorPageAtOrigin(t, router, jar, test.origin)
+			}
+			response := operatorNativePostAtOrigin(t, router, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {"+15551234567"}}, test.origin, test.cookie.CSRFCookieName, test.mode != RouteDisabled, nil)
+			if response.Code != test.wantStatus {
+				t.Fatalf("composition %s: got %d, want %d", test.name, response.Code, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestLocalNullOriginNativeFormIsNotEnabledByLegacyComposition(t *testing.T) {
+	mock := authmock.New()
+	router := NewWithOptions(
+		mock.StartPhone,
+		mock.VerifyPhone,
+		mock.StartQR,
+		mock.RefreshQR,
+		mock.Status,
+		newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+		localOperatorOrigin,
+		RouteOptions{
+			Mode:        RouteLive,
+			Environment: EnvironmentDevelopment,
+			Cookie:      LocalInsecureCookieConfig(),
+		},
+	)
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, router, jar, localOperatorOrigin)
+	response := operatorNativePostAtOrigin(t, router, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {"+15551234567"}}, localOperatorOrigin, localCSRFCookie, true, nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("legacy native phone POST: expected 403, got %d", response.Code)
+	}
+}
+
+func TestCanonicalAuthFailuresLogOnlySafeProviderDiagnostics(t *testing.T) {
+	const correlationID = "request-correlation-canary"
+
+	tests := []struct {
+		name         string
+		path         string
+		values       url.Values
+		wantLocation string
+		providerKind common.ProviderFailureKind
+		buildHandler func(error) http.Handler
+		canaryValues []string
+	}{
+		{
+			name:         "phone",
+			path:         "/operator-accounts/authenticate/phone",
+			values:       url.Values{"phone": {"phone-input-canary"}},
+			wantLocation: "/operator-accounts/authenticate?error=send-code",
+			providerKind: common.ProviderFailurePhoneRejected,
+			buildHandler: func(failure error) http.Handler {
+				return NewWithPhoneAuth(canonicalStartResultProbe{failure: failure}, canonicalCodeProbe{}, canonicalPasswordProbe{}, canonicalCancelProbe{}, canonicalStatusProbe{}, newTestActorProvider(application.Actor{OperatorID: uuid.New()}), localOperatorOrigin, RouteOptions{
+					Mode: RouteDevelopmentTestMock, Environment: EnvironmentTesting, Cookie: LocalInsecureCookieConfig(), AllowDevelopmentTestMock: true,
+				})
+			},
+			canaryValues: []string{"phone-input-canary"},
+		},
+		{
+			name:         "code",
+			path:         "/operator-accounts/authenticate/phone/code",
+			values:       url.Values{"challenge_request_id": {uuid.NewString()}, "code": {"otp-input-canary"}},
+			wantLocation: "/operator-accounts/authenticate?error=code",
+			providerKind: common.ProviderFailureRemoteRejected,
+			buildHandler: func(failure error) http.Handler {
+				return NewWithPhoneAuth(canonicalStartProbe{}, canonicalCodeResultProbe{failure: failure}, canonicalPasswordProbe{}, canonicalCancelProbe{}, canonicalStatusProbe{}, newTestActorProvider(application.Actor{OperatorID: uuid.New()}), localOperatorOrigin, RouteOptions{
+					Mode: RouteDevelopmentTestMock, Environment: EnvironmentTesting, Cookie: LocalInsecureCookieConfig(), AllowDevelopmentTestMock: true,
+				})
+			},
+			canaryValues: []string{"otp-input-canary"},
+		},
+		{
+			name:         "password",
+			path:         "/operator-accounts/authenticate/phone/password",
+			values:       url.Values{"challenge_request_id": {uuid.NewString()}, "password": {"password-input-canary"}},
+			wantLocation: "/operator-accounts/authenticate?error=password",
+			providerKind: common.ProviderFailureProtocol,
+			buildHandler: func(failure error) http.Handler {
+				return NewWithPhoneAuth(canonicalStartProbe{}, canonicalCodeProbe{}, canonicalPasswordResultProbe{failure: failure}, canonicalCancelProbe{}, canonicalStatusProbe{}, newTestActorProvider(application.Actor{OperatorID: uuid.New()}), localOperatorOrigin, RouteOptions{
+					Mode: RouteDevelopmentTestMock, Environment: EnvironmentTesting, Cookie: LocalInsecureCookieConfig(), AllowDevelopmentTestMock: true,
+				})
+			},
+			canaryValues: []string{"password-input-canary"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			providerFailure, err := common.NewProviderFailureError(test.providerKind)
+			if err != nil {
+				t.Fatalf("create provider failure: %v", err)
+			}
+			const rawProviderError = "raw-provider-error-canary"
+			handler := test.buildHandler(fmt.Errorf("%s: %w", rawProviderError, providerFailure))
+			jar := newCookieJar()
+			operatorPageAtOrigin(t, handler, jar, localOperatorOrigin)
+
+			var logs bytes.Buffer
+			logger := slogger.New(slogger.NewTextHandler(&logs, nil)).With(slogger.String("request_id", correlationID))
+			response := operatorPostAtOriginWithLogger(t, handler, jar, test.path, test.values, localOperatorOrigin, localCSRFCookie, logger)
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("%s failure: expected redirect, got %d", test.name, response.Code)
+			}
+			if location := response.Header().Get("Location"); location != test.wantLocation {
+				t.Fatalf("%s failure redirected to %q, want %q", test.name, location, test.wantLocation)
+			}
+
+			output := logs.String()
+			if records := strings.Split(strings.TrimSpace(output), "\n"); len(records) != 1 {
+				t.Fatalf("%s failure emitted %d log records, want exactly one: %q", test.name, len(records), output)
+			}
+			if !strings.Contains(output, "operation="+testOperationForCanonicalFailureTest(test.name)) {
+				t.Fatalf("%s failure log omitted operation: %q", test.name, output)
+			}
+			if !strings.Contains(output, "failure_class="+string(test.providerKind)) {
+				t.Fatalf("%s failure log omitted safe provider kind: %q", test.name, output)
+			}
+			if !strings.Contains(output, "request_id="+correlationID) {
+				t.Fatalf("%s failure log omitted request correlation: %q", test.name, output)
+			}
+			for _, canary := range append(test.canaryValues, rawProviderError) {
+				if strings.Contains(output, canary) {
+					t.Fatalf("%s failure log leaked canary %q: %q", test.name, canary, output)
+				}
+			}
+		})
+	}
+}
+
+func testOperationForCanonicalFailureTest(name string) string {
+	switch name {
+	case "phone":
+		return canonicalOperationSendCode
+	case "code":
+		return canonicalOperationSignIn
+	case "password":
+		return canonicalOperationPassword
+	default:
+		return ""
+	}
+}
+
+func TestCanonicalInvalidResultIsLoggedWithSafeClass(t *testing.T) {
+	handler := NewWithPhoneAuth(canonicalStartResultProbe{}, canonicalCodeProbe{}, canonicalPasswordProbe{}, canonicalCancelProbe{}, canonicalStatusProbe{}, newTestActorProvider(application.Actor{OperatorID: uuid.New()}), localOperatorOrigin, RouteOptions{
+		Mode: RouteDevelopmentTestMock, Environment: EnvironmentTesting, Cookie: LocalInsecureCookieConfig(), AllowDevelopmentTestMock: true,
+	})
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, handler, jar, localOperatorOrigin)
+
+	var logs bytes.Buffer
+	logger := slogger.New(slogger.NewTextHandler(&logs, nil)).With(slogger.String("request_id", "invalid-result-correlation"))
+	response := operatorPostAtOriginWithLogger(t, handler, jar, "/operator-accounts/authenticate/phone", url.Values{"phone": {"invalid-result-phone-canary"}}, localOperatorOrigin, localCSRFCookie, logger)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/operator-accounts/authenticate?error=send-code" {
+		t.Fatalf("invalid result response: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	}
+	output := logs.String()
+	if records := strings.Split(strings.TrimSpace(output), "\n"); len(records) != 1 {
+		t.Fatalf("invalid result emitted %d log records, want exactly one: %q", len(records), output)
+	}
+	if !strings.Contains(output, "operation="+canonicalOperationSendCode) || !strings.Contains(output, "failure_class="+canonicalFailureInvalidResult) {
+		t.Fatalf("invalid result log has unsafe or incorrect fields: %q", output)
+	}
+	if strings.Contains(output, "invalid-result-phone-canary") {
+		t.Fatalf("invalid result log leaked submitted phone: %q", output)
+	}
+}
+
+func TestCanonicalCancelledRequestIsNotLoggedAtErrorLevel(t *testing.T) {
+	handler := NewWithPhoneAuth(canonicalStartProbe{}, canonicalCodeProbe{}, canonicalPasswordProbe{}, canonicalCancelFailureProbe{failure: context.Canceled}, canonicalStatusProbe{}, newTestActorProvider(application.Actor{OperatorID: uuid.New()}), localOperatorOrigin, RouteOptions{
+		Mode: RouteDevelopmentTestMock, Environment: EnvironmentTesting, Cookie: LocalInsecureCookieConfig(), AllowDevelopmentTestMock: true,
+	})
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, handler, jar, localOperatorOrigin)
+
+	var logs bytes.Buffer
+	logger := slogger.New(slogger.NewTextHandler(&logs, nil))
+	response := operatorPostAtOriginWithLogger(t, handler, jar, "/operator-accounts/authenticate/phone/cancel", url.Values{"challenge_request_id": {uuid.NewString()}}, localOperatorOrigin, localCSRFCookie, logger)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/operator-accounts/authenticate?error=cancel" {
+		t.Fatalf("cancelled request response: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	}
+	output := logs.String()
+	if !strings.Contains(output, "level=INFO") || strings.Contains(output, "level=ERROR") {
+		t.Fatalf("cancelled request was logged at an error level: %q", output)
 	}
 }

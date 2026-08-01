@@ -54,14 +54,17 @@ func newAuthenticationTestHandler(repository *testSessionRepository) http.Handle
 }
 
 func newAuthenticationTestHandlerWithLimiter(repository *testSessionRepository, limiter *LoginRateLimiter) http.Handler {
+	return newAuthenticationTestHandlerWithConfig(repository, "https://example.test", CookieConfig{Name: "__Host-cresora_session", Secure: true}, limiter)
+}
+
+func newAuthenticationTestHandlerWithConfig(repository *testSessionRepository, publicOrigin string, cookie CookieConfig, limiter *LoginRateLimiter) http.Handler {
 	service := operatorsessions.NewServiceWithVerifier(
 		testCredentialRepository{credential: operatorsessions.Credential{OperatorID: uuid.New(), Username: "admin", PasswordHash: "hash", Enabled: true}},
 		repository,
 		operatorsessions.VerifyFunc(func(string, string) (bool, error) { return true, nil }),
 	)
-	cookie := CookieConfig{Name: "__Host-cresora_session", Secure: true}
 	provider := NewSessionProvider(service, cookie)
-	return NewWithRateLimiter(service, provider, "https://example.test", cookie, limiter)
+	return NewWithRateLimiter(service, provider, publicOrigin, cookie, limiter)
 }
 
 func TestLoginRotatesSessionAndSetsHostCookiePolicy(t *testing.T) {
@@ -134,6 +137,149 @@ func TestLoginRejectsForeignOriginAndOpenRedirect(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login?notice=refresh" || repository.created != nil {
 		t.Fatalf("foreign origin: status=%d location=%q created=%v", response.Code, response.Header().Get("Location"), repository.created)
+	}
+}
+
+func TestLoginAllowsChromeDevToolsNullOriginForLocalDevelopment(t *testing.T) {
+	repository := &testSessionRepository{}
+	cookie := CookieConfig{Name: "cresora_session", AllowInsecureLocal: true}
+	handler := newAuthenticationTestHandlerWithConfig(repository, "http://127.0.0.1:8089", cookie, NewLoginRateLimiter(DefaultLoginRateLimitConfig()))
+	csrf := randomValue(32)
+	form := url.Values{"username": {"admin"}, "password": {"correct horse battery staple"}, csrfFormField: {csrf}, "next": {"/console"}}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8089/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Origin", "null")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "navigate")
+	request.Header.Set("Sec-Fetch-Dest", "document")
+	request.AddCookie(&http.Cookie{Name: preAuthCSRFCookie, Value: csrf})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/console" || repository.creates != 1 {
+		t.Fatalf("local null-origin login: status=%d location=%q creates=%d", response.Code, response.Header().Get("Location"), repository.creates)
+	}
+}
+
+func TestLoginRejectsNullOriginOutsideLocalDevException(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		publicOrigin string
+		cookie       CookieConfig
+		mutate       func(*http.Request)
+	}{
+		{
+			name:         "secure config",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "__Host-cresora_session", Secure: true},
+		},
+		{
+			name:         "remote public origin",
+			publicOrigin: "http://example.test:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+		},
+		{
+			name:         "host mismatch",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Host = "127.0.0.1:8090"
+			},
+		},
+		{
+			name:         "cross-site fetch",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Header.Set("Sec-Fetch-Site", "cross-site")
+			},
+		},
+		{
+			name:         "missing fetch metadata",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Header.Del("Sec-Fetch-Site")
+				request.Header.Del("Sec-Fetch-Mode")
+				request.Header.Del("Sec-Fetch-Dest")
+			},
+		},
+		{
+			name:         "wrong fetch mode",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Header.Set("Sec-Fetch-Mode", "cors")
+			},
+		},
+		{
+			name:         "wrong fetch destination",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Header.Set("Sec-Fetch-Dest", "iframe")
+			},
+		},
+		{
+			name:         "nonempty referer",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Header.Set("Referer", "http://127.0.0.1:8089/login")
+			},
+		},
+		{
+			name:         "foreign referer",
+			publicOrigin: "http://127.0.0.1:8089",
+			cookie:       CookieConfig{Name: "cresora_session", AllowInsecureLocal: true},
+			mutate: func(request *http.Request) {
+				request.Header.Set("Referer", "https://foreign.test/login")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &testSessionRepository{}
+			handler := newAuthenticationTestHandlerWithConfig(repository, test.publicOrigin, test.cookie, NewLoginRateLimiter(DefaultLoginRateLimitConfig()))
+			csrf := randomValue(32)
+			form := url.Values{"username": {"admin"}, "password": {"correct horse battery staple"}, csrfFormField: {csrf}}
+			request := httptest.NewRequest(http.MethodPost, test.publicOrigin+"/login", strings.NewReader(form.Encode()))
+			request.Header.Set("Origin", "null")
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Sec-Fetch-Site", "same-origin")
+			request.Header.Set("Sec-Fetch-Mode", "navigate")
+			request.Header.Set("Sec-Fetch-Dest", "document")
+			request.AddCookie(&http.Cookie{Name: preAuthCSRFCookie, Value: csrf})
+			if test.mutate != nil {
+				test.mutate(request)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login?notice=refresh" || repository.creates != 0 {
+				t.Fatalf("rejected local null-origin login: status=%d location=%q creates=%d", response.Code, response.Header().Get("Location"), repository.creates)
+			}
+		})
+	}
+}
+
+func TestLoginNullOriginStillRequiresCSRF(t *testing.T) {
+	repository := &testSessionRepository{}
+	cookie := CookieConfig{Name: "cresora_session", AllowInsecureLocal: true}
+	handler := newAuthenticationTestHandlerWithConfig(repository, "http://127.0.0.1:8089", cookie, NewLoginRateLimiter(DefaultLoginRateLimitConfig()))
+	csrf := randomValue(32)
+	form := url.Values{"username": {"admin"}, "password": {"correct horse battery staple"}, csrfFormField: {csrf + "wrong"}}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8089/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Origin", "null")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "navigate")
+	request.Header.Set("Sec-Fetch-Dest", "document")
+	request.AddCookie(&http.Cookie{Name: preAuthCSRFCookie, Value: csrf})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login?notice=refresh" || repository.creates != 0 {
+		t.Fatalf("invalid local null-origin CSRF: status=%d location=%q creates=%d", response.Code, response.Header().Get("Location"), repository.creates)
 	}
 }
 
@@ -328,6 +474,30 @@ func TestLogoutInvalidCSRFOrOriginRecoversWithoutRevoking(t *testing.T) {
 	unauthenticated.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("logout without a valid session: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestLogoutRejectsNullOriginInLocalInsecureMode(t *testing.T) {
+	repository := &testSessionRepository{stored: operatorsessions.StoredSession{OperatorID: uuid.New(), ID: uuid.New(), CreatedAt: time.Now(), LastSeenAt: time.Now(), IdleExpiresAt: time.Now().Add(time.Hour), AbsoluteExpiresAt: time.Now().Add(time.Hour)}}
+	cookie := CookieConfig{Name: "cresora_session", AllowInsecureLocal: true}
+	handler := newAuthenticationTestHandlerWithConfig(repository, "http://127.0.0.1:8089", cookie, NewLoginRateLimiter(DefaultLoginRateLimitConfig()))
+	token := strings.Repeat("a", 43)
+	csrf, ok := operatorsessions.SessionCSRFToken(token)
+	if !ok {
+		t.Fatal("derive CSRF token")
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8089/logout", strings.NewReader(url.Values{csrfFormField: {csrf}}.Encode()))
+	request.Header.Set("Origin", "null")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "navigate")
+	request.Header.Set("Sec-Fetch-Dest", "document")
+	request.AddCookie(&http.Cookie{Name: cookie.Name, Value: token})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/?notice=retry" || repository.revoked != nil {
+		t.Fatalf("null-origin logout: status=%d location=%q revoked=%v", response.Code, response.Header().Get("Location"), repository.revoked)
 	}
 }
 
