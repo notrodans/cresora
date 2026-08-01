@@ -158,6 +158,33 @@ func (joined *joinedCancellationLifecycle) Ready() <-chan struct{} {
 	return make(chan struct{})
 }
 
+type dispatchLifecycle struct {
+	ready           chan struct{}
+	callbackStarted chan struct{}
+}
+
+func newDispatchLifecycle() *dispatchLifecycle {
+	ready := make(chan struct{})
+	close(ready)
+	return &dispatchLifecycle{
+		ready:           ready,
+		callbackStarted: make(chan struct{}),
+	}
+}
+
+func (dispatch *dispatchLifecycle) Run(ctx context.Context, callback func(context.Context) error) error {
+	close(dispatch.callbackStarted)
+	return callback(ctx)
+}
+
+func (dispatch *dispatchLifecycle) Ready() <-chan struct{} {
+	return dispatch.ready
+}
+
+func (dispatch *dispatchLifecycle) rawClient() *gotdtelegram.Client {
+	return nil
+}
+
 func awaitChannel(t *testing.T, channel <-chan struct{}, name string) {
 	t.Helper()
 	select {
@@ -462,6 +489,40 @@ func TestOwnerCallbackIsInertUntilCancellation(t *testing.T) {
 	}
 	if failure := fake.callbackErr(); failure != nil {
 		t.Fatalf("owner callback error = %v, want nil", failure)
+	}
+}
+
+func TestOwnerRunDoesNotReturnBeforeDispatchedCallback(t *testing.T) {
+	lifecycle := newDispatchLifecycle()
+	owner := newOwner(lifecycle)
+	runResult := make(chan error, 1)
+	go func() { runResult <- owner.Run(context.Background()) }()
+	awaitChannel(t, lifecycle.callbackStarted, "owner dispatcher callback")
+
+	callbackEntered := make(chan struct{})
+	release := make(chan struct{})
+	operationResult := make(chan error, 1)
+	go func() {
+		operationResult <- owner.Execute(context.Background(), func(context.Context, *gotdtelegram.Client) error {
+			close(callbackEntered)
+			<-release
+			return nil
+		})
+	}()
+	awaitChannel(t, callbackEntered, "dispatched client callback")
+	select {
+	case <-runResult:
+		t.Fatal("Owner.Run returned while callback was still executing")
+	default:
+	}
+
+	close(release)
+	if failure := awaitError(t, operationResult, "dispatched operation"); failure != nil {
+		t.Fatalf("Owner.Execute() error = %v, want nil", failure)
+	}
+	owner.Stop()
+	if failure := awaitError(t, runResult, "owner teardown"); failure != nil {
+		t.Fatalf("Owner.Run() error = %v, want nil", failure)
 	}
 }
 

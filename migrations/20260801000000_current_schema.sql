@@ -112,6 +112,10 @@ CREATE UNIQUE INDEX uq_operator_accounts_telegram_user_id
     ON operator_accounts (telegram_user_id)
     WHERE telegram_user_id IS NOT NULL;
 
+CREATE UNIQUE INDEX uq_operator_accounts_operator_phone
+    ON operator_accounts (operator_id, phone)
+    WHERE phone IS NOT NULL;
+
 CREATE TABLE operator_accounts_proxies (
     account_id uuid NOT NULL,
     proxy_id uuid NOT NULL,

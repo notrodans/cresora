@@ -54,16 +54,6 @@ func TestCoordinatorHTTPUsesOpaqueRequestIDsAndSafeProjection(t *testing.T) {
 	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/phone/code", mapValues("code", "12345")); response.Code != http.StatusSeeOther {
 		t.Fatalf("phone completion: status=%d location=%q", response.Code, response.Header().Get("Location"))
 	}
-	if response := operatorPost(t, handler, jar, "/operator-accounts/authenticate/qr", mapValues()); response.Code != http.StatusSeeOther {
-		t.Fatalf("QR start: status=%d", response.Code)
-	}
-	page = operatorPage(t, handler, jar)
-	if !strings.Contains(page, `class="qr"`) || !strings.Contains(page, `name="challenge_request_id"`) {
-		t.Fatalf("QR safe projection was not rendered: %s", page)
-	}
-	if strings.Contains(page, "fake-qr-") {
-		t.Fatalf("QR provider handle leaked to browser: %s", page)
-	}
 }
 
 // mapValues keeps this test independent of the url.Values literal's handling

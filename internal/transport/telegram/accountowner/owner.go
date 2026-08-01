@@ -28,8 +28,24 @@ type lifecycle interface {
 	Ready() <-chan struct{}
 }
 
-// Owner owns one factory-created gotd client. It deliberately exposes only
-// lifecycle operations; callers cannot reach gotd's API, auth, or client.
+// ClientCallback is executed while the owner is running. The client is only
+// available to the callback; callers cannot retain an owner-owned client by
+// receiving it as a return value.
+type ClientCallback func(context.Context, *gotdtelegram.Client) error
+
+type clientRequest struct {
+	context  context.Context
+	callback ClientCallback
+	result   chan error
+}
+
+type clientProvider interface {
+	rawClient() *gotdtelegram.Client
+}
+
+// Owner owns one factory-created gotd client. It exposes lifecycle operations
+// and a callback-only operation boundary; callers cannot retain the client or
+// use it outside an admitted callback.
 type Owner struct {
 	client lifecycle
 
@@ -42,6 +58,7 @@ type Owner struct {
 	startedCh  chan struct{}
 	stopping   bool
 	stoppingCh chan struct{}
+	requests   chan clientRequest
 }
 
 // New constructs an owner around exactly one client made by factory. The
@@ -76,13 +93,13 @@ func newOwner(client lifecycle) *Owner {
 		done:       make(chan struct{}),
 		startedCh:  make(chan struct{}),
 		stoppingCh: make(chan struct{}),
+		requests:   make(chan clientRequest, 1),
 	}
 }
 
-// Run starts the owned gotd client once and joins its complete teardown. The
-// callback intentionally does no work: gotd owns readiness and invokes it
-// after session initialization, while the owner only keeps the client alive
-// until gotd asks it to stop.
+// Run starts the owned gotd client once and joins its complete teardown. All
+// client callbacks are dispatched by the callback passed to gotd Run, so Run
+// cannot return while an admitted callback is still executing.
 func (owner *Owner) Run(ctx context.Context) error {
 	runContext, cancel := context.WithCancel(ctx)
 	owner.mu.Lock()
@@ -96,7 +113,7 @@ func (owner *Owner) Run(ctx context.Context) error {
 	close(owner.startedCh)
 	owner.mu.Unlock()
 
-	failure := owner.client.Run(runContext, waitForCallbackContext)
+	failure := owner.client.Run(runContext, owner.dispatch)
 	// Capture this before local cancellation. Once cancel is called, an
 	// internal gotd failure can be indistinguishable from owner teardown.
 	runContextCause := runContext.Err()
@@ -199,6 +216,96 @@ func (owner *Owner) WaitReady(ctx context.Context) error {
 	}
 }
 
+// Wait joins the one-shot gotd run, or returns when ctx is canceled. It is
+// intentionally separate from Stop: callers that own a registry can publish
+// the admission fence before waiting for teardown.
+func (owner *Owner) Wait(ctx context.Context) error {
+	select {
+	case <-owner.done:
+		owner.mu.Lock()
+		failure := owner.result
+		owner.mu.Unlock()
+		return failure
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Execute queues callback for the dispatcher owned by client.Run. The client
+// never escapes this callback through the owner API.
+func (owner *Owner) Execute(ctx context.Context, callback ClientCallback) error {
+	if callback == nil {
+		return errors.New("telegram account owner callback is required")
+	}
+
+	owner.mu.Lock()
+	started := owner.started
+	stopping := owner.stopping
+	completed := owner.completed
+	result := owner.result
+	owner.mu.Unlock()
+	if !started || stopping || completed {
+		if result != nil {
+			return result
+		}
+		return ErrStopped
+	}
+
+	request := clientRequest{
+		context:  ctx,
+		callback: callback,
+		result:   make(chan error, 1),
+	}
+	accepted := false
+	select {
+	case owner.requests <- request:
+		accepted = true
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-owner.stoppingCh:
+		return ErrStopped
+	case <-owner.done:
+		return owner.completionResult()
+	}
+	if !accepted {
+		return ErrStopped
+	}
+	// The request context is also the callback context, so caller cancellation
+	// reaches the callback. Once queued, however, Execute must not return on
+	// that cancellation: the result or owner.done is the proof that the
+	// dispatcher did not invoke, or has finished invoking, the callback.
+	select {
+	case failure := <-request.result:
+		return failure
+	case <-owner.done:
+		return owner.completionResult()
+	}
+}
+
+func (owner *Owner) dispatch(ctx context.Context) error {
+	provider, ok := owner.client.(clientProvider)
+	var client *gotdtelegram.Client
+	if ok {
+		client = provider.rawClient()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case request := <-owner.requests:
+			if failure := ctx.Err(); failure != nil {
+				request.result <- failure
+				continue
+			}
+			if failure := request.context.Err(); failure != nil {
+				request.result <- failure
+				continue
+			}
+			request.result <- request.callback(request.context, client)
+		}
+	}
+}
+
 func (owner *Owner) complete(failure error) {
 	owner.mu.Lock()
 	owner.result = failure
@@ -265,11 +372,6 @@ func isPureContextCancellation(failure, expectedCause error) bool {
 		return isPureContextCancellation(cause, expectedCause)
 	}
 	return errors.Is(failure, expectedCause)
-}
-
-func waitForCallbackContext(ctx context.Context) error {
-	<-ctx.Done()
-	return nil
 }
 
 var (
@@ -391,6 +493,10 @@ func (client *gotdLifecycle) Run(
 
 func (client *gotdLifecycle) Ready() <-chan struct{} {
 	return client.readiness.Ready()
+}
+
+func (client *gotdLifecycle) rawClient() *gotdtelegram.Client {
+	return client.client
 }
 
 func (client *gotdLifecycle) waitReady(

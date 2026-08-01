@@ -7,8 +7,9 @@ import (
 	application "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 )
 
-// Status returns the operator account list and any in-progress authentication
-// challenges.
+// Status returns the actor-scoped account list and any in-progress
+// authentication challenge. The returned projection never contains the
+// Telegram phone-code hash or a provider/runtime value.
 type Status interface {
 	Execute(context.Context, applicationroot.Actor) (application.Status, error)
 }

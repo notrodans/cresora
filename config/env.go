@@ -3,12 +3,15 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
@@ -53,6 +56,9 @@ type Config struct {
 	// DeliveryReconcilerInterval controls the transport-neutral terminal run
 	// reconciliation poll.
 	DeliveryReconcilerInterval   time.Duration        `env:"DELIVERY_RECONCILER_INTERVAL" envDefault:"1m"`
+	TelegramAuthEnabled          bool                 `env:"TELEGRAM_AUTH_ENABLED" envDefault:"false"`
+	TelegramAPIID                int                  `env:"TELEGRAM_API_ID" envDefault:"0"`
+	TelegramAPIHash              SecretString         `env:"TELEGRAM_API_HASH" envDefault:""`
 	TelegramSessionKeyID         string               `env:"TELEGRAM_SESSION_KEY_ID" envDefault:""`
 	TelegramSessionEncryptionKey SessionEncryptionKey `env:"TELEGRAM_SESSION_ENCRYPTION_KEY" envDefault:""`
 }
@@ -90,10 +96,67 @@ const (
 	DefaultDeliveryReaperInterval     = time.Minute
 	DeliveryReconcilerIntervalEnv     = "DELIVERY_RECONCILER_INTERVAL"
 	DefaultDeliveryReconcilerInterval = time.Minute
+	telegramAuthEnabledEnv            = "TELEGRAM_AUTH_ENABLED"
+	telegramAPIIDEnv                  = "TELEGRAM_API_ID"
+	telegramAPIHashEnv                = "TELEGRAM_API_HASH"
 	telegramSessionKeyIDEnv           = "TELEGRAM_SESSION_KEY_ID"
 	telegramSessionEncryptionKeyEnv   = "TELEGRAM_SESSION_ENCRYPTION_KEY"
 	telegramSessionKeyIDMaxLength     = 128
 )
+
+// SecretString stores a deployment secret without making its value available
+// through ordinary formatting or structured logging. Value is intentionally
+// the explicit escape hatch for the component that must hand the secret to an
+// external client.
+type SecretString struct {
+	value string
+}
+
+func (secret *SecretString) UnmarshalText(text []byte) error {
+	*secret = SecretString{}
+	value := string(text)
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("%s must not have leading or trailing whitespace", telegramAPIHashEnv)
+	}
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%s must not contain control characters", telegramAPIHashEnv)
+	}
+	secret.value = value
+	return nil
+}
+
+// Configured reports whether a non-blank secret was supplied.
+func (secret SecretString) Configured() bool {
+	return strings.TrimSpace(secret.value) != ""
+}
+
+// Value returns the secret for the narrow integration point that needs it.
+func (secret SecretString) Value() string {
+	return secret.value
+}
+
+// String prevents accidental logging of the secret.
+func (secret SecretString) String() string {
+	if !secret.Configured() {
+		return "[not configured]"
+	}
+	return "[redacted]"
+}
+
+// GoString prevents %#v diagnostics from exposing the secret.
+func (secret SecretString) GoString() string {
+	return secret.String()
+}
+
+// Format keeps string-specific formatting verbs such as %q and %s redacted.
+func (secret SecretString) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, secret.String())
+}
+
+// LogValue keeps the secret redacted when passed to slog.Any.
+func (secret SecretString) LogValue() slog.Value {
+	return slog.StringValue(secret.String())
+}
 
 // SessionEncryptionKey keeps the key bytes out of ordinary formatted config
 // output. An empty value is deliberately allowed so the existing HTTP-only
@@ -153,6 +216,16 @@ func (key SessionEncryptionKey) GoString() string {
 	return key.String()
 }
 
+// Format keeps string-specific formatting verbs redacted.
+func (key SessionEncryptionKey) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, key.String())
+}
+
+// LogValue keeps the key redacted when passed to slog.Any.
+func (key SessionEncryptionKey) LogValue() slog.Value {
+	return slog.StringValue(key.String())
+}
+
 func MustLoad(root string) *Config {
 	cfg, err := loadFrom(root)
 	if err != nil {
@@ -186,7 +259,7 @@ func loadFrom(root string) (Config, error) {
 	}); err != nil {
 		return Config{}, fmt.Errorf("parse configuration: %w", err)
 	}
-	if err := validateTelegramSessionConfiguration(cfg); err != nil {
+	if err := validateTelegramConfiguration(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := validateDeliveryReaperConfiguration(cfg); err != nil {
@@ -259,6 +332,32 @@ func validateTelegramSessionConfiguration(cfg Config) error {
 	}
 	if keyID != "" && !cfg.TelegramSessionEncryptionKey.Configured() {
 		return fmt.Errorf("%s is required when %s is configured", telegramSessionEncryptionKeyEnv, telegramSessionKeyIDEnv)
+	}
+	return nil
+}
+
+func validateTelegramConfiguration(cfg Config) error {
+	// Keep the existing optional session-pair behavior when auth is disabled.
+	// This lets HTTP-only deployments continue loading without any Telegram
+	// settings while still rejecting a partially supplied pair as before.
+	if err := validateTelegramSessionConfiguration(cfg); err != nil {
+		return err
+	}
+	if !cfg.TelegramAuthEnabled {
+		return nil
+	}
+
+	if cfg.TelegramAPIID <= 0 {
+		return fmt.Errorf("%s must be positive when %s is enabled", telegramAPIIDEnv, telegramAuthEnabledEnv)
+	}
+	if !cfg.TelegramAPIHash.Configured() {
+		return fmt.Errorf("%s is required when %s is enabled", telegramAPIHashEnv, telegramAuthEnabledEnv)
+	}
+	if cfg.TelegramSessionKeyID == "" {
+		return fmt.Errorf("%s is required when %s is enabled", telegramSessionKeyIDEnv, telegramAuthEnabledEnv)
+	}
+	if !cfg.TelegramSessionEncryptionKey.Configured() {
+		return fmt.Errorf("%s is required when %s is enabled", telegramSessionEncryptionKeyEnv, telegramAuthEnabledEnv)
 	}
 	return nil
 }
