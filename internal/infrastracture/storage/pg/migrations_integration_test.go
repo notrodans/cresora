@@ -18,11 +18,14 @@ import (
 	"github.com/notrodans/cresora/config"
 )
 
-const currentBaselineVersion int64 = 20260801000000
+const (
+	currentBaselineVersion  int64 = 20260801000000
+	phoneIndexRepairVersion int64 = 20260801200000
+)
 
-func TestCurrentBaselinePostgres(t *testing.T) {
+func TestCurrentMigrationsPostgres(t *testing.T) {
 	context, databaseURL := newMigrationTestDatabase(t)
-	applyCurrentBaseline(t, context, databaseURL)
+	applyCurrentMigrations(t, context, databaseURL)
 
 	database := openMigrationDatabase(t, context, databaseURL)
 	defer database.Close()
@@ -32,22 +35,22 @@ func TestCurrentBaselinePostgres(t *testing.T) {
 		firstVersion      sql.NullInt64
 	)
 	if failure := database.QueryRowContext(context, `SELECT count(*), max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&firstAppliedCount, &firstVersion); failure != nil {
-		t.Fatalf("read first applied baseline version: %v", failure)
+		t.Fatalf("read first applied migration version: %v", failure)
 	}
-	if firstAppliedCount != 2 || !firstVersion.Valid || firstVersion.Int64 != currentBaselineVersion {
-		t.Fatalf("first applied baseline history = count %d version %v, want count 2 version %d", firstAppliedCount, firstVersion, currentBaselineVersion)
+	if firstAppliedCount != 3 || !firstVersion.Valid || firstVersion.Int64 != phoneIndexRepairVersion {
+		t.Fatalf("first applied migration history = count %d version %v, want count 3 version %d", firstAppliedCount, firstVersion, phoneIndexRepairVersion)
 	}
 
-	applyCurrentBaseline(t, context, databaseURL)
+	applyCurrentMigrations(t, context, databaseURL)
 	var (
 		repeatedAppliedCount int
 		repeatedVersion      sql.NullInt64
 	)
 	if failure := database.QueryRowContext(context, `SELECT count(*), max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&repeatedAppliedCount, &repeatedVersion); failure != nil {
-		t.Fatalf("read repeated baseline history: %v", failure)
+		t.Fatalf("read repeated migration history: %v", failure)
 	}
-	if repeatedAppliedCount != firstAppliedCount || !repeatedVersion.Valid || repeatedVersion.Int64 != currentBaselineVersion {
-		t.Fatalf("repeated baseline history = count %d version %v, want count %d version %d", repeatedAppliedCount, repeatedVersion, firstAppliedCount, currentBaselineVersion)
+	if repeatedAppliedCount != firstAppliedCount || !repeatedVersion.Valid || repeatedVersion.Int64 != phoneIndexRepairVersion {
+		t.Fatalf("repeated migration history = count %d version %v, want count %d version %d", repeatedAppliedCount, repeatedVersion, firstAppliedCount, phoneIndexRepairVersion)
 	}
 
 	assertOperatorAccountCatalog(t, context, database)
@@ -67,9 +70,151 @@ func TestCurrentBaselinePostgres(t *testing.T) {
 	}
 }
 
+func TestOperatorAccountPhoneIndexRepairRollbackPreservesBaselinePostgres(t *testing.T) {
+	context, databaseURL := newMigrationTestDatabase(t)
+	applyCurrentMigrations(t, context, databaseURL)
+
+	database := openMigrationDatabase(t, context, databaseURL)
+	defer database.Close()
+	provider, failure := goose.NewProvider(goose.DialectPostgres, database, os.DirFS(migrationsPathForTest(t)))
+	if failure != nil {
+		t.Fatalf("create migration provider: %v", failure)
+	}
+	defer provider.Close()
+	if _, failure = provider.ApplyVersion(context, phoneIndexRepairVersion, false); failure != nil {
+		t.Fatalf("roll back phone index repair migration: %v", failure)
+	}
+
+	var indexCount int
+	if failure = database.QueryRowContext(context, `
+		SELECT count(*)
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'operator_accounts'
+		  AND indexname = 'uq_operator_accounts_operator_phone'`).Scan(&indexCount); failure != nil {
+		t.Fatalf("inspect phone index after repair rollback: %v", failure)
+	}
+	if indexCount != 1 {
+		t.Fatalf("phone index count after repair rollback = %d, want 1", indexCount)
+	}
+
+	operatorID := uuid.New()
+	if _, failure = database.ExecContext(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "rollback-"+operatorID.String()[:8]); failure != nil {
+		t.Fatalf("insert rollback operator: %v", failure)
+	}
+	var accountID uuid.UUID
+	if failure = database.QueryRowContext(context, `
+		INSERT INTO operator_accounts (
+			operator_id,
+			phone,
+			status,
+			status_version,
+			auth_expires_at
+		)
+		VALUES ($1, $2, 'authenticating', 2, $3)
+		ON CONFLICT (operator_id, phone) WHERE phone IS NOT NULL DO NOTHING
+		RETURNING id`, operatorID, "+12025550303", time.Now().Add(time.Hour)).Scan(&accountID); failure != nil {
+		t.Fatalf("execute operator account phone conflict insert after repair rollback: %v", failure)
+	}
+	if accountID == uuid.Nil {
+		t.Fatal("operator account phone conflict insert returned a zero ID after repair rollback")
+	}
+}
+
+func TestOperatorAccountPhoneIndexMigrationRepairPostgres(t *testing.T) {
+	context, databaseURL := newMigrationTestDatabase(t)
+	database := openMigrationDatabase(t, context, databaseURL)
+	defer database.Close()
+
+	baselinePath := t.TempDir()
+	baseline, failure := os.ReadFile(filepath.Join(migrationsPathForTest(t), "20260801000000_current_schema.sql"))
+	if failure != nil {
+		t.Fatalf("read current baseline: %v", failure)
+	}
+	if failure = os.WriteFile(filepath.Join(baselinePath, "20260801000000_current_schema.sql"), baseline, 0o600); failure != nil {
+		t.Fatalf("write temporary current baseline: %v", failure)
+	}
+
+	baselineDatabase := openMigrationDatabase(t, context, databaseURL)
+	defer baselineDatabase.Close()
+	baselineProvider, failure := goose.NewProvider(goose.DialectPostgres, baselineDatabase, os.DirFS(baselinePath))
+	if failure != nil {
+		t.Fatalf("create baseline migration provider: %v", failure)
+	}
+	defer baselineProvider.Close()
+	if _, failure = baselineProvider.Up(context); failure != nil {
+		t.Fatalf("apply temporary current baseline: %v", failure)
+	}
+
+	if _, failure = database.ExecContext(context, `DROP INDEX IF EXISTS uq_operator_accounts_operator_phone`); failure != nil {
+		t.Fatalf("drop baseline phone index: %v", failure)
+	}
+
+	applyCurrentMigrations(t, context, databaseURL)
+
+	assertOperatorAccountCatalog(t, context, database)
+	operatorID := uuid.New()
+	if _, failure = database.ExecContext(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "repair-"+operatorID.String()[:8]); failure != nil {
+		t.Fatalf("insert repair operator: %v", failure)
+	}
+	var accountID uuid.UUID
+	if failure = database.QueryRowContext(context, `
+		INSERT INTO operator_accounts (
+			operator_id,
+			phone,
+			status,
+			status_version,
+			auth_expires_at
+		)
+		VALUES ($1, $2, 'authenticating', 2, $3)
+		ON CONFLICT (operator_id, phone) WHERE phone IS NOT NULL DO NOTHING
+		RETURNING id`, operatorID, "+12025550302", time.Now().Add(time.Hour)).Scan(&accountID); failure != nil {
+		t.Fatalf("execute operator account phone conflict insert: %v", failure)
+	}
+	if accountID == uuid.Nil {
+		t.Fatal("operator account phone conflict insert returned a zero ID")
+	}
+
+	applyCurrentMigrations(t, context, databaseURL)
+	rows, failure := database.QueryContext(context, `SELECT version_id, is_applied FROM goose_db_version ORDER BY id`)
+	if failure != nil {
+		t.Fatalf("read repaired migration history: %v", failure)
+	}
+	defer rows.Close()
+	wantHistory := []struct {
+		version int64
+		applied bool
+	}{
+		{version: 0, applied: true},
+		{version: currentBaselineVersion, applied: true},
+		{version: phoneIndexRepairVersion, applied: true},
+	}
+	for index, want := range wantHistory {
+		if !rows.Next() {
+			t.Fatalf("repaired migration history ended at row %d, want version %d", index, want.version)
+		}
+		var (
+			version int64
+			applied bool
+		)
+		if failure = rows.Scan(&version, &applied); failure != nil {
+			t.Fatalf("read repaired migration history row %d: %v", index, failure)
+		}
+		if version != want.version || applied != want.applied {
+			t.Fatalf("repaired migration history row %d = (%d, %t), want (%d, %t)", index, version, applied, want.version, want.applied)
+		}
+	}
+	if rows.Next() {
+		t.Fatal("repaired migration history contains an unexpected row")
+	}
+	if failure = rows.Err(); failure != nil {
+		t.Fatalf("iterate repaired migration history: %v", failure)
+	}
+}
+
 func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 	context, databaseURL := newMigrationTestDatabase(t)
-	applyCurrentBaseline(t, context, databaseURL)
+	applyCurrentMigrations(t, context, databaseURL)
 	database := openMigrationDatabase(t, context, databaseURL)
 	defer database.Close()
 
@@ -179,7 +324,7 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 
 func TestCurrentDeliveryAndSessionTriggersPostgres(t *testing.T) {
 	context, databaseURL := newMigrationTestDatabase(t)
-	applyCurrentBaseline(t, context, databaseURL)
+	applyCurrentMigrations(t, context, databaseURL)
 	database := openMigrationDatabase(t, context, databaseURL)
 	defer database.Close()
 
@@ -307,7 +452,7 @@ func openMigrationDatabase(t *testing.T, context context.Context, databaseURL st
 	return database
 }
 
-func applyCurrentBaseline(t *testing.T, context context.Context, databaseURL string) {
+func applyCurrentMigrations(t *testing.T, context context.Context, databaseURL string) {
 	t.Helper()
 	database, failure := sql.Open("pgx", databaseURL)
 	if failure != nil {
@@ -323,7 +468,7 @@ func applyCurrentBaseline(t *testing.T, context context.Context, databaseURL str
 	}
 	defer provider.Close()
 	if _, failure = provider.Up(context); failure != nil {
-		t.Fatalf("apply current baseline: %v", failure)
+		t.Fatalf("apply current migrations: %v", failure)
 	}
 }
 
@@ -377,7 +522,7 @@ func assertOperatorAccountCatalog(t *testing.T, context context.Context, databas
 		t.Fatalf("inspect operator account phone index definition: %v", failure)
 	}
 	phoneIndexDefinition = strings.ToLower(phoneIndexDefinition)
-	for _, fragment := range []string{"(operator_id, phone)", "where (phone is not null)"} {
+	for _, fragment := range []string{"create unique index", "(operator_id, phone)", "where (phone is not null)"} {
 		if !strings.Contains(phoneIndexDefinition, fragment) {
 			t.Fatalf("operator account phone index definition = %q, missing %q", phoneIndexDefinition, fragment)
 		}

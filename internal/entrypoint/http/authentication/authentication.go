@@ -345,7 +345,7 @@ func (h *Handler) loginDispatch(response http.ResponseWriter, request *http.Requ
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if !h.sameOrigin(request) {
+	if !h.sameOrigin(request) && !h.allowLocalNullOriginLogin(request) {
 		h.redirectLogin(response, safeLocalRedirect(request.URL.Query().Get("next")))
 		return
 	}
@@ -536,6 +536,42 @@ func (h *Handler) sameOrigin(request *http.Request) bool {
 		}
 	}
 	return seen
+}
+
+// allowLocalNullOriginLogin is the narrowly scoped compatibility exception
+// for Chrome DevTools native form submits. It must not be used for logout or
+// any other request that relies on sameOrigin.
+func (h *Handler) allowLocalNullOriginLogin(request *http.Request) bool {
+	origin := request.Header.Values("Origin")
+	if len(origin) != 1 || origin[0] != "null" {
+		return false
+	}
+	if len(request.Header.Values("Referer")) != 0 {
+		return false
+	}
+	if h.cookie.Secure || !h.cookie.AllowInsecureLocal || !strings.EqualFold(h.publicOrigin.Scheme, "http") {
+		return false
+	}
+	hostname := h.publicOrigin.Hostname()
+	if !strings.EqualFold(hostname, "localhost") {
+		address, failure := netip.ParseAddr(hostname)
+		if failure != nil || !address.IsLoopback() {
+			return false
+		}
+	}
+	if request.Host != h.publicOrigin.Host {
+		return false
+	}
+	if values := request.Header.Values("Sec-Fetch-Site"); len(values) != 1 || values[0] != "same-origin" {
+		return false
+	}
+	if values := request.Header.Values("Sec-Fetch-Mode"); len(values) != 1 || values[0] != "navigate" {
+		return false
+	}
+	if values := request.Header.Values("Sec-Fetch-Dest"); len(values) != 1 || values[0] != "document" {
+		return false
+	}
+	return true
 }
 
 func parsePublicOrigin(value string) (*url.URL, error) {

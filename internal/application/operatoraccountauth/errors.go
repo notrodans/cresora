@@ -60,6 +60,80 @@ var (
 	ErrStartupRecovery = errors.New("telegram authentication startup recovery failed")
 )
 
+// ProviderFailureKind is the bounded, transport-neutral diagnostic taxonomy
+// for a provider failure. ProviderFailureUnknown is intentionally invalid for
+// ProviderFailureError values.
+type ProviderFailureKind string
+
+const (
+	ProviderFailureUnknown               ProviderFailureKind = ""
+	ProviderFailureConfigurationRejected ProviderFailureKind = "configuration_rejected"
+	ProviderFailurePhoneRejected         ProviderFailureKind = "phone_rejected"
+	ProviderFailureRuntimeCapacity       ProviderFailureKind = "runtime_capacity"
+	ProviderFailureProtocol              ProviderFailureKind = "protocol"
+	ProviderFailureRemoteRejected        ProviderFailureKind = "remote_rejected"
+	ProviderFailureRemoteFailure         ProviderFailureKind = "remote_failure"
+	ProviderFailureTransportUnknown      ProviderFailureKind = "transport_unknown"
+)
+
+const providerFailureMessage = "telegram authentication provider failure"
+
+// ProviderFailureError is the safe application representation of a provider
+// diagnostic. It deliberately retains no provider error, message, or vendor
+// type. Protocol failures represent an invalid successful SendCode response
+// and retain the provider-unavailable lifecycle classification; all other
+// validated kinds retain the transient classification.
+type ProviderFailureError struct {
+	kind ProviderFailureKind
+}
+
+// NewProviderFailureError constructs a provider diagnostic from the bounded
+// application taxonomy.
+func NewProviderFailureError(kind ProviderFailureKind) (*ProviderFailureError, error) {
+	if !validProviderFailureKind(kind) {
+		return nil, ErrInvalidInput
+	}
+	return &ProviderFailureError{kind: kind}, nil
+}
+
+// Error implements error with a fixed message that contains no provider data.
+func (failure *ProviderFailureError) Error() string {
+	return providerFailureMessage
+}
+
+// Unwrap exposes only an approved application-level classification. An
+// invalid zero value is treated as transient rather than exposing arbitrary
+// or provider-derived state.
+func (failure *ProviderFailureError) Unwrap() error {
+	if failure != nil && failure.kind == ProviderFailureProtocol {
+		return ErrProviderUnavailable
+	}
+	return ErrProviderTransient
+}
+
+// Kind returns the validated provider failure kind.
+func (failure *ProviderFailureError) Kind() ProviderFailureKind {
+	if failure == nil || !validProviderFailureKind(failure.kind) {
+		return ProviderFailureUnknown
+	}
+	return failure.kind
+}
+
+func validProviderFailureKind(kind ProviderFailureKind) bool {
+	switch kind {
+	case ProviderFailureConfigurationRejected,
+		ProviderFailurePhoneRejected,
+		ProviderFailureRuntimeCapacity,
+		ProviderFailureProtocol,
+		ProviderFailureRemoteRejected,
+		ProviderFailureRemoteFailure,
+		ProviderFailureTransportUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // RetryAfterError is the safe application representation of an auth flood
 // wait. After is positive and bounded by time.Duration; the service bounds it
 // further by the challenge expiry before returning it to a caller. The type

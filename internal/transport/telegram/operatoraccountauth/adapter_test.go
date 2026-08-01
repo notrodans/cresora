@@ -3,6 +3,8 @@ package operatoraccountauth
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +233,24 @@ func TestAdapterRejectsNonPositiveSelfProfile(t *testing.T) {
 	}
 }
 
+func TestAdapterMapsEmptySendCodeResponseToProtocolDiagnostic(t *testing.T) {
+	adapter := newTestAdapter(new(fakeRuntime), &fakePhoneClient{})
+	_, err := adapter.SendCode(context.Background(), testTarget(), "+15551234567")
+	var diagnostic *application.ProviderFailureError
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("SendCode() error = %T %v, want ProviderFailureError", err, err)
+	}
+	if diagnostic.Kind() != application.ProviderFailureProtocol {
+		t.Fatalf("ProviderFailureError.Kind() = %v, want protocol", diagnostic.Kind())
+	}
+	if !errors.Is(err, application.ErrProviderUnavailable) {
+		t.Fatal("empty SendCode response does not retain ErrProviderUnavailable")
+	}
+	if errors.Is(err, application.ErrProviderTransient) {
+		t.Fatal("empty SendCode response unexpectedly retained ErrProviderTransient")
+	}
+}
+
 func TestMapProviderError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -243,7 +263,6 @@ func TestMapProviderError(t *testing.T) {
 		{name: "unauthorized", err: tgerr.New(401, "UNAUTHORIZED"), want: application.ErrUnauthorized},
 		{name: "session revoked", err: tgerr.New(401, "SESSION_REVOKED"), want: application.ErrSessionUnavailable},
 		{name: "transient", err: errors.New("temporary network failure"), want: application.ErrProviderTransient},
-		{name: "invalid flood wait", err: tgerr.New(420, "FLOOD_WAIT"), want: application.ErrFloodWait},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -280,5 +299,137 @@ func TestProfileRequiresPositiveSelfID(t *testing.T) {
 	want := application.Profile{UserID: 9, Username: "name", FirstName: "First", LastName: "Last"}
 	if got != want {
 		t.Fatalf("profile() = %#v, want %#v", got, want)
+	}
+}
+
+func TestMapProviderErrorReturnsSafeDiagnostics(t *testing.T) {
+	const canary = "vendor-secret-should-not-cross-provider-boundary"
+	tests := []struct {
+		name string
+		err  error
+		kind application.ProviderFailureKind
+	}{
+		{
+			name: "configuration rejected",
+			err:  fmt.Errorf("unsafe wrapper: %w", tgerr.New(400, "API_ID_INVALID")),
+			kind: application.ProviderFailureConfigurationRejected,
+		},
+		{
+			name: "invalid phone",
+			err:  tgerr.New(400, "PHONE_NUMBER_INVALID"),
+			kind: application.ProviderFailurePhoneRejected,
+		},
+		{
+			name: "banned phone",
+			err:  tgerr.New(400, "PHONE_NUMBER_BANNED"),
+			kind: application.ProviderFailurePhoneRejected,
+		},
+		{
+			name: "phone flood",
+			err:  tgerr.New(400, "PHONE_NUMBER_FLOOD"),
+			kind: application.ProviderFailurePhoneRejected,
+		},
+		{
+			name: "runtime capacity",
+			err:  fmt.Errorf("unsafe wrapper: %w", accountowner.ErrRuntimeCapacity),
+			kind: application.ProviderFailureRuntimeCapacity,
+		},
+		{
+			name: "protocol",
+			err:  fmt.Errorf("unsafe wrapper: %w", errInvalidSendCodeResponse),
+			kind: application.ProviderFailureProtocol,
+		},
+		{
+			name: "remote rejected",
+			err:  fmt.Errorf("unsafe wrapper: %w", tgerr.New(400, canary)),
+			kind: application.ProviderFailureRemoteRejected,
+		},
+		{
+			name: "remote failure",
+			err:  fmt.Errorf("unsafe wrapper: %w", tgerr.New(503, canary)),
+			kind: application.ProviderFailureRemoteFailure,
+		},
+		{
+			name: "transport unknown",
+			err:  errors.New(canary),
+			kind: application.ProviderFailureTransportUnknown,
+		},
+		{
+			name: "malformed flood wait",
+			err:  tgerr.New(420, "FLOOD_WAIT"),
+			kind: application.ProviderFailureRemoteRejected,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			failure := mapProviderError(test.err)
+			var diagnostic *application.ProviderFailureError
+			if !errors.As(failure, &diagnostic) {
+				t.Fatalf("mapProviderError() = %T %v, want ProviderFailureError", failure, failure)
+			}
+			if diagnostic.Kind() != test.kind {
+				t.Fatalf("ProviderFailureError.Kind() = %v, want %v", diagnostic.Kind(), test.kind)
+			}
+			semantic := application.ErrProviderTransient
+			if test.kind == application.ProviderFailureProtocol {
+				semantic = application.ErrProviderUnavailable
+			}
+			if !errors.Is(failure, semantic) {
+				t.Fatalf("mapProviderError() = %v, want %v identity", failure, semantic)
+			}
+			if test.kind == application.ProviderFailureProtocol && errors.Is(failure, application.ErrProviderTransient) {
+				t.Fatal("protocol diagnostic unexpectedly retained ErrProviderTransient")
+			}
+			for _, format := range []string{"%s", "%v", "%+v"} {
+				message := fmt.Sprintf(format, failure)
+				if strings.Contains(message, canary) {
+					t.Fatalf("formatted %s error disclosed provider data: %q", format, message)
+				}
+			}
+		})
+	}
+}
+
+func TestMapProviderErrorPreservesSafeSentinelsAndCancellation(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "canceled", err: fmt.Errorf("outer: %w", context.Canceled), want: context.Canceled},
+		{name: "deadline", err: fmt.Errorf("outer: %w", context.DeadlineExceeded), want: context.DeadlineExceeded},
+		{name: "invalid code", err: fmt.Errorf("outer: %w", tgerr.New(400, "PHONE_CODE_INVALID")), want: application.ErrInvalidCode},
+		{name: "password required", err: fmt.Errorf("outer: %w", tgerr.New(400, "SESSION_PASSWORD_NEEDED")), want: application.ErrPasswordRequired},
+		{name: "invalid password", err: fmt.Errorf("outer: %w", tgerr.New(400, "PASSWORD_HASH_INVALID")), want: application.ErrInvalidPassword},
+		{name: "session", err: fmt.Errorf("outer: %w", tgerr.New(401, "SESSION_REVOKED")), want: application.ErrSessionUnavailable},
+		{name: "unauthorized", err: fmt.Errorf("outer: %w", tgerr.New(401, "UNAUTHORIZED")), want: application.ErrUnauthorized},
+		{name: "application transient", err: fmt.Errorf("outer: %w", application.ErrProviderTransient), want: application.ErrProviderTransient},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mapProviderError(test.err); got != test.want {
+				t.Fatalf("mapProviderError() = %v (%T), want %v (%T)", got, got, test.want, test.want)
+			}
+		})
+	}
+}
+
+func TestMapProviderErrorFindsWrappedRPCInJoinedFailure(t *testing.T) {
+	const canary = "joined-rpc-provider-secret"
+	failure := mapProviderError(errors.Join(
+		errors.New(canary),
+		fmt.Errorf("outer: %w", tgerr.New(502, canary)),
+	))
+	var diagnostic *application.ProviderFailureError
+	if !errors.As(failure, &diagnostic) {
+		t.Fatalf("mapProviderError() = %T %v, want ProviderFailureError", failure, failure)
+	}
+	if diagnostic.Kind() != application.ProviderFailureRemoteFailure {
+		t.Fatalf("ProviderFailureError.Kind() = %v, want remote failure", diagnostic.Kind())
+	}
+	for _, format := range []string{"%s", "%v", "%+v"} {
+		if message := fmt.Sprintf(format, failure); strings.Contains(message, canary) {
+			t.Fatalf("formatted %s error disclosed provider data: %q", format, message)
+		}
 	}
 }

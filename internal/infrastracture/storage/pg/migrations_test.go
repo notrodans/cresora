@@ -14,7 +14,7 @@ import (
 	"github.com/notrodans/cresora/config"
 )
 
-func TestMigrationsContainOneCurrentBaseline(t *testing.T) {
+func TestMigrationsContainCurrentBaselineAndRepair(t *testing.T) {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate migration test")
@@ -24,35 +24,59 @@ func TestMigrationsContainOneCurrentBaseline(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("read migrations: %v", failure)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("migration file count = %d, want 1", len(entries))
+	expected := []struct {
+		name     string
+		contents []string
+	}{
+		{
+			name: "20260801000000_current_schema.sql",
+			contents: []string{
+				"status operator_account_status_type NOT NULL",
+				"status_version bigint NOT NULL DEFAULT 1",
+				"telegram_user_id bigint",
+				"auth_expires_at timestamptz",
+				"failure_code varchar(32)",
+				"ck_operator_accounts_timestamp_order",
+				"ix_operator_accounts_operator_status",
+				"CREATE UNIQUE INDEX uq_operator_accounts_operator_phone",
+				"ON operator_accounts (operator_id, phone)",
+				"WHERE phone IS NOT NULL",
+				"CREATE TABLE sessions",
+				"ciphertext bytea NOT NULL",
+				"CREATE TYPE mailing_delivery_status_type",
+				"'unknown'",
+				"execution_generation bigint NOT NULL DEFAULT 1",
+				"lease_execution_generation bigint",
+			},
+		},
+		{
+			name: "20260801200000_repair_operator_account_phone_index.sql",
+			contents: []string{
+				"-- +goose Up",
+				"CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_accounts_operator_phone",
+				"ON operator_accounts (operator_id, phone)",
+				"WHERE phone IS NOT NULL",
+				"-- +goose Down",
+				"The current schema migration owns this index, so rollback is intentionally a no-op.",
+			},
+		},
 	}
-	if entries[0].Name() != "20260801000000_current_schema.sql" {
-		t.Fatalf("migration file = %q, want current baseline", entries[0].Name())
+	if len(entries) != len(expected) {
+		t.Fatalf("migration file count = %d, want %d", len(entries), len(expected))
 	}
-
-	contents, failure := os.ReadFile(filepath.Join(migrationsPath, entries[0].Name()))
-	if failure != nil {
-		t.Fatalf("read current migration: %v", failure)
-	}
-	text := string(contents)
-	for _, required := range []string{
-		"status operator_account_status_type NOT NULL",
-		"status_version bigint NOT NULL DEFAULT 1",
-		"telegram_user_id bigint",
-		"auth_expires_at timestamptz",
-		"failure_code varchar(32)",
-		"ck_operator_accounts_timestamp_order",
-		"ix_operator_accounts_operator_status",
-		"CREATE TABLE sessions",
-		"ciphertext bytea NOT NULL",
-		"CREATE TYPE mailing_delivery_status_type",
-		"'unknown'",
-		"execution_generation bigint NOT NULL DEFAULT 1",
-		"lease_execution_generation bigint",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("current migration is missing %q", required)
+	for index, migration := range expected {
+		if entries[index].Name() != migration.name {
+			t.Fatalf("migration file %d = %q, want %q", index, entries[index].Name(), migration.name)
+		}
+		contents, readFailure := os.ReadFile(filepath.Join(migrationsPath, migration.name))
+		if readFailure != nil {
+			t.Fatalf("read migration %q: %v", migration.name, readFailure)
+		}
+		text := string(contents)
+		for _, required := range migration.contents {
+			if !strings.Contains(text, required) {
+				t.Fatalf("migration %q is missing %q", migration.name, required)
+			}
 		}
 	}
 }
