@@ -423,14 +423,14 @@ func createDeliveryPipelineFixture(
 	if _, failure := database.Exec(
 		context,
 		`INSERT INTO operator_accounts
-		 (id, operator_id, phone, telegram_username, telegram_first_name, api_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		 (id, operator_id, phone, telegram_username, telegram_first_name, telegram_user_id, status, status_version)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'active', 1)`,
 		accountID,
 		fixture.operatorID,
 		"+19990000001",
 		"pipeline_"+accountID.String()[:8],
 		"Pipeline Test",
-		1,
+		int64(100001),
 	); failure != nil {
 		return fixture, fmt.Errorf("insert account: %w", failure)
 	}
@@ -599,19 +599,13 @@ func applyDeliveryPipelineMigrations(context stdcontext.Context, databaseURL str
 		goose.DialectPostgres,
 		database,
 		os.DirFS(filepath.Join(filepath.Dir(filename), "../../../../migrations")),
-		goose.WithAllowOutofOrder(true),
 	)
 	if failure != nil {
 		return fmt.Errorf("create migration provider: %w", failure)
 	}
-	if _, failure = provider.Up(context); failure == nil {
-		return fmt.Errorf("apply migrations without delivery execution v2 acknowledgement")
-	}
-	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
-		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
-	}
+	defer provider.Close()
 	if _, failure = provider.Up(context); failure != nil {
-		return fmt.Errorf("apply acknowledged migrations: %w", failure)
+		return fmt.Errorf("apply current baseline: %w", failure)
 	}
 	return nil
 }

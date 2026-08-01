@@ -234,10 +234,10 @@ func createTelegramPeerLookupFixture(
 		return fixture, fmt.Errorf("insert operator: %w", failure)
 	}
 	if failure = exec(
-		`INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, api_id)
-		 VALUES ($1, $2, '+12025550101', $3, 'Fixture A', 1),
-		        ($4, $2, '+12025550102', $5, 'Fixture B', 2),
-		        ($6, $2, '+12025550103', $7, 'Fixture C', 3)`,
+		`INSERT INTO operator_accounts (id, operator_id, phone, telegram_username, telegram_first_name, telegram_user_id, status, status_version)
+		 VALUES ($1, $2, '+12025550101', $3, 'Fixture A', 100001, 'active', 1),
+		        ($4, $2, '+12025550102', $5, 'Fixture B', 100002, 'active', 1),
+		        ($6, $2, '+12025550103', $7, 'Fixture C', 100003, 'active', 1)`,
 		fixture.accountA,
 		fixture.operatorID,
 		"account-a-"+fixture.accountA.String()[:8],
@@ -520,17 +520,11 @@ func applyIntegrationMigrations(context context.Context, databaseURL string) err
 		goose.DialectPostgres,
 		database,
 		os.DirFS(migrationsPath),
-		goose.WithAllowOutofOrder(true),
 	)
 	if failure != nil {
 		return failure
 	}
-	if _, failure = provider.Up(context); failure == nil {
-		return errors.New("apply migrations without delivery execution v2 acknowledgement")
-	}
-	if _, failure = database.ExecContext(context, `INSERT INTO delivery_execution_v2_cutover_ack (acknowledgement_id, acknowledged_by) VALUES (TRUE, current_user)`); failure != nil {
-		return fmt.Errorf("acknowledge delivery execution v2 cutover: %w", failure)
-	}
+	defer provider.Close()
 	_, failure = provider.Up(context)
 	return failure
 }
