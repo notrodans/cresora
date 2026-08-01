@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,8 +23,8 @@ import (
 	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 	challengecoordinator "github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges"
 	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
+	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
-	"rsc.io/qr"
 )
 
 const (
@@ -156,15 +155,16 @@ var assets embed.FS
 type handler struct {
 	startPhone   commands.StartPhone
 	verifyPhone  commands.VerifyPhone
-	startQR      commands.StartQR
-	refreshQR    commands.RefreshQR
+	start        commands.Start
+	codeCommand  commands.Code
+	password     commands.Password
+	cancel       commands.Cancel
 	status       requests.Status
 	tmpl         *template.Template
-	actorMu      sync.Mutex
-	actorLocks   map[uuid.UUID]*sync.Mutex
 	publicOrigin *url.URL
 	disabled     bool
 	cookie       CookieConfig
+	canonical    bool
 }
 
 type page struct {
@@ -172,8 +172,10 @@ type page struct {
 	Phone              string
 	PhoneRequestID     string
 	CodeSent           bool
-	QR                 *qrView
-	QRRequestID        string
+	ChallengeRequestID string
+	ChallengeStage     string
+	Delivery           string
+	ChallengeExpires   int64
 	CSRF               string
 	Notice             string
 	Error              string
@@ -198,11 +200,6 @@ type accountRow struct {
 	State string
 }
 
-type qrView struct {
-	Image   string
-	Expires int64
-}
-
 // New constructs the chi router for operator account authentication.
 func New(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, publicOrigin string) chi.Router {
 	r := chi.NewRouter()
@@ -210,13 +207,21 @@ func New(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, start
 	return r
 }
 
-// NewWithOptions constructs a router with an explicit deployment policy. Use
-// RouteDevelopmentTestMock only from an intentionally isolated development or
-// test composition. Production/staging composition should use RouteDisabled
-// until live Telegram adapters are available.
+// NewWithOptions constructs the compatibility phone/code router with an
+// explicit deployment policy. Canonical password/cancel ports are deliberately
+// not guessed from this legacy signature.
 func NewWithOptions(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, publicOrigin string, options RouteOptions) chi.Router {
 	r := chi.NewRouter()
 	RegisterWithOptions(r, startPhone, verifyPhone, startQR, refreshQR, status, provider, publicOrigin, options)
+	return r
+}
+
+// NewWithPhoneAuth constructs the approved runtime phone-auth flow. It accepts
+// only the canonical command ports; QR ports are deliberately not part of this
+// composition and cannot be called by the live HTTP handler.
+func NewWithPhoneAuth(start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, provider principal.Provider, publicOrigin string, options RouteOptions) chi.Router {
+	r := chi.NewRouter()
+	registerPhoneAuth(r, start, code, password, cancel, status, provider, publicOrigin, options)
 	return r
 }
 
@@ -285,18 +290,16 @@ func RegisterWithOptions(
 	if !options.Cookie.Secure && (!strings.EqualFold(origin.Scheme, "http") || !isLocalOriginHost(origin)) {
 		panic("insecure operator-account cookies require a local HTTP origin")
 	}
-	if options.Mode == RouteLive && (options.Environment == EnvironmentProduction || options.Environment == EnvironmentStaging) {
-		// Until live Telegram auth is explicitly approved, production and
-		// staging must use the same inert authenticated 503 as RouteDisabled.
-		options.Mode = RouteDisabled
-	}
 	switch options.Mode {
 	case RouteDisabled:
 		// A disabled route deliberately accepts nil command ports. This keeps
 		// the unavailable composition unable to call a mock or a partially
 		// initialized Telegram adapter.
 	case RouteLive:
-		if startPhone == nil || verifyPhone == nil || startQR == nil || refreshQR == nil || status == nil {
+		// QR arguments remain in this compatibility constructor so existing
+		// composition code can migrate without a flag day. They are ignored;
+		// enabling phone auth never requires or calls a QR port.
+		if startPhone == nil || verifyPhone == nil || status == nil {
 			panic("register enabled operator account routes with missing command")
 		}
 	case RouteDevelopmentTestMock:
@@ -306,19 +309,19 @@ func RegisterWithOptions(
 		if options.Environment != EnvironmentDevelopment && options.Environment != EnvironmentTesting {
 			panic("development/test mock route requires DEVELOPMENT or TESTING environment")
 		}
-		if startPhone == nil || verifyPhone == nil || startQR == nil || refreshQR == nil || status == nil {
+		if startPhone == nil || verifyPhone == nil || status == nil {
 			panic("register enabled operator account routes with missing command")
 		}
 	default:
 		panic("register operator account routes with unknown mode")
 	}
+	if options.Mode == RouteLive && (options.Environment == EnvironmentProduction || options.Environment == EnvironmentStaging) && !options.Cookie.Secure {
+		panic("live operator account routes require Secure cookies in production and staging")
+	}
 	h := &handler{
 		startPhone:   startPhone,
 		verifyPhone:  verifyPhone,
-		startQR:      startQR,
-		refreshQR:    refreshQR,
 		status:       status,
-		actorLocks:   make(map[uuid.UUID]*sync.Mutex),
 		publicOrigin: origin,
 		disabled:     options.Mode == RouteDisabled,
 		cookie:       options.Cookie,
@@ -328,14 +331,60 @@ func RegisterWithOptions(
 	protected.Get("/operator-accounts/authenticate", h.authenticate)
 	protected.Post("/operator-accounts/authenticate/phone", h.phone)
 	protected.Post("/operator-accounts/authenticate/phone/code", h.code)
-	protected.Post("/operator-accounts/authenticate/qr", h.qr)
-	protected.Post("/operator-accounts/authenticate/qr/refresh", h.refresh)
 	router.Get("/operator-accounts/authenticate/style.css", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, assets, "style.css")
 	})
 	router.Get("/operator-accounts/authenticate/authenticate.js", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, assets, "authenticate.js")
 	})
+}
+
+func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, provider principal.Provider, configuredOrigin string, options RouteOptions) {
+	origin, failure := parsePublicOrigin(configuredOrigin)
+	if failure != nil {
+		panic(failure)
+	}
+	if options.Mode == "" {
+		options.Mode = RouteDisabled
+	}
+	if options.Cookie == (CookieConfig{}) {
+		options.Cookie = SecureCookieConfig()
+	}
+	if failure := ValidateCookieConfig(options.Cookie); failure != nil {
+		panic(failure)
+	}
+	if !options.Cookie.Secure && (!strings.EqualFold(origin.Scheme, "http") || !isLocalOriginHost(origin)) {
+		panic("insecure operator-account cookies require a local HTTP origin")
+	}
+	switch options.Mode {
+	case RouteDisabled:
+	case RouteLive:
+	case RouteDevelopmentTestMock:
+		if !options.AllowDevelopmentTestMock {
+			panic("development/test mock route requires explicit opt-in")
+		}
+		if options.Environment != EnvironmentDevelopment && options.Environment != EnvironmentTesting {
+			panic("development/test mock route requires DEVELOPMENT or TESTING environment")
+		}
+	default:
+		panic("register operator account routes with unknown mode")
+	}
+	if options.Mode != RouteDisabled && (start == nil || code == nil || password == nil || cancel == nil || status == nil) {
+		panic("register enabled operator account routes with missing command")
+	}
+	if options.Mode == RouteLive && (options.Environment == EnvironmentProduction || options.Environment == EnvironmentStaging) && !options.Cookie.Secure {
+		panic("live operator account routes require Secure cookies in production and staging")
+	}
+	h := &handler{start: start, codeCommand: code, password: password, cancel: cancel, status: status, canonical: true, publicOrigin: origin, disabled: options.Mode == RouteDisabled, cookie: options.Cookie}
+	h.tmpl = template.Must(template.New("authenticate.html").ParseFS(assets, "templates/authenticate.html"))
+	protected := router.With(principal.Middleware(provider))
+	protected.Get("/operator-accounts/authenticate", h.authenticate)
+	protected.Post("/operator-accounts/authenticate/phone", h.phoneCanonical)
+	protected.Post("/operator-accounts/authenticate/phone/code", h.codeCanonical)
+	protected.Post("/operator-accounts/authenticate/phone/password", h.passwordStep)
+	protected.Post("/operator-accounts/authenticate/phone/cancel", h.cancelStep)
+	router.Get("/operator-accounts/authenticate/style.css", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, assets, "style.css") })
+	router.Get("/operator-accounts/authenticate/authenticate.js", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, assets, "authenticate.js") })
 }
 
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
@@ -348,8 +397,6 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrf := h.ensureCSRF(w, r)
-	unlock := h.lockActor(scope.actor.OperatorID)
-	defer unlock()
 	p := page{CSRF: csrf, Notice: notice(r.URL.Query().Get("notice")), Error: errorMessage(r.URL.Query().Get("error"))}
 	p.ErrorFocus = p.Error != ""
 
@@ -360,14 +407,20 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 			p.ErrorFocus = true
 		} else {
 			p.Accounts = mapAccounts(current.Accounts)
-			if current.PhoneChallenge != nil && time.Now().Before(current.PhoneChallenge.ExpiresAt) {
+			if h.canonical && current.Challenge != nil && time.Now().Before(current.Challenge.ExpiresAt) {
+				p.Phone = current.Challenge.Phone
+				p.ChallengeRequestID = current.Challenge.RequestID.String()
+				p.ChallengeStage = string(current.Challenge.Stage)
+				p.Delivery = current.Challenge.Delivery
+				p.ChallengeExpires = current.Challenge.ExpiresAt.UnixMilli()
+				p.CodeSent = current.Challenge.Stage == common.StageCode
+			} else if current.PhoneChallenge != nil && time.Now().Before(current.PhoneChallenge.ExpiresAt) {
 				p.Phone = current.PhoneChallenge.Phone
 				p.PhoneRequestID = current.PhoneChallenge.RequestID.String()
 				p.CodeSent = true
-			}
-			if current.QRChallenge != nil && time.Now().Before(current.QRChallenge.ExpiresAt) {
-				p.QR = makeQRView(*current.QRChallenge)
-				p.QRRequestID = current.QRChallenge.RequestID.String()
+				p.ChallengeRequestID = p.PhoneRequestID
+				p.ChallengeStage = string(common.StageCode)
+				p.ChallengeExpires = current.PhoneChallenge.ExpiresAt.UnixMilli()
 			}
 		}
 	}
@@ -379,6 +432,127 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(body.Bytes())
+}
+
+func (h *handler) phoneCanonical(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if h.unavailable(w) {
+		return
+	}
+	actor, ok := requestActor(w, r)
+	if !ok || !h.protectPost(w, r) {
+		return
+	}
+	phone := strings.TrimSpace(r.FormValue("phone"))
+	if phone == "" || len(phone) > 32 {
+		redirectError(w, "phone")
+		return
+	}
+	result, err := h.start.Execute(r.Context(), actor, phone)
+	if err != nil {
+		if isFloodWait(err) {
+			redirectError(w, "flood-wait")
+			return
+		}
+		redirectError(w, "send-code")
+		return
+	}
+	if result.Validate() != nil {
+		redirectError(w, "send-code")
+		return
+	}
+	if result.Account != nil {
+		h.redirect(w, "/operator-accounts/authenticate?notice=account-added")
+		return
+	}
+	h.redirect(w, "/operator-accounts/authenticate?notice=code-sent")
+}
+
+func (h *handler) codeCanonical(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if h.unavailable(w) {
+		return
+	}
+	actor, ok := requestActor(w, r)
+	if !ok || !h.protectPost(w, r) {
+		return
+	}
+	requestID, err := uuid.Parse(strings.TrimSpace(r.FormValue("challenge_request_id")))
+	code := strings.TrimSpace(r.FormValue("code"))
+	if err != nil || requestID == uuid.Nil || code == "" || len(code) > 16 {
+		redirectError(w, "code")
+		return
+	}
+	result, err := h.codeCommand.Execute(r.Context(), actor, requestID, code)
+	if err != nil {
+		if errors.Is(err, common.ErrPasswordRequired) {
+			h.redirect(w, "/operator-accounts/authenticate?notice=password-required")
+			return
+		}
+		if isFloodWait(err) {
+			redirectError(w, "flood-wait")
+			return
+		}
+		redirectError(w, "code")
+		return
+	}
+	if result.Validate() != nil {
+		redirectError(w, "code")
+		return
+	}
+	h.redirect(w, "/operator-accounts/authenticate?notice=account-added")
+}
+
+func (h *handler) passwordStep(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if h.unavailable(w) {
+		return
+	}
+	actor, ok := requestActor(w, r)
+	if !ok || !h.protectPost(w, r) {
+		return
+	}
+	requestID, err := uuid.Parse(strings.TrimSpace(r.FormValue("challenge_request_id")))
+	password := r.FormValue("password")
+	if err != nil || requestID == uuid.Nil || password == "" || len(password) > 256 {
+		redirectError(w, "password")
+		return
+	}
+	result, err := h.password.Execute(r.Context(), actor, requestID, password)
+	if err != nil {
+		if isFloodWait(err) {
+			redirectError(w, "flood-wait")
+			return
+		}
+		redirectError(w, "password")
+		return
+	}
+	if result.Validate() != nil {
+		redirectError(w, "password")
+		return
+	}
+	h.redirect(w, "/operator-accounts/authenticate?notice=account-added")
+}
+
+func (h *handler) cancelStep(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if h.unavailable(w) {
+		return
+	}
+	actor, ok := requestActor(w, r)
+	if !ok || !h.protectPost(w, r) {
+		return
+	}
+	requestID, err := uuid.Parse(strings.TrimSpace(r.FormValue("challenge_request_id")))
+	if err != nil || requestID == uuid.Nil {
+		redirectError(w, "invalid")
+		return
+	}
+	if err := h.cancel.Execute(r.Context(), actor, requestID); err != nil {
+		redirectError(w, "cancel")
+		return
+	}
+	h.redirect(w, "/operator-accounts/authenticate?notice=cancelled")
 }
 
 func (h *handler) phone(w http.ResponseWriter, r *http.Request) {
@@ -403,8 +577,6 @@ func (h *handler) phone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := h.scopeForActor(w, r, actor)
-	unlock := h.lockActor(scope.actor.OperatorID)
-	defer unlock()
 	_, err := h.startPhone.Execute(r.Context(), scope.actor, phone)
 	if err != nil {
 		redirectError(w, "send-code")
@@ -432,8 +604,6 @@ func (h *handler) code(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.FormValue("code"))
 	requestIDValue := strings.TrimSpace(r.FormValue("challenge_request_id"))
 	scope := h.scopeForActor(w, r, actor)
-	unlock := h.lockActor(scope.actor.OperatorID)
-	defer unlock()
 	current, err := h.status.Execute(r.Context(), scope.actor)
 	requestID := uuid.Nil
 	if requestIDValue != "" {
@@ -456,6 +626,7 @@ func (h *handler) code(w http.ResponseWriter, r *http.Request) {
 	h.redirect(w, "/operator-accounts/authenticate?notice=account-added")
 }
 
+/*
 func (h *handler) qr(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if h.unavailable(w) {
@@ -469,8 +640,6 @@ func (h *handler) qr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := h.scopeForActor(w, r, actor)
-	unlock := h.lockActor(scope.actor.OperatorID)
-	defer unlock()
 	_, err := h.startQR.Execute(r.Context(), scope.actor)
 	if err != nil {
 		redirectError(w, "qr-start")
@@ -492,8 +661,6 @@ func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := h.scopeForActor(w, r, actor)
-	unlock := h.lockActor(scope.actor.OperatorID)
-	defer unlock()
 	current, err := h.status.Execute(r.Context(), scope.actor)
 	requestIDValue := strings.TrimSpace(r.FormValue("challenge_request_id"))
 	requestID := uuid.Nil
@@ -517,6 +684,7 @@ func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	h.redirect(w, "/operator-accounts/authenticate?notice=qr-ready")
 }
+*/
 
 func (h *handler) resolveScope(w http.ResponseWriter, r *http.Request) (requestScope, bool) {
 	actor, ok := requestActor(w, r)
@@ -561,26 +729,6 @@ func noStore(w http.ResponseWriter) {
 
 func (h *handler) scopeForActor(w http.ResponseWriter, r *http.Request, actor application.Actor) requestScope {
 	return requestScope{actor: actor, flowID: h.flowID(w, r)}
-}
-
-// lockActor serializes the complete HTTP operation for one actor. The registry
-// mutex is held only while looking up a per-actor lock; unrelated actors never
-// wait for an external application operation belonging to another actor. The
-// lock is not the challenge store: coordinator state remains the sole source
-// of truth and its mutex is never held across provider calls.
-func (h *handler) lockActor(actorID uuid.UUID) func() {
-	h.actorMu.Lock()
-	if h.actorLocks == nil {
-		h.actorLocks = make(map[uuid.UUID]*sync.Mutex)
-	}
-	lock := h.actorLocks[actorID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		h.actorLocks[actorID] = lock
-	}
-	h.actorMu.Unlock()
-	lock.Lock()
-	return lock.Unlock
 }
 
 func requestActor(w http.ResponseWriter, r *http.Request) (application.Actor, bool) {
@@ -708,8 +856,10 @@ func notice(code string) string {
 		return "A Telegram code was sent."
 	case "account-added":
 		return "Telegram account connected."
-	case "qr-ready":
-		return "Scan the QR code with Telegram."
+	case "password-required":
+		return "Authentication password required."
+	case "cancelled":
+		return "Challenge cancelled."
 	}
 	return ""
 }
@@ -721,12 +871,21 @@ func errorMessage(code string) string {
 		return "That code was not accepted or has expired."
 	case "send-code":
 		return "We could not send a code. Try again."
-	case "qr-start", "qr-refresh", "qr-expired":
-		return "QR sign-in is unavailable right now."
+	case "password":
+		return "The password was not accepted."
+	case "cancel":
+		return "The sign-in attempt could not be cancelled."
+	case "flood-wait":
+		return "Telegram временно ограничил попытки входа. Подождите немного и повторите попытку."
 	case "invalid":
 		return "Please check the form and try again."
 	}
 	return ""
+}
+
+func isFloodWait(err error) bool {
+	var retryAfter *common.RetryAfterError
+	return errors.As(err, &retryAfter)
 }
 
 func mapAccounts(accounts []common.Account) []accountRow {
@@ -742,16 +901,26 @@ func mapAccounts(accounts []common.Account) []accountRow {
 		if name == "" {
 			name = "Telegram account"
 		}
-		rows = append(rows, accountRow{Name: name, Phone: account.Phone, State: "Connected"})
+		rows = append(rows, accountRow{Name: name, Phone: account.Phone, State: accountState(account.Status)})
 	}
 	return rows
 }
-func makeQRView(challenge common.QRChallenge) *qrView {
-	image, err := qr.Encode(challenge.URL, qr.M)
-	if err != nil {
-		return nil
+
+func accountState(status operatoraccount.Status) string {
+	switch status {
+	case operatoraccount.StatusActive:
+		return "active"
+	case operatoraccount.StatusAuthenticating:
+		return "authenticating"
+	case operatoraccount.StatusReauthRequired:
+		return "reauth_required"
+	case operatoraccount.StatusDisconnecting:
+		return "disconnecting"
+	case operatoraccount.StatusDisconnected:
+		return "disconnected"
+	default:
+		return string(status)
 	}
-	return &qrView{Image: "data:image/png;base64," + base64.StdEncoding.EncodeToString(image.PNG()), Expires: challenge.ExpiresAt.UnixMilli()}
 }
 
 var _ common.Account
