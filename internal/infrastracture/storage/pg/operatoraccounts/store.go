@@ -40,24 +40,6 @@ func New(database *pgxpool.Pool) *Store {
 	return &Store{database: database}
 }
 
-// NewStore is the explicit constructor name for callers that use the package
-// as a collection of PostgreSQL stores.
-func NewStore(database *pgxpool.Pool) *Store {
-	return New(database)
-}
-
-// NewOperatorAccountStore creates a PostgreSQL-backed operator account store.
-func NewOperatorAccountStore(database *pgxpool.Pool) *Store {
-	return New(database)
-}
-
-// AccountStore is retained as a descriptive type name for the lifecycle
-// adapter. It has the same implementation as Store.
-type AccountStore = Store
-
-// AccountLifecycleStore is the descriptive lifecycle adapter name.
-type AccountLifecycleStore = Store
-
 // LoadAccount loads one account only when the actor owns it. Unknown and
 // foreign account IDs intentionally return the same application error.
 func (store *Store) LoadAccount(

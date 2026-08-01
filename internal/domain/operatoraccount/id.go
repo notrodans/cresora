@@ -19,12 +19,6 @@ func Identity(value uuid.UUID) ID {
 	return ID{value: value}
 }
 
-// NewID is the descriptive form of Identity for callers constructing an
-// account ID at an application boundary.
-func NewID(value uuid.UUID) ID {
-	return Identity(value)
-}
-
 // UUID returns the underlying UUID representation.
 func (identity ID) UUID() uuid.UUID {
 	return identity.value
