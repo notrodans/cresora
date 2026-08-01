@@ -29,11 +29,14 @@ var (
 	// ErrShutdownTimeout indicates that an execution or cleanup dependency did
 	// not stop within the worker's bounded shutdown budgets.
 	ErrShutdownTimeout = errors.New("delivery worker shutdown timed out")
+	// ErrMalformedTask indicates that a claimed task violated the worker
+	// admission contract.
+	ErrMalformedTask = errors.New("malformed delivery task")
 )
 
-// Commands resolves the command for one delivery route.
+// Commands resolves the command for one admitted delivery account.
 type Commands interface {
-	Command(context.Context, applicationdelivery.Route) (applicationdelivery.Command, error)
+	Command(context.Context, applicationdelivery.AccountAdmission) (applicationdelivery.Command, error)
 }
 
 // Config contains the bounded worker timings. Capacity is intentionally not a
@@ -300,14 +303,14 @@ func (worker *Worker) coordinate(
 			return
 		}
 
-		route, routeFailure := taskRoute(task)
-		if routeFailure != nil {
-			releaseFailure := worker.release(task, routeFailure, cleanup)
+		admission, admissionFailure := taskAdmission(task)
+		if admissionFailure != nil {
+			releaseFailure := worker.release(task, admissionFailure, cleanup)
 			<-slots
-			reportFatal(errors.Join(routeFailure, releaseFailure))
+			reportFatal(errors.Join(admissionFailure, releaseFailure))
 			return
 		}
-		command, resolveFailure := resolveCommand(worker.commands, claimContext, route)
+		command, resolveFailure := resolveCommand(worker.commands, claimContext, admission)
 		if resolveFailure != nil {
 			releaseFailure := worker.release(task, resolveFailure, cleanup)
 			<-slots
@@ -316,6 +319,13 @@ func (worker *Worker) coordinate(
 					recordFailure(releaseFailure)
 				}
 				return
+			}
+			if errors.Is(resolveFailure, applicationdelivery.ErrAccountAdmissionRejected) {
+				if releaseFailure != nil {
+					reportFatal(errors.Join(resolveFailure, releaseFailure))
+					return
+				}
+				continue
 			}
 			reportFatal(errors.Join(
 				fmt.Errorf("resolve delivery command: %w", resolveFailure),
@@ -520,26 +530,39 @@ func claimCause(ctx context.Context) error {
 	return errors.New("delivery claim stopped")
 }
 
-func taskRoute(task applicationdelivery.Task) (route applicationdelivery.Route, failure error) {
+func taskAdmission(
+	task applicationdelivery.Task,
+) (admission applicationdelivery.AccountAdmission, failure error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			failure = panicFailure("delivery task route", recovered)
+			failure = fmt.Errorf(
+				"%w: %w",
+				ErrMalformedTask,
+				panicFailure("read delivery task admission", recovered),
+			)
 		}
 	}()
-	return task.Route(), nil
+	admitted, ok := task.(applicationdelivery.AdmittedTask)
+	if !ok {
+		return admission, fmt.Errorf(
+			"%w: claimed task has no account admission",
+			ErrMalformedTask,
+		)
+	}
+	return admitted.Admission(), nil
 }
 
 func resolveCommand(
 	commands Commands,
 	context context.Context,
-	route applicationdelivery.Route,
+	admission applicationdelivery.AccountAdmission,
 ) (command applicationdelivery.Command, failure error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			failure = panicFailure("delivery command resolver", recovered)
 		}
 	}()
-	return commands.Command(context, route)
+	return commands.Command(context, admission)
 }
 
 func safeRelease(

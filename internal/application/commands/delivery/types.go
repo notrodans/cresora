@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	ErrEmpty               = errors.New("no ready mailing deliveries")
-	ErrLeaseLost           = errors.New("delivery lease lost")
-	ErrOutcomeFinalization = errors.New("delivery outcome finalization failed")
+	ErrEmpty                    = errors.New("no ready mailing deliveries")
+	ErrLeaseLost                = errors.New("delivery lease lost")
+	ErrOutcomeFinalization      = errors.New("delivery outcome finalization failed")
+	ErrAccountAdmissionRejected = errors.New("delivery account admission rejected")
 )
 
 const OutcomeFinalizationTimeout = 2 * time.Second
