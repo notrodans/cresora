@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
 	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/domain/recipient"
 )
 
@@ -227,6 +230,36 @@ func TestWorkerResolverFailureReleasesAndIsFatal(t *testing.T) {
 	}
 	if got := task.releaseCount(); got != 1 {
 		t.Fatalf("Release() called %d times, want 1", got)
+	}
+}
+
+func TestWorkerPassesClaimedAdmissionToResolver(t *testing.T) {
+	want := applicationdelivery.AccountAdmission{
+		Route:   applicationdelivery.Routing(uuid.MustParse("22222222-2222-2222-2222-222222222222")),
+		Version: operatoraccount.Version(17),
+	}
+	executed := make(chan struct{})
+	task := &taskStub{
+		admission: want,
+		execute: func(context.Context, applicationdelivery.Command) error {
+			closeOnce(executed)
+			return nil
+		},
+	}
+	commands := &commandsStub{}
+	parent, cancel := context.WithCancel(context.Background())
+	result := runWorker(New(&claimsStub{tasks: []applicationdelivery.Task{task}}, commands, testConfig()), parent)
+	awaitSignal(t, executed)
+	cancel()
+	if err := awaitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	got, ok := commands.admissionValue()
+	if !ok {
+		t.Fatal("resolver did not receive an admission")
+	}
+	if got.Route != want.Route || got.Version != want.Version {
+		t.Fatalf("resolver admission = %+v, want route %s and version %d", got, want.Route.UUID(), want.Version)
 	}
 }
 
@@ -818,19 +851,21 @@ func (stub *claimsStub) count() int {
 }
 
 type commandsStub struct {
-	err      error
-	failures []error
-	mutex    sync.Mutex
-	calls    int
+	err        error
+	failures   []error
+	mutex      sync.Mutex
+	calls      int
+	admissions []applicationdelivery.AccountAdmission
 }
 
 func (stub *commandsStub) Command(
-	context.Context,
-	applicationdelivery.AccountAdmission,
+	_ context.Context,
+	admission applicationdelivery.AccountAdmission,
 ) (applicationdelivery.Command, error) {
 	stub.mutex.Lock()
 	call := stub.calls
 	stub.calls++
+	stub.admissions = append(stub.admissions, admission)
 	stub.mutex.Unlock()
 	if call < len(stub.failures) && stub.failures[call] != nil {
 		return nil, stub.failures[call]
@@ -845,6 +880,15 @@ func (stub *commandsStub) callCount() int {
 	stub.mutex.Lock()
 	defer stub.mutex.Unlock()
 	return stub.calls
+}
+
+func (stub *commandsStub) admissionValue() (applicationdelivery.AccountAdmission, bool) {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
+	if len(stub.admissions) == 0 {
+		return applicationdelivery.AccountAdmission{}, false
+	}
+	return stub.admissions[len(stub.admissions)-1], true
 }
 
 type commandStub struct{}

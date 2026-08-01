@@ -139,5 +139,6 @@ func isRuntimeAdmissionRejection(failure error) bool {
 	return errors.Is(failure, accountowner.ErrRegistryStopped) ||
 		errors.Is(failure, accountowner.ErrAccountStopped) ||
 		errors.Is(failure, accountowner.ErrStaleAdmission) ||
-		errors.Is(failure, accountowner.ErrStopped)
+		errors.Is(failure, accountowner.ErrStopped) ||
+		errors.Is(failure, accountowner.ErrRuntimeCapacity)
 }

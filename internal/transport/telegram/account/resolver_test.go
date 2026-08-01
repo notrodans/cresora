@@ -47,7 +47,7 @@ func TestRuntimeGatedPortStoppedBeforeCallbackIsTransient(t *testing.T) {
 	runtime := &runtimeFake{failure: accountowner.ErrAccountStopped}
 	api := &telegramAPI{}
 	commands := newTestCommands(&revalidationFake{target: testTarget()}, runtime, api)
-	command := resolveTestCommand(t, commands)
+	command := resolveTestCommand(t, commands, testAdmission())
 
 	failure := executeTestCommand(t, command)
 	if !errors.Is(failure, delivery.ErrTransient) {
@@ -67,11 +67,35 @@ func TestRuntimeGatedPortStoppedBeforeCallbackIsTransient(t *testing.T) {
 	}
 }
 
+func TestRuntimeGatedPortCapacityBeforeCallbackIsTransient(t *testing.T) {
+	runtime := &runtimeFake{failure: accountowner.ErrRuntimeCapacity}
+	api := &telegramAPI{}
+	commands := newTestCommands(&revalidationFake{target: testTarget()}, runtime, api)
+	command := resolveTestCommand(t, commands, testAdmission())
+
+	failure := executeTestCommand(t, command)
+	if !errors.Is(failure, delivery.ErrTransient) {
+		t.Fatalf("Execute() error = %v, want delivery.ErrTransient", failure)
+	}
+	if !errors.Is(failure, accountowner.ErrRuntimeCapacity) {
+		t.Fatalf("Execute() error = %v, want ErrRuntimeCapacity", failure)
+	}
+	if got := runtime.executeCount(); got != 1 {
+		t.Fatalf("Runtime.Execute() calls = %d, want 1", got)
+	}
+	if got := runtime.callbackCount(); got != 0 {
+		t.Fatalf("runtime callback calls = %d, want 0", got)
+	}
+	if got := api.callsCount(); got != 0 {
+		t.Fatalf("Telegram RPC calls = %d, want 0", got)
+	}
+}
+
 func TestRuntimeGatedPortMissingCallbackIsUnknownFailure(t *testing.T) {
 	runtime := &runtimeFake{}
 	api := &telegramAPI{}
 	commands := newTestCommands(&revalidationFake{target: testTarget()}, runtime, api)
-	command := resolveTestCommand(t, commands)
+	command := resolveTestCommand(t, commands, testAdmission())
 
 	failure := executeTestCommand(t, command)
 	if failure == nil {
@@ -98,9 +122,11 @@ func TestRuntimeGatedPortValidPathUsesOneCallbackAndPersistedRandomID(t *testing
 	const randomID int64 = 918273
 	runtime := &runtimeFake{invoke: true}
 	api := &telegramAPI{}
-	commands := newTestCommands(&revalidationFake{target: testTarget()}, runtime, api)
+	reader := &revalidationFake{target: testTarget()}
+	commands := newTestCommands(reader, runtime, api)
 	commands.deliveries = testDeliveries(randomID, message.Text("hello"))
-	command := resolveTestCommand(t, commands)
+	admission := testAdmission()
+	command := resolveTestCommand(t, commands, admission)
 
 	if failure := executeTestCommand(t, command); failure != nil {
 		t.Fatalf("Execute() error = %v, want nil", failure)
@@ -117,6 +143,15 @@ func TestRuntimeGatedPortValidPathUsesOneCallbackAndPersistedRandomID(t *testing
 	if got := api.randomID(); got != randomID {
 		t.Fatalf("Telegram RandomID = %d, want persisted %d", got, randomID)
 	}
+	if peer, ok := api.peer().(*tg.InputPeerChat); !ok || peer.ChatID != 3 {
+		t.Fatalf("Telegram peer = %#v, want closed chat 3", api.peer())
+	}
+	if got := reader.admissionValue(); got != admission {
+		t.Fatalf("Revalidate() admission = %+v, want %+v", got, admission)
+	}
+	if got := runtime.targetValue(); got != testTarget() {
+		t.Fatalf("Runtime.Execute() target = %+v, want %+v", got, testTarget())
+	}
 }
 
 func TestRuntimeGatedPortPreservesFloodWaitDuration(t *testing.T) {
@@ -124,7 +159,7 @@ func TestRuntimeGatedPortPreservesFloodWaitDuration(t *testing.T) {
 	runtime := &runtimeFake{invoke: true}
 	api := &telegramAPI{failure: tgerr.New(420, "FLOOD_WAIT_7")}
 	commands := newTestCommands(&revalidationFake{target: testTarget()}, runtime, api)
-	command := resolveTestCommand(t, commands)
+	command := resolveTestCommand(t, commands, testAdmission())
 
 	failure := executeTestCommand(t, command)
 	var floodWait *delivery.FloodWaitError
@@ -153,9 +188,13 @@ func newTestCommands(
 	)
 }
 
-func resolveTestCommand(t *testing.T, commands admissionCommands) delivery.Command {
+func resolveTestCommand(
+	t *testing.T,
+	commands admissionCommands,
+	admission delivery.AccountAdmission,
+) delivery.Command {
 	t.Helper()
-	command, failure := commands.Command(context.Background(), testAdmission())
+	command, failure := commands.Command(context.Background(), admission)
 	if failure != nil {
 		t.Fatalf("Command() error = %v, want nil", failure)
 	}
@@ -190,18 +229,20 @@ func testTarget() operatoraccounts.RuntimeTarget {
 }
 
 type revalidationFake struct {
-	mu      sync.Mutex
-	target  operatoraccounts.RuntimeTarget
-	failure error
-	count   int
+	mu        sync.Mutex
+	target    operatoraccounts.RuntimeTarget
+	failure   error
+	count     int
+	admission delivery.AccountAdmission
 }
 
 func (fake *revalidationFake) Revalidate(
 	_ context.Context,
-	_ delivery.AccountAdmission,
+	admission delivery.AccountAdmission,
 ) (operatoraccounts.RuntimeTarget, error) {
 	fake.mu.Lock()
 	fake.count++
+	fake.admission = admission
 	fake.mu.Unlock()
 	return fake.target, fake.failure
 }
@@ -212,21 +253,29 @@ func (fake *revalidationFake) calls() int {
 	return fake.count
 }
 
+func (fake *revalidationFake) admissionValue() delivery.AccountAdmission {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.admission
+}
+
 type runtimeFake struct {
 	mu            sync.Mutex
 	failure       error
 	invoke        bool
 	executeCalls  int
 	callbackCalls int
+	targets       []operatoraccounts.RuntimeTarget
 }
 
 func (fake *runtimeFake) Execute(
 	context context.Context,
-	_ operatoraccounts.RuntimeTarget,
+	target operatoraccounts.RuntimeTarget,
 	callback accountowner.ClientCallback,
 ) error {
 	fake.mu.Lock()
 	fake.executeCalls++
+	fake.targets = append(fake.targets, target)
 	invoke := fake.invoke
 	failure := fake.failure
 	if invoke {
@@ -252,6 +301,15 @@ func (fake *runtimeFake) callbackCount() int {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return fake.callbackCalls
+}
+
+func (fake *runtimeFake) targetValue() operatoraccounts.RuntimeTarget {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.targets) == 0 {
+		return operatoraccounts.RuntimeTarget{}
+	}
+	return fake.targets[len(fake.targets)-1]
 }
 
 type deliveriesFake struct {
@@ -306,14 +364,15 @@ func (targetSetFake) Target(_ context.Context, _ recipient.Recipient) (telegram.
 type targetFake struct{}
 
 func (targetFake) Peer() (tg.InputPeerClass, error) {
-	return &tg.InputPeerUser{UserID: 1, AccessHash: 2}, nil
+	return &tg.InputPeerChat{ChatID: 3}, nil
 }
 
 type telegramAPI struct {
-	mu      sync.Mutex
-	failure error
-	calls   int
-	lastID  int64
+	mu       sync.Mutex
+	failure  error
+	calls    int
+	lastID   int64
+	lastPeer tg.InputPeerClass
 }
 
 func (api *telegramAPI) MessagesSendMessage(
@@ -323,6 +382,7 @@ func (api *telegramAPI) MessagesSendMessage(
 	api.mu.Lock()
 	api.calls++
 	api.lastID = request.RandomID
+	api.lastPeer = request.Peer
 	failure := api.failure
 	api.mu.Unlock()
 	return nil, failure
@@ -342,4 +402,10 @@ func (api *telegramAPI) randomIDValue() int64 {
 
 func (api *telegramAPI) randomID() int64 {
 	return api.randomIDValue()
+}
+
+func (api *telegramAPI) peer() tg.InputPeerClass {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	return api.lastPeer
 }
