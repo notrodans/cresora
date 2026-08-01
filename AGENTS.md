@@ -2,9 +2,9 @@
 
 * Prefer idiomatic Go over object-oriented rules.
 * Follow DDD, DRY, and YAGNI.
-* Prefer simplicity, explicitness, and correctness over architectural purity.
+* Prefer simple, explicit, correct, and maintainable designs over architectural purity; use abstractions and language features in moderation.
 * Prefer composition over embedding; embed only when promoted methods belong to the public API.
-* Keep packages cohesive and dependency direction explicit.
+* Give each package one clear primary responsibility, keep dependency direction explicit, and use short, clear package names that do not repeat the package name.
 * Domain code must not depend on transports, databases, frameworks, or vendor types.
 * Application code coordinates use cases through consumer-defined ports.
 * Infrastructure implements ports and contains technology-specific types.
@@ -30,16 +30,18 @@
 * Private methods may rely on established invariants.
 * Nil receivers are unsupported unless explicitly documented.
 * Avoid typed nil values stored in interfaces.
-* Prefer early returns and shallow control flow.
+* Use guard clauses and early returns to keep control flow shallow.
 * Format all code with `gofmt`.
 * Do not impose formatting rules that conflict with `gofmt`.
 * Remove duplication only when it represents the same knowledge.
 * Prefer small duplication over a premature abstraction.
 * Do not add extension points, configuration, infrastructure, or abstractions without a current requirement.
+* Do not use mutable package-level state; pass state through callers or keep it in explicit instances.
+* Concurrency belongs to the caller: do not hide unbounded or untracked goroutines; every goroutine must have an explicit owner, cancellation path, and stoppable lifecycle.
 
 # Errors and Logging
 
-* Return errors for expected failures; panic only for broken internal invariants or unrecoverable initialization.
+* Return errors for expected and recoverable failures; do not use `panic`/`recover` as exception-style control flow. Panic only for broken internal invariants or unrecoverable initialization.
 * Wrap errors with `%w` when preserving their identity.
 * Use `errors.Is` and `errors.As`; do not inspect error strings.
 * Error messages must be lowercase, contextual, and have no trailing period.
@@ -53,7 +55,7 @@
 # Testing Rules
 
 * Place tests beside source files as `*_test.go`.
-* Test observable behavior, not implementation details.
+* Test public APIs through observable behavior, not implementation details.
 * Every behavior change and bug fix must have a test.
 * One test should cover one coherent behavior; multiple related assertions are allowed.
 * Use descriptive names such as `TestMailing_StartsPendingMailing`.
@@ -241,7 +243,7 @@
 * Do not create value objects that add no validation, behavior, or type safety.
 * Do not split code into layers that only forward calls without adding policy or translation.
 * Do not introduce a message broker, distributed lock, leader election, actor system, or cache without a demonstrated requirement.
-* Do not optimize before measuring a relevant bottleneck.
+* Before optimizing, benchmark representative behavior and confirm a relevant bottleneck; do not optimize based on guesswork.
 * Prefer standard-library solutions over custom frameworks and infrastructure.
 * Prefer explicit code over reusable machinery used only once.
 * Prefer a small amount of duplication over a premature shared abstraction.
