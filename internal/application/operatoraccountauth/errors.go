@@ -76,19 +76,6 @@ const (
 	ProviderFailureTransportUnknown      ProviderFailureKind = "transport_unknown"
 )
 
-// These aliases keep the enum readable at call sites that prefer the type
-// name as a prefix without adding another representation or an unsafe value.
-const (
-	ProviderFailureKindUnknown               = ProviderFailureUnknown
-	ProviderFailureKindConfigurationRejected = ProviderFailureConfigurationRejected
-	ProviderFailureKindPhoneRejected         = ProviderFailurePhoneRejected
-	ProviderFailureKindRuntimeCapacity       = ProviderFailureRuntimeCapacity
-	ProviderFailureKindProtocol              = ProviderFailureProtocol
-	ProviderFailureKindRemoteRejected        = ProviderFailureRemoteRejected
-	ProviderFailureKindRemoteFailure         = ProviderFailureRemoteFailure
-	ProviderFailureKindTransportUnknown      = ProviderFailureTransportUnknown
-)
-
 const providerFailureMessage = "telegram authentication provider failure"
 
 // ProviderFailureError is the safe application representation of a provider
