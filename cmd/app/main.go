@@ -29,7 +29,6 @@ import (
 	deliveryreconciler "github.com/notrodans/cresora/internal/entrypoint/background/deliveryreconciler"
 	"github.com/notrodans/cresora/internal/entrypoint/http/authentication"
 	"github.com/notrodans/cresora/internal/entrypoint/http/console"
-	"github.com/notrodans/cresora/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 	"github.com/notrodans/cresora/internal/infrastracture/storage/pg"
 	claims "github.com/notrodans/cresora/internal/infrastracture/storage/pg/claims"
@@ -100,7 +99,12 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	if failure != nil {
 		return fmt.Errorf("open PostgreSQL database: %w", failure)
 	}
-	defer database.Close()
+	databaseClosed := false
+	defer func() {
+		if !databaseClosed {
+			database.Close()
+		}
+	}()
 
 	// Lease recovery is transport-free and therefore runs in every mode,
 	// including WEB_ONLY. The PostgreSQL adapter retains its own batch, grace,
@@ -113,6 +117,10 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	reconcilerLoop := deliveryreconciler.New(runReconciler, deliveryreconciler.Config{
 		Interval: cfg.DeliveryReconcilerInterval,
 	})
+	apis, targets, failure := configureTelegramDeliveryAdapters(cfg, database)
+	if failure != nil {
+		return failure
+	}
 
 	// Создаём сервис для работы с таблицами рассылок.
 	service := mailingconsole.NewService(mailings.NewMailingConsole(database), mailings.NewMailings(database))
@@ -140,25 +148,24 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	router.Use(loggerMiddleware)
 	router.Use(middleware.Recoverer)
 	authentication.Register(router, authenticationService, sessionProvider, cfg.PublicOrigin.String(), cookieConfig)
-	// Telegram account sign-in remains unavailable until live Telegram
-	// adapters are composed. Never wire the deterministic in-memory mock here:
-	// this disabled route preserves the endpoint surface and returns a generic
-	// 503 after principal authentication in every deployment environment.
-	operatoraccounts.RegisterWithOptions(
-		router,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		sessionProvider,
-		cfg.PublicOrigin.String(),
-		operatoraccounts.RouteOptions{
-			Mode:        operatoraccounts.RouteDisabled,
-			Environment: operatoraccounts.DeploymentEnvironment(cfg.Env),
-			Cookie:      operatoraccounts.NewCookieConfig(cfg.SessionCookieSecure(), cfg.SessionCookieAllowsInsecureLocal()),
-		},
-	)
+	var operatorAuth *operatorAuthLifecycle
+	if cfg.TelegramAuthEnabled {
+		operatorAuth, failure = composeOperatorAuth(
+			rootContext,
+			cfg,
+			database,
+			router,
+			sessionProvider,
+			cfg.PublicOrigin.String(),
+		)
+		if failure != nil {
+			return fmt.Errorf("compose telegram operator account authentication: %w", failure)
+		}
+	} else {
+		// The disabled route preserves the endpoint surface without constructing
+		// any Telegram runtime or adapter.
+		registerDisabledOperatorAuth(router, sessionProvider, cfg)
+	}
 	console.Register(router, createDraft, queueMailing, dashboard, sessionProvider, cfg.PublicOrigin.String(), log)
 
 	// Инициализируем HTTP сервер
@@ -175,13 +182,6 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	// Канал ошибок фоновых обработчиков.
 	var workerErrors <-chan error
 	if !cfg.WebOnly {
-		// Эти адаптеры остаются внешними до подключения жизненного цикла Telegram-аккаунтов.
-		// Нельзя считать, что обработчики доставки запущены, пока адаптеры не настроены.
-		var apis APIs
-		targets := telegramaccount.NewTargets(pg.NewTelegramPeerLookup(database))
-		if apis == nil || targets == nil {
-			return errors.New("WEB_ONLY=false requires configured Telegram account adapters")
-		}
 		worker := make(chan error, 1)
 		workerErrors = worker
 		go func() {
@@ -201,13 +201,38 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		backgroundErrors <- backgroundSupervisor.Run(rootContext)
 	}()
 
-	return monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, backgroundErrors)
+	runtimeFailure := monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, backgroundErrors)
+	authFailure := shutdownApplicationResources(operatorAuth, database)
+	databaseClosed = true
+	if runtimeFailure != nil && authFailure != nil {
+		return errors.Join(runtimeFailure, authFailure)
+	}
+	if runtimeFailure != nil {
+		return runtimeFailure
+	}
+	return authFailure
 }
 
 // APIs и Targets — это адаптеры уровня приложения вокруг существующего
 // жизненного цикла аккаунтов gotd и проекций Telegram в PostgreSQL.
 type APIs = telegramaccount.APIs
 type Targets = telegramaccount.Targets
+
+func configureTelegramDeliveryAdapters(cfg *config.Config, database *pgxpool.Pool) (APIs, Targets, error) {
+	if cfg.WebOnly {
+		return nil, nil, nil
+	}
+
+	// The current slice has no process-wide Telegram API owner for delivery
+	// workers. Reject the mode before operator authentication can construct its
+	// account runtime rather than creating a runtime that cannot be used.
+	var apis APIs
+	targets := telegramaccount.NewTargets(pg.NewTelegramPeerLookup(database))
+	if apis == nil || targets == nil {
+		return nil, nil, errors.New("WEB_ONLY=false requires configured Telegram account adapters")
+	}
+	return apis, targets, nil
+}
 
 func run(context context.Context, database *pgxpool.Pool, apis APIs, targets Targets) error {
 	deliveries := deliveries.NewDeliveries(database)
