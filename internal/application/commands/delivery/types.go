@@ -7,8 +7,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/mailing"
 	"github.com/notrodans/cresora/internal/domain/message"
+	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/domain/recipient"
 )
 
@@ -40,6 +42,29 @@ func (route Route) UUID() uuid.UUID {
 
 func (token Token) UUID() uuid.UUID {
 	return uuid.UUID(token)
+}
+
+// AccountAdmission is the immutable account lifecycle snapshot captured when
+// a delivery is claimed. Route identifies the account and Version fences later
+// runtime work to the exact lifecycle snapshot that was admitted.
+type AccountAdmission struct {
+	Route   Route
+	Version operatoraccount.Version
+}
+
+// AccountRevalidationReader revalidates a claimed account admission before a
+// transport runtime is used. Implementations must return a target only when
+// the same account is still active at the admitted version.
+type AccountRevalidationReader interface {
+	Revalidate(context.Context, AccountAdmission) (operatoraccounts.RuntimeTarget, error)
+}
+
+// AdmittedTask is an optional extension of Task for consumers that need the
+// lifecycle snapshot captured by a claim. Task retains Route for existing
+// routing consumers.
+type AdmittedTask interface {
+	Task
+	Admission() AccountAdmission
 }
 
 // Sends one domain message through an outer port. randomID is the persisted
