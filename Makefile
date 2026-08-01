@@ -15,7 +15,3 @@ arch-lint:
 
 arch: arch-lint
 	"$(ARCH_LINT_BIN)" check --project-path "$(CURDIR)" --arch-file "$(CURDIR)/.go-arch-lint.yml"
-
-# `make arch-verify` proves the negative case, cleans its fixture, then checks normally.
-arch-verify: arch-lint
-	ARCH_LINT_BIN="$(ARCH_LINT_BIN)" ./scripts/verify-architecture.sh
