@@ -30,15 +30,16 @@ var (
 // disconnected at version one.
 //
 // State is changed only by the explicit operations below. In particular,
-// callers cannot set Status, Version, FailureCode, identity, or authentication
-// expiry independently.
+// callers cannot set Status, Version, FailureCode, identity, authentication
+// expiry, or remote logout requirement independently.
 type Account struct {
-	id             ID
-	status         Status
-	version        Version
-	failureCode    FailureCode
-	telegramUserID int64
-	authExpiresAt  time.Time
+	id                   ID
+	status               Status
+	version              Version
+	failureCode          FailureCode
+	telegramUserID       int64
+	authExpiresAt        time.Time
+	remoteLogoutRequired bool
 }
 
 // New creates an account in the disconnected state at the initial version.
@@ -55,6 +56,7 @@ func New(id ID) Account {
 
 // Restore reconstructs the current account state read from persistence. It
 // validates the complete state instead of exposing a general-purpose setter.
+// The optional remote logout requirement defaults to false for existing callers.
 func Restore(
 	id ID,
 	status Status,
@@ -62,14 +64,23 @@ func Restore(
 	failureCode FailureCode,
 	telegramUserID int64,
 	authExpiresAt time.Time,
+	remoteLogoutRequired ...bool,
 ) (Account, error) {
+	if len(remoteLogoutRequired) > 1 {
+		return Account{}, fmt.Errorf("%w: remote logout requirement must be provided once", ErrInvalidState)
+	}
+	logoutRequired := false
+	if len(remoteLogoutRequired) == 1 {
+		logoutRequired = remoteLogoutRequired[0]
+	}
 	account := Account{
-		id:             id,
-		status:         status,
-		version:        version,
-		failureCode:    failureCode,
-		telegramUserID: telegramUserID,
-		authExpiresAt:  authExpiresAt,
+		id:                   id,
+		status:               status,
+		version:              version,
+		failureCode:          failureCode,
+		telegramUserID:       telegramUserID,
+		authExpiresAt:        authExpiresAt,
+		remoteLogoutRequired: logoutRequired,
 	}
 	if failure := account.validate(); failure != nil {
 		return Account{}, failure
@@ -108,6 +119,12 @@ func (account Account) TelegramUserID() int64 {
 // is zero unless the account is in StatusAuthenticating.
 func (account Account) AuthExpiresAt() time.Time {
 	return account.authExpiresAt
+}
+
+// RemoteLogoutRequired reports whether a disconnecting account still needs its
+// remote Telegram session revoked.
+func (account Account) RemoteLogoutRequired() bool {
+	return account.remoteLogoutRequired
 }
 
 // BeginAuthentication moves a disconnected or reauthentication-required
@@ -159,11 +176,13 @@ func (account *Account) RequireReauthentication(code FailureCode) error {
 // BeginDisconnect requests shutdown from any state that may own an active or
 // in-progress authentication session.
 func (account *Account) BeginDisconnect() error {
+	remoteIntent := account.status == StatusActive || account.status == StatusReauthRequired
 	if failure := account.move(StatusDisconnecting, StatusAuthenticating, StatusActive, StatusReauthRequired); failure != nil {
 		return failure
 	}
 	account.authExpiresAt = time.Time{}
 	account.failureCode = NoFailure
+	account.remoteLogoutRequired = remoteIntent
 	return nil
 }
 
@@ -176,6 +195,7 @@ func (account *Account) MarkDisconnected() error {
 	}
 	account.authExpiresAt = time.Time{}
 	account.failureCode = NoFailure
+	account.remoteLogoutRequired = false
 	return nil
 }
 
@@ -210,6 +230,9 @@ func (account Account) validate() error {
 	}
 	if !account.status.valid() {
 		return fmt.Errorf("%w: unknown status %q", ErrInvalidState, account.status)
+	}
+	if account.remoteLogoutRequired && account.status != StatusDisconnecting {
+		return fmt.Errorf("%w: remote logout requirement is only valid while disconnecting", ErrInvalidState)
 	}
 	if account.version == 0 {
 		return fmt.Errorf("%w: version must be positive", ErrInvalidState)
