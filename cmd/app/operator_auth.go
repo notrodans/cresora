@@ -15,10 +15,7 @@ import (
 	operatoraccountrequests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/cresora/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
-	"github.com/notrodans/cresora/internal/infrastracture/storage/pg"
 	pgoperatoraccounts "github.com/notrodans/cresora/internal/infrastracture/storage/pg/operatoraccounts"
-	"github.com/notrodans/cresora/internal/transport/telegram/accountowner"
-	"github.com/notrodans/cresora/internal/transport/telegram/gotdclient"
 	transportoperatoraccountauth "github.com/notrodans/cresora/internal/transport/telegram/operatoraccountauth"
 )
 
@@ -33,6 +30,9 @@ type operatorAuthService interface {
 type operatorAuthRuntime interface {
 	transportoperatoraccountauth.Runtime
 	applicationoperatoraccountauth.RuntimeStopper
+}
+
+type sharedRuntimeStopper interface {
 	Stop(context.Context) error
 }
 
@@ -50,7 +50,6 @@ type operatorAuthDatabaseCloser interface {
 
 type operatorAuthLifecycle struct {
 	service operatorAuthService
-	runtime operatorAuthRuntime
 }
 
 func composeOperatorAuth(
@@ -60,6 +59,7 @@ func composeOperatorAuth(
 	router chi.Router,
 	principalProvider principal.Provider,
 	publicOrigin string,
+	runtime operatorAuthRuntime,
 ) (*operatorAuthLifecycle, error) {
 	if cfg == nil {
 		return nil, errors.New("telegram authentication configuration is required")
@@ -67,30 +67,10 @@ func composeOperatorAuth(
 	if !cfg.TelegramAuthEnabled {
 		return nil, nil
 	}
-	if !cfg.WebOnly {
-		return nil, errors.New("WEB_ONLY=false requires configured Telegram account adapters")
-	}
-	if failure := validateOperatorAuthConfig(cfg); failure != nil {
-		return nil, failure
+	if runtime == nil {
+		return nil, errors.New("telegram authentication requires the shared telegram account runtime")
 	}
 
-	sessionStore, failure := pg.NewTelegramSessionStore(
-		database,
-		cfg.TelegramSessionKeyID,
-		cfg.TelegramSessionEncryptionKey.Bytes(),
-	)
-	if failure != nil {
-		return nil, fmt.Errorf("construct encrypted telegram session store: %w", failure)
-	}
-	factory := gotdclient.New(sessionStore)
-	runtime, failure := accountowner.NewRegistry(accountowner.RegistryConfig{
-		Factory: factory,
-		AppID:   cfg.TelegramAPIID,
-		AppHash: cfg.TelegramAPIHash.Value(),
-	})
-	if failure != nil {
-		return nil, fmt.Errorf("construct telegram account runtime: %w", failure)
-	}
 	provider := transportoperatoraccountauth.New(runtime)
 	persistence := pgoperatoraccounts.New(database)
 	service := applicationoperatoraccountauth.NewService(persistence, provider, runtime)
@@ -103,7 +83,7 @@ func composeOperatorAuth(
 		status:   operatoraccountrequests.NewStatus(service),
 	}
 
-	return orchestrateOperatorAuth(rootContext, service, runtime, func() {
+	return orchestrateOperatorAuth(rootContext, service, func() {
 		registerLiveOperatorAuth(
 			router,
 			ports,
@@ -115,16 +95,15 @@ func composeOperatorAuth(
 }
 
 // orchestrateOperatorAuth is deliberately limited to lifecycle ordering. All
-// production dependencies are constructed explicitly in composeOperatorAuth;
+// production dependencies are constructed explicitly by root composition;
 // this seam only lets ordering tests use already-created values.
 func orchestrateOperatorAuth(
 	rootContext context.Context,
 	service operatorAuthService,
-	runtime operatorAuthRuntime,
 	register func(),
 ) (*operatorAuthLifecycle, error) {
 	if failure := service.Recover(rootContext); failure != nil {
-		cleanupFailure := stopOperatorAuthRuntime(context.Background(), service, runtime)
+		cleanupFailure := stopOperatorAuthService(context.Background(), service)
 		if cleanupFailure != nil {
 			return nil, errors.Join(
 				fmt.Errorf("recover operator account authentication: %w", failure),
@@ -135,23 +114,33 @@ func orchestrateOperatorAuth(
 	}
 
 	register()
-	return &operatorAuthLifecycle{service: service, runtime: runtime}, nil
+	return &operatorAuthLifecycle{service: service}, nil
 }
 
-func validateOperatorAuthConfig(cfg *config.Config) error {
+func validateTelegramRuntimeConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("telegram runtime configuration is required")
+	}
 	if cfg.TelegramAPIID <= 0 {
-		return errors.New("telegram configuration TELEGRAM_API_ID must be positive when authentication is enabled")
+		return errors.New("telegram configuration TELEGRAM_API_ID must be positive when the shared runtime is enabled")
 	}
 	if !cfg.TelegramAPIHash.Configured() {
-		return errors.New("telegram configuration TELEGRAM_API_HASH is required when authentication is enabled")
+		return errors.New("telegram configuration TELEGRAM_API_HASH is required when the shared runtime is enabled")
 	}
 	if cfg.TelegramSessionKeyID == "" {
-		return errors.New("telegram configuration TELEGRAM_SESSION_KEY_ID is required when authentication is enabled")
+		return errors.New("telegram configuration TELEGRAM_SESSION_KEY_ID is required when the shared runtime is enabled")
 	}
 	if !cfg.TelegramSessionEncryptionKey.Configured() {
-		return errors.New("telegram configuration TELEGRAM_SESSION_ENCRYPTION_KEY is required when authentication is enabled")
+		return errors.New("telegram configuration TELEGRAM_SESSION_ENCRYPTION_KEY is required when the shared runtime is enabled")
 	}
 	return nil
+}
+
+// validateOperatorAuthConfig remains as a compatibility seam for direct
+// package tests. Runtime validation is owned by root composition and is
+// intentionally independent of the HTTP route flag.
+func validateOperatorAuthConfig(cfg *config.Config) error {
+	return validateTelegramRuntimeConfig(cfg)
 }
 
 func operatorAuthRouteOptions(cfg *config.Config) operatoraccounts.RouteOptions {
@@ -202,39 +191,46 @@ func registerDisabledOperatorAuth(router chi.Router, principalProvider principal
 
 var operatorAuthShutdownTimeout = 10 * time.Second
 
-func stopOperatorAuthRuntime(
+func stopOperatorAuthService(
 	ctx context.Context,
 	service operatorAuthService,
-	runtime operatorAuthRuntime,
 ) error {
-	var failures []error
-	if service != nil {
-		serviceContext, cancel := context.WithTimeout(ctx, operatorAuthShutdownTimeout)
-		failure := service.Shutdown(serviceContext)
-		cancel()
-		if failure != nil {
-			failures = append(failures, fmt.Errorf("shut down operator account authentication service: %w", failure))
-		}
+	if service == nil {
+		return nil
 	}
-	if runtime != nil {
-		runtimeContext, cancel := context.WithTimeout(context.Background(), operatorAuthShutdownTimeout)
-		failure := runtime.Stop(runtimeContext)
-		cancel()
-		if failure != nil {
-			failures = append(failures, fmt.Errorf("stop Telegram account runtime: %w", failure))
-		}
+	serviceContext, cancel := context.WithTimeout(ctx, operatorAuthShutdownTimeout)
+	failure := service.Shutdown(serviceContext)
+	cancel()
+	if failure != nil {
+		return fmt.Errorf("shut down operator account authentication service: %w", failure)
 	}
-	return errors.Join(failures...)
+	return nil
 }
 
-func shutdownApplicationResources(lifecycle *operatorAuthLifecycle, database operatorAuthDatabaseCloser) error {
+func stopSharedRuntime(ctx context.Context, runtime sharedRuntimeStopper) error {
+	if runtime == nil {
+		return nil
+	}
+	runtimeContext, cancel := context.WithTimeout(ctx, operatorAuthShutdownTimeout)
+	failure := runtime.Stop(runtimeContext)
+	cancel()
+	if failure != nil {
+		return fmt.Errorf("stop telegram account runtime: %w", failure)
+	}
+	return nil
+}
+
+func shutdownApplicationResources(
+	lifecycle *operatorAuthLifecycle,
+	runtime sharedRuntimeStopper,
+	database operatorAuthDatabaseCloser,
+) error {
 	var service operatorAuthService
-	var runtime operatorAuthRuntime
 	if lifecycle != nil {
 		service = lifecycle.service
-		runtime = lifecycle.runtime
 	}
-	failure := stopOperatorAuthRuntime(context.Background(), service, runtime)
+	failure := stopOperatorAuthService(context.Background(), service)
+	failure = errors.Join(failure, stopSharedRuntime(context.Background(), runtime))
 	if database != nil {
 		database.Close()
 	}

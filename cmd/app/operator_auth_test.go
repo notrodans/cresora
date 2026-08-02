@@ -32,6 +32,7 @@ func TestComposeOperatorAuthDisabledDoesNotConstructRuntimeOrAdapter(t *testing.
 		chi.NewRouter(),
 		stubPrincipalProvider(),
 		cfg.PublicOrigin.String(),
+		nil,
 	)
 	if failure != nil {
 		t.Fatalf("compose disabled operator authentication: %v", failure)
@@ -49,7 +50,7 @@ func TestComposeOperatorAuthDisabledDoesNotConstructRuntimeOrAdapter(t *testing.
 	}
 }
 
-func TestComposeOperatorAuthUnsupportedNonWebOnlyDoesNotConstructRuntime(t *testing.T) {
+func TestComposeOperatorAuthRequiresSharedRuntime(t *testing.T) {
 	cfg := validOperatorAuthConfig(t)
 	cfg.WebOnly = false
 
@@ -60,28 +61,23 @@ func TestComposeOperatorAuthUnsupportedNonWebOnlyDoesNotConstructRuntime(t *test
 		chi.NewRouter(),
 		stubPrincipalProvider(),
 		cfg.PublicOrigin.String(),
+		nil,
 	)
 	if lifecycle != nil {
-		t.Fatal("unsupported non-web-only authentication returned a live lifecycle")
+		t.Fatal("authentication without a shared runtime returned a live lifecycle")
 	}
-	if failure == nil || !containsText(failure.Error(), "WEB_ONLY=false") {
-		t.Fatalf("unsupported non-web-only failure = %v", failure)
-	}
-
-	if _, _, failure := configureTelegramDeliveryAdapters(cfg, nil); failure == nil {
-		t.Fatal("unsupported non-web-only delivery mode was accepted")
+	if failure == nil || !containsText(failure.Error(), "shared telegram account runtime") {
+		t.Fatalf("missing shared runtime failure = %v", failure)
 	}
 }
 
 func TestOrchestrateOperatorAuthRecoversBeforeRegisteringLiveRoute(t *testing.T) {
 	events := make([]string, 0, 3)
-	runtime := &fakeOperatorAuthRuntime{events: &events}
 	service := &fakeOperatorAuthService{events: &events}
 
 	lifecycle, failure := orchestrateOperatorAuth(
 		context.Background(),
 		service,
-		runtime,
 		func() { events = append(events, "route") },
 	)
 	if failure != nil {
@@ -98,13 +94,11 @@ func TestOrchestrateOperatorAuthRecoversBeforeRegisteringLiveRoute(t *testing.T)
 
 func TestComposeOperatorAuthRecoveryFailureDoesNotRegisterLiveRoute(t *testing.T) {
 	events := make([]string, 0, 8)
-	runtime := &fakeOperatorAuthRuntime{events: &events}
 	expected := errors.New("recovery failed")
 	service := &fakeOperatorAuthService{events: &events, recoverErr: expected}
 	lifecycle, failure := orchestrateOperatorAuth(
 		context.Background(),
 		service,
-		runtime,
 		func() { events = append(events, "route") },
 	)
 	if lifecycle != nil {
@@ -113,8 +107,8 @@ func TestComposeOperatorAuthRecoveryFailureDoesNotRegisterLiveRoute(t *testing.T
 	if !errors.Is(failure, expected) {
 		t.Fatalf("recovery failure = %v, want %v", failure, expected)
 	}
-	if got := events[len(events)-2:]; !reflect.DeepEqual(got, []string{"shutdown", "stop"}) {
-		t.Fatalf("recovery cleanup order = %v, want [shutdown stop]", got)
+	if got := events[len(events)-1:]; !reflect.DeepEqual(got, []string{"shutdown"}) {
+		t.Fatalf("recovery cleanup order = %v, want [shutdown]", got)
 	}
 	for _, event := range events {
 		if event == "route" {
@@ -133,8 +127,8 @@ func TestShutdownApplicationResourcesStopsHTTPThenServiceRuntimeAndDatabase(t *t
 	service := &fakeOperatorAuthService{events: &events}
 	runtime := &fakeOperatorAuthRuntime{events: &events}
 	database := fakeOperatorAuthDatabase{events: &events}
-	lifecycle := &operatorAuthLifecycle{service: service, runtime: runtime}
-	if failure := shutdownApplicationResources(lifecycle, database); failure != nil {
+	lifecycle := &operatorAuthLifecycle{service: service}
+	if failure := shutdownApplicationResources(lifecycle, runtime, database); failure != nil {
 		t.Fatalf("shutdown application resources: %v", failure)
 	}
 
@@ -144,7 +138,7 @@ func TestShutdownApplicationResourcesStopsHTTPThenServiceRuntimeAndDatabase(t *t
 	}
 }
 
-func TestStopOperatorAuthRuntimeUsesFreshRuntimeContextAfterServiceTimeout(t *testing.T) {
+func TestStopOperatorAuthServiceUsesShutdownTimeout(t *testing.T) {
 	originalTimeout := operatorAuthShutdownTimeout
 	operatorAuthShutdownTimeout = time.Millisecond
 	defer func() { operatorAuthShutdownTimeout = originalTimeout }()
@@ -157,22 +151,12 @@ func TestStopOperatorAuthRuntimeUsesFreshRuntimeContextAfterServiceTimeout(t *te
 			return ctx.Err()
 		},
 	}
-	runtime := &fakeOperatorAuthRuntime{
-		events: &events,
-		stop: func(ctx context.Context) error {
-			if failure := ctx.Err(); failure != nil {
-				return failure
-			}
-			return nil
-		},
-	}
-
-	failure := stopOperatorAuthRuntime(context.Background(), service, runtime)
+	failure := stopOperatorAuthService(context.Background(), service)
 	if failure == nil || !errors.Is(failure, context.DeadlineExceeded) {
 		t.Fatalf("service shutdown failure = %v, want deadline exceeded", failure)
 	}
-	if !reflect.DeepEqual(events, []string{"shutdown", "stop"}) {
-		t.Fatalf("shutdown events = %v, want [shutdown stop]", events)
+	if !reflect.DeepEqual(events, []string{"shutdown"}) {
+		t.Fatalf("shutdown events = %v, want [shutdown]", events)
 	}
 }
 

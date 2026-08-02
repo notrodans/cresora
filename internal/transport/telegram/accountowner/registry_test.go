@@ -3,6 +3,7 @@ package accountowner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	gotdtelegram "github.com/gotd/td/telegram"
 
 	applicationroot "github.com/notrodans/cresora/internal/application"
-	operatoraccountauth "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
 	"github.com/notrodans/cresora/internal/transport/telegram/gotdclient"
@@ -25,10 +26,13 @@ type registryOwner struct {
 	stopped         chan struct{}
 	releaseTeardown chan struct{}
 
-	stopOnce     sync.Once
-	doneOnce     sync.Once
-	closed       atomic.Bool
-	holdTeardown atomic.Bool
+	stopOnce       sync.Once
+	doneOnce       sync.Once
+	closed         atomic.Bool
+	holdTeardown   atomic.Bool
+	executeEntered chan struct{}
+	executeOnce    sync.Once
+	allowExecute   <-chan struct{}
 }
 
 func newRegistryOwner() *registryOwner {
@@ -81,6 +85,13 @@ func (owner *registryOwner) Wait(ctx context.Context) error {
 }
 
 func (owner *registryOwner) Execute(ctx context.Context, callback ClientCallback) error {
+	if owner.executeEntered != nil {
+		owner.executeOnce.Do(func() { close(owner.executeEntered) })
+		select {
+		case <-owner.allowExecute:
+		case <-ctx.Done():
+		}
+	}
 	if owner.closed.Load() {
 		return ErrAccountStopped
 	}
@@ -88,9 +99,11 @@ func (owner *registryOwner) Execute(ctx context.Context, callback ClientCallback
 }
 
 type registryOwnerFactory struct {
-	mu     sync.Mutex
-	owners []*registryOwner
-	fail   error
+	mu             sync.Mutex
+	owners         []*registryOwner
+	fail           error
+	executeEntered chan struct{}
+	allowExecute   <-chan struct{}
 }
 
 type registryOwnerLifecycle struct {
@@ -127,6 +140,7 @@ func (factory *registryOwnerFactory) build(
 		return nil, factory.fail
 	}
 	owner := newRegistryOwner()
+	owner.executeEntered, owner.allowExecute = factory.executeEntered, factory.allowExecute
 	factory.owners = append(factory.owners, owner)
 	return owner, nil
 }
@@ -143,8 +157,8 @@ func (factory *registryOwnerFactory) owner(index int) *registryOwner {
 	return factory.owners[index]
 }
 
-func registryTarget() operatoraccountauth.AuthTarget {
-	return operatoraccountauth.AuthTarget{
+func registryTarget() operatoraccounts.RuntimeTarget {
+	return operatoraccounts.RuntimeTarget{
 		Actor:     applicationroot.Actor{OperatorID: uuid.MustParse("11111111-1111-4111-8111-111111111111")},
 		AccountID: operatoraccount.Identity(uuid.MustParse("22222222-2222-4222-8222-222222222222")),
 		Status:    operatoraccount.StatusAuthenticating,
@@ -216,14 +230,17 @@ func TestRegistryStopAccountAcceptsDisconnectingRecoveryTarget(t *testing.T) {
 	}
 }
 
-func TestRegistryRejectsActiveStopTarget(t *testing.T) {
+func TestRegistryAllowsActiveStopTarget(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	target := registryTarget()
 	target.Status = operatoraccount.StatusActive
 
-	if failure := registry.StopAccount(context.Background(), target); !errors.Is(failure, ErrInvalidAdmission) {
-		t.Fatalf("StopAccount() error = %v, want ErrInvalidAdmission", failure)
+	if failure := registry.StopAccount(context.Background(), target); failure != nil {
+		t.Fatalf("StopAccount() error = %v, want nil", failure)
+	}
+	if failure := registry.Execute(context.Background(), target, func(context.Context, *gotdtelegram.Client) error { return nil }); !errors.Is(failure, ErrAccountStopped) {
+		t.Fatalf("late active Execute() error = %v, want ErrAccountStopped", failure)
 	}
 }
 
@@ -309,6 +326,157 @@ func TestRegistrySerializesOperationsPerAccount(t *testing.T) {
 	wait.Wait()
 	if got := maximum.Load(); got != 1 {
 		t.Fatalf("maximum concurrent operations = %d, want 1", got)
+	}
+}
+
+func TestRegistryStopBeforeFirstOwnerFencesEqualStaleAndNewer(t *testing.T) {
+	factory := new(registryOwnerFactory)
+	registry := newFakeRegistry(t, factory, RegistryConfig{})
+	stopped := registryTarget()
+	stopped.Version = 2
+	if failure := registry.StopAccount(context.Background(), stopped); failure != nil {
+		t.Fatalf("StopAccount() error = %v", failure)
+	}
+	for _, version := range []operatoraccount.Version{1, 2} {
+		target := stopped
+		target.Version = version
+		if failure := registry.Execute(context.Background(), target, func(context.Context, *gotdtelegram.Client) error { t.Fatal("fenced callback invoked"); return nil }); !errors.Is(failure, ErrAccountStopped) {
+			t.Fatalf("version %d error = %v", version, failure)
+		}
+	}
+	newer := stopped
+	newer.Version = 3
+	if failure := registry.Execute(context.Background(), newer, func(context.Context, *gotdtelegram.Client) error { return nil }); failure != nil {
+		t.Fatalf("newer Execute() error = %v", failure)
+	}
+	if got := factory.count(); got != 1 {
+		t.Fatalf("owner constructions = %d, want 1", got)
+	}
+}
+
+func TestRegistryNoSlotFenceAdvancesMonotonically(t *testing.T) {
+	factory := new(registryOwnerFactory)
+	registry := newFakeRegistry(t, factory, RegistryConfig{})
+	target := registryTarget()
+	target.Version = 2
+	if failure := registry.StopAccount(context.Background(), target); failure != nil {
+		t.Fatal(failure)
+	}
+	target.Version = 4
+	if failure := registry.StopAccount(context.Background(), target); failure != nil {
+		t.Fatal(failure)
+	}
+	for version := operatoraccount.Version(2); version <= 4; version++ {
+		stale := target
+		stale.Version = version
+		if failure := registry.Execute(context.Background(), stale, func(context.Context, *gotdtelegram.Client) error { t.Fatal("fenced callback invoked"); return nil }); !errors.Is(failure, ErrAccountStopped) {
+			t.Fatalf("version %d error = %v", version, failure)
+		}
+	}
+	newer := target
+	newer.Version = 5
+	if failure := registry.Execute(context.Background(), newer, func(context.Context, *gotdtelegram.Client) error { return nil }); failure != nil {
+		t.Fatal(failure)
+	}
+}
+
+func TestRegistryFenceStateIsBounded(t *testing.T) {
+	factory := new(registryOwnerFactory)
+	registry := newFakeRegistry(t, factory, RegistryConfig{Capacity: 2})
+	for index := 1; index <= 20; index++ {
+		target := registryTarget()
+		target.AccountID = operatoraccount.Identity(uuid.MustParse(fmt.Sprintf("33333333-3333-4333-8333-%012d", index)))
+		target.Version = operatoraccount.Version(index)
+		if failure := registry.StopAccount(context.Background(), target); failure != nil {
+			t.Fatal(failure)
+		}
+	}
+	registry.mu.Lock()
+	fences, limit, slots := len(registry.fences), registry.fenceLimit, len(registry.slots)
+	registry.mu.Unlock()
+	if fences > limit {
+		t.Fatalf("fence state size = %d, want <= %d", fences, limit)
+	}
+	if slots != 0 {
+		t.Fatalf("slots = %d, want 0", slots)
+	}
+}
+
+func TestRegistryProtectedFenceSurvivesBoundedEviction(t *testing.T) {
+	factory := new(registryOwnerFactory)
+	registry := newFakeRegistry(t, factory, RegistryConfig{Capacity: 1})
+	target := registryTarget()
+	if failure := registry.Execute(context.Background(), target, func(context.Context, *gotdtelegram.Client) error { return nil }); failure != nil {
+		t.Fatalf("initial Execute() error = %v", failure)
+	}
+	owner := factory.owner(0)
+	owner.holdTeardown.Store(true)
+	owner.releaseTeardown = make(chan struct{})
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- registry.StopAccount(context.Background(), target) }()
+	select {
+	case <-owner.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for protected stop fence")
+	}
+	other := target
+	other.AccountID = operatoraccount.Identity(uuid.MustParse("44444444-4444-4444-8444-444444444444"))
+	if failure := registry.StopAccount(context.Background(), other); !errors.Is(failure, ErrFenceCapacity) {
+		t.Fatalf("other StopAccount() error = %v, want ErrFenceCapacity", failure)
+	}
+	registry.mu.Lock()
+	fence, exists := registry.fences[keyFor(target)]
+	_, otherRecorded := registry.fences[keyFor(other)]
+	fences := len(registry.fences)
+	registry.mu.Unlock()
+	if !exists || !fence.protected || fence.version != target.Version {
+		t.Fatalf("protected fence = %#v, exists = %t, want protected version %d", fence, exists, target.Version)
+	}
+	if otherRecorded {
+		t.Fatal("failed stop retained an uncommitted other-account fence")
+	}
+	if fences > registry.config.Capacity {
+		t.Fatalf("fence state size = %d, want <= %d", fences, registry.config.Capacity)
+	}
+	close(owner.releaseTeardown)
+	if failure := <-stopDone; failure != nil {
+		t.Fatalf("StopAccount() error after release = %v", failure)
+	}
+	if failure := registry.Execute(context.Background(), other, func(context.Context, *gotdtelegram.Client) error { return nil }); failure != nil {
+		t.Fatalf("other account was falsely fenced after capacity failure: %v", failure)
+	}
+}
+
+func TestRegistryFencePreventsLateCallback(t *testing.T) {
+	entered := make(chan struct{})
+	factory := &registryOwnerFactory{executeEntered: entered, allowExecute: make(chan struct{})}
+	registry := newFakeRegistry(t, factory, RegistryConfig{})
+	target := registryTarget()
+	calls := atomic.Int32{}
+	done := make(chan error, 1)
+	go func() {
+		done <- registry.Execute(context.Background(), target, func(context.Context, *gotdtelegram.Client) error { calls.Add(1); return nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for execute barrier")
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- registry.StopAccount(context.Background(), target) }()
+	select {
+	case failure := <-stopDone:
+		if failure != nil {
+			t.Fatal(failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stop")
+	}
+	if failure := <-done; !errors.Is(failure, ErrAccountStopped) {
+		t.Fatalf("operation error = %v", failure)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("callbacks after fence = %d", got)
 	}
 }
 

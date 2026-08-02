@@ -15,14 +15,20 @@ import (
 
 // Represents one leased PostgreSQL delivery task
 type claimed struct {
-	database *pgxpool.Pool
-	route    delivery.Route
-	identity coordinates.Coordinates
-	token    delivery.Token
+	database  *pgxpool.Pool
+	admission delivery.AccountAdmission
+	identity  coordinates.Coordinates
+	token     delivery.Token
 }
 
+var _ delivery.AdmittedTask = claimed{}
+
 func (task claimed) Route() delivery.Route {
-	return task.route
+	return task.admission.Route
+}
+
+func (task claimed) Admission() delivery.AccountAdmission {
+	return task.admission
 }
 
 func (task claimed) Renew(context context.Context, duration time.Duration) error {

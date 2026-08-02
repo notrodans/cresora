@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	operatoraccountauth "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
 	"github.com/notrodans/cresora/internal/transport/telegram/gotdclient"
@@ -29,6 +31,9 @@ var (
 	// ErrRuntimeCapacity means that all runtime slots are occupied by accounts
 	// that are not idle and therefore cannot be evicted safely.
 	ErrRuntimeCapacity = errors.New("telegram account runtime capacity is exhausted")
+	// ErrFenceCapacity means that a new stop fence cannot be recorded without
+	// evicting a protected fence for an account that is still stopping.
+	ErrFenceCapacity = errors.New("telegram account runtime fence capacity is exhausted")
 	// ErrNilCallback means that no operation was supplied to Execute.
 	ErrNilCallback = errors.New("telegram account runtime callback is required")
 )
@@ -37,6 +42,10 @@ const (
 	defaultRuntimeCapacity     = 32
 	defaultRuntimeIdleTimeout  = 5 * time.Minute
 	defaultRuntimeDrainTimeout = 5 * time.Second
+
+	runtimeStartOpen uint32 = iota
+	runtimeStartStarted
+	runtimeStartFenced
 )
 
 // RegistryConfig controls the bounded, process-local account runtime.
@@ -85,10 +94,16 @@ type ownerBuilder func(
 type Registry struct {
 	mu sync.Mutex
 
-	config  RegistryConfig
-	build   ownerBuilder
-	slots   map[accountKey]*accountSlot
-	stopped bool
+	config RegistryConfig
+	build  ownerBuilder
+	slots  map[accountKey]*accountSlot
+
+	// fences is bounded by fenceLimit. Protected records belong to slots that
+	// are still stopping and cannot be evicted until those slots are torn down.
+	fences     map[accountKey]stoppedFence
+	fenceClock uint64
+	fenceLimit int
+	stopped    bool
 
 	context     context.Context
 	cancel      context.CancelFunc
@@ -105,17 +120,23 @@ type accountKey struct {
 	accountID  uuid.UUID
 }
 
+type stoppedFence struct {
+	version   operatoraccount.Version
+	stamp     uint64
+	protected bool
+}
+
 type accountSlot struct {
 	mu sync.Mutex
 
-	gate         chan struct{}
-	current      *runtimeEntry
-	closed       bool
-	stopping     bool
-	fenced       bool
-	fenceVersion operatoraccount.Version
-	generation   uint64
-	teardownMu   sync.Mutex
+	gate       chan struct{}
+	current    *runtimeEntry
+	closed     bool
+	stopping   bool
+	generation uint64
+	teardownMu sync.Mutex
+	startMu    sync.Mutex
+	startState atomic.Uint32
 
 	refs         int
 	active       int
@@ -127,7 +148,7 @@ type accountSlot struct {
 type runtimeEntry struct {
 	registry   *Registry
 	slot       *accountSlot
-	target     operatoraccountauth.AuthTarget
+	target     operatoraccounts.RuntimeTarget
 	generation uint64
 
 	mu       sync.Mutex
@@ -145,13 +166,15 @@ type runtimeEntry struct {
 // when the caller no longer needs to retain the admission.
 type Handle struct {
 	entry  *runtimeEntry
-	target operatoraccountauth.AuthTarget
+	target operatoraccounts.RuntimeTarget
 
 	mu     sync.Mutex
 	closed bool
 }
 
-var _ operatoraccountauth.RuntimeStopper = (*Registry)(nil)
+var _ interface {
+	StopAccount(context.Context, operatoraccounts.RuntimeTarget) error
+} = (*Registry)(nil)
 
 // NewRegistry constructs a runtime registry without starting any gotd client.
 // Client construction and Run both remain lazy until Open is called.
@@ -194,6 +217,8 @@ func newRegistry(config RegistryConfig, build ownerBuilder) (*Registry, error) {
 		config:     config,
 		build:      build,
 		slots:      make(map[accountKey]*accountSlot),
+		fences:     make(map[accountKey]stoppedFence),
+		fenceLimit: config.Capacity,
 		context:    runtimeContext,
 		cancel:     cancel,
 		reaperDone: make(chan struct{}),
@@ -206,7 +231,7 @@ func newRegistry(config RegistryConfig, build ownerBuilder) (*Registry, error) {
 // Open admits target and waits for the current owner to become ready. Existing
 // owners are reused; readiness is a current-state wait and is therefore safe
 // across gotd reconnects.
-func (registry *Registry) Open(ctx context.Context, target operatoraccountauth.AuthTarget) (*Handle, error) {
+func (registry *Registry) Open(ctx context.Context, target operatoraccounts.RuntimeTarget) (*Handle, error) {
 	if failure := validateAdmission(target); failure != nil {
 		return nil, failure
 	}
@@ -240,7 +265,7 @@ func (registry *Registry) Open(ctx context.Context, target operatoraccountauth.A
 // while holding the account gate, and releases the admission afterwards.
 func (registry *Registry) Execute(
 	ctx context.Context,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 	callback ClientCallback,
 ) error {
 	if callback == nil {
@@ -294,7 +319,7 @@ func (handle *Handle) Close() error {
 // registry lock is never held while waiting on a callback or gotd.
 func (registry *Registry) StopAccount(
 	ctx context.Context,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 ) error {
 	if failure := validateStopTarget(target); failure != nil {
 		return failure
@@ -307,32 +332,51 @@ func (registry *Registry) StopAccount(
 		return nil
 	}
 	slot := registry.slots[key]
-	if slot == nil || slot.current == nil {
+	if slot == nil {
+		failure := registry.recordFenceLocked(key, target.Version, false)
 		registry.mu.Unlock()
-		return nil
+		return failure
 	}
-	entry := slot.current
-	if entry.target.Actor != target.Actor || entry.target.AccountID != target.AccountID || entry.target.Version != target.Version {
-		registry.mu.Unlock()
-		return ErrStaleAdmission
-	}
-	if entry.target.Status != target.Status {
-		registry.mu.Unlock()
-		return ErrInvalidAdmission
-	}
+
 	slot.mu.Lock()
-	if !slot.stopping {
-		slot.closed = true
-		slot.stopping = true
+	entry := slot.current
+	if entry != nil {
+		if entry.target.Actor != target.Actor || entry.target.AccountID != target.AccountID || entry.target.Version != target.Version {
+			slot.mu.Unlock()
+			registry.mu.Unlock()
+			return ErrStaleAdmission
+		}
+		if entry.target.Status != target.Status {
+			slot.mu.Unlock()
+			registry.mu.Unlock()
+			return ErrInvalidAdmission
+		}
 	}
-	slot.fenced = true
-	slot.fenceVersion = target.Version
-	cancel := slot.closeAdmissionLocked()
+	if failure := registry.recordFenceLocked(key, target.Version, entry != nil); failure != nil {
+		slot.mu.Unlock()
+		registry.mu.Unlock()
+		return failure
+	}
+
+	var cancel context.CancelFunc
+	if entry != nil {
+		if !slot.stopping {
+			slot.closed = true
+			slot.stopping = true
+		}
+		cancel = slot.closeAdmissionLocked()
+	}
 	slot.mu.Unlock()
+	if entry != nil {
+		slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartFenced)
+	}
 	registry.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
+	}
+	if entry == nil {
+		return nil
 	}
 	return registry.teardown(slot, entry, ctx)
 }
@@ -346,16 +390,18 @@ func (registry *Registry) Stop(ctx context.Context) error {
 		registry.mu.Lock()
 		registry.stopped = true
 		for _, slot := range registry.slots {
+			slot.mu.Lock()
 			if slot.current == nil {
+				slot.mu.Unlock()
 				continue
 			}
-			slot.mu.Lock()
 			slot.closed = true
 			slot.stopping = true
 			if cancel := slot.closeAdmissionLocked(); cancel != nil {
 				cancels = append(cancels, cancel)
 			}
 			slot.mu.Unlock()
+			slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartFenced)
 		}
 		registry.mu.Unlock()
 		for _, cancel := range cancels {
@@ -387,7 +433,10 @@ func (registry *Registry) Stop(ctx context.Context) error {
 	registry.mu.Lock()
 	complete := true
 	for _, slot := range registry.slots {
-		if slot.current != nil {
+		slot.mu.Lock()
+		current := slot.current
+		slot.mu.Unlock()
+		if current != nil {
 			complete = false
 			break
 		}
@@ -414,19 +463,88 @@ func (registry *Registry) stopEntries() []struct {
 		entry *runtimeEntry
 	}, 0, len(registry.slots))
 	for _, slot := range registry.slots {
-		if slot.current != nil {
+		slot.mu.Lock()
+		entry := slot.current
+		slot.mu.Unlock()
+		if entry != nil {
 			entries = append(entries, struct {
 				slot  *accountSlot
 				entry *runtimeEntry
-			}{slot: slot, entry: slot.current})
+			}{slot: slot, entry: entry})
 		}
 	}
 	return entries
 }
 
+// recordFenceLocked records the greatest stopped version for key. The caller
+// must hold registry.mu.
+func (registry *Registry) recordFenceLocked(key accountKey, version operatoraccount.Version, protected bool) error {
+	fence, exists := registry.fences[key]
+	if exists {
+		if version < fence.version {
+			return ErrStaleAdmission
+		}
+		if version > fence.version {
+			fence.version = version
+		}
+		fence.protected = fence.protected || protected
+	} else {
+		fence = stoppedFence{version: version, protected: protected}
+	}
+	if !exists {
+		if registry.fenceLimit <= 0 {
+			return ErrFenceCapacity
+		}
+		if len(registry.fences) >= registry.fenceLimit {
+			oldestKey, evictable := registry.oldestEvictableFenceLocked()
+			if !evictable {
+				return ErrFenceCapacity
+			}
+			delete(registry.fences, oldestKey)
+		}
+	}
+	registry.fenceClock++
+	fence.stamp = registry.fenceClock
+	registry.fences[key] = fence
+	return nil
+}
+
+func (registry *Registry) oldestEvictableFenceLocked() (accountKey, bool) {
+	var oldestKey accountKey
+	var oldest uint64
+	found := false
+	for key, fence := range registry.fences {
+		if fence.protected || (found && fence.stamp >= oldest) {
+			continue
+		}
+		oldestKey, oldest, found = key, fence.stamp, true
+	}
+	return oldestKey, found
+}
+
+func (registry *Registry) unprotectFenceLocked(key accountKey, version operatoraccount.Version) {
+	fence, exists := registry.fences[key]
+	if !exists || fence.version != version {
+		return
+	}
+	fence.protected = false
+	registry.fences[key] = fence
+	registry.trimFencesLocked()
+}
+
+func (registry *Registry) trimFencesLocked() {
+	for len(registry.fences) > registry.fenceLimit {
+		oldestKey, evictable := registry.oldestEvictableFenceLocked()
+		if !evictable {
+			return
+		}
+		delete(registry.fences, oldestKey)
+	}
+}
+
 func (registry *Registry) reserve(
 	ctx context.Context,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 ) (*runtimeEntry, error) {
 	key := keyFor(target)
 	for {
@@ -434,6 +552,10 @@ func (registry *Registry) reserve(
 		if registry.stopped {
 			registry.mu.Unlock()
 			return nil, ErrRegistryStopped
+		}
+		if fence, exists := registry.fences[key]; exists && target.Version <= fence.version {
+			registry.mu.Unlock()
+			return nil, ErrAccountStopped
 		}
 		slot := registry.slots[key]
 		if slot == nil {
@@ -445,7 +567,7 @@ func (registry *Registry) reserve(
 				}
 				continue
 			}
-			if registry.liveCountLocked() >= registry.config.Capacity {
+			if len(registry.slots) >= registry.config.Capacity {
 				registry.mu.Unlock()
 				return nil, ErrRuntimeCapacity
 			}
@@ -457,13 +579,6 @@ func (registry *Registry) reserve(
 		current := slot.current
 		stopping := slot.stopping
 		closed := slot.closed
-		fenced := slot.fenced
-		fenceVersion := slot.fenceVersion
-		if current == nil && closed && fenced && !stopping && target.Version > fenceVersion {
-			slot.closed = false
-			slot.fenced = false
-			closed = false
-		}
 		slot.mu.Unlock()
 
 		if current != nil {
@@ -492,6 +607,7 @@ func (registry *Registry) reserve(
 					slot.stopping = true
 					cancel := slot.closeAdmissionLocked()
 					slot.mu.Unlock()
+					slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartFenced)
 					registry.mu.Unlock()
 					if cancel != nil {
 						cancel()
@@ -531,7 +647,7 @@ func (registry *Registry) reserve(
 
 func (registry *Registry) newEntry(
 	slot *accountSlot,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 ) *runtimeEntry {
 	return &runtimeEntry{
 		registry: registry,
@@ -642,7 +758,7 @@ func (registry *Registry) runEntry(entry *runtimeEntry, owner ownerRuntime) {
 
 func (registry *Registry) checkAdmission(
 	entry *runtimeEntry,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 ) error {
 	entry.slot.mu.Lock()
 	defer entry.slot.mu.Unlock()
@@ -652,7 +768,7 @@ func (registry *Registry) checkAdmission(
 func admissionErrorLocked(
 	slot *accountSlot,
 	entry *runtimeEntry,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 ) error {
 	if slot.closed || slot.stopping {
 		return ErrAccountStopped
@@ -671,7 +787,7 @@ func admissionErrorLocked(
 
 func (entry *runtimeEntry) execute(
 	ctx context.Context,
-	target operatoraccountauth.AuthTarget,
+	target operatoraccounts.RuntimeTarget,
 	callback ClientCallback,
 ) error {
 	slot := entry.slot
@@ -716,13 +832,30 @@ func (entry *runtimeEntry) execute(
 	if failure := owner.WaitReady(operationContext); failure != nil {
 		return failure
 	}
+	slot.startMu.Lock()
+	defer func() {
+		slot.startState.Store(runtimeStartOpen)
+		slot.startMu.Unlock()
+	}()
+	slot.startState.Store(runtimeStartOpen)
 	slot.mu.Lock()
 	failure := admissionErrorLocked(slot, entry, target)
 	slot.mu.Unlock()
 	if failure != nil {
 		return failure
 	}
-	failure = owner.Execute(operationContext, callback)
+	if !slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartStarted) {
+		return ErrAccountStopped
+	}
+	failure = owner.Execute(operationContext, func(callbackContext context.Context, client *gotdtelegram.Client) error {
+		slot.mu.Lock()
+		admissionFailure := admissionErrorLocked(slot, entry, target)
+		slot.mu.Unlock()
+		if admissionFailure != nil {
+			return admissionFailure
+		}
+		return callback(callbackContext, client)
+	})
 	slot.mu.Lock()
 	admissionFailure := admissionErrorLocked(slot, entry, target)
 	slot.mu.Unlock()
@@ -739,18 +872,16 @@ func (registry *Registry) finishStoppedEntry(entry *runtimeEntry) {
 		return
 	}
 	registry.mu.Lock()
+	entry.slot.mu.Lock()
 	if entry.slot.current != nil {
+		entry.slot.mu.Unlock()
 		registry.mu.Unlock()
 		return
 	}
-	entry.slot.mu.Lock()
-	active := entry.slot.active
-	if active == 0 && entry.slot.fenced {
-		entry.slot.stopping = false
-	}
+	active, refs := entry.slot.active, entry.slot.refs
 	entry.slot.mu.Unlock()
 	registry.mu.Unlock()
-	if active == 0 {
+	if active == 0 && refs == 0 {
 		registry.removeSlot(entry.slot)
 	}
 }
@@ -763,11 +894,10 @@ func (entry *runtimeEntry) releaseRef() {
 	entry.slot.lastUsed = time.Now()
 	refs := entry.slot.refs
 	current := entry.slot.current
+	active := entry.slot.active
+	stopping := entry.slot.stopping
 	entry.slot.mu.Unlock()
-	entry.mu.Lock()
-	failed := entry.failed
-	entry.mu.Unlock()
-	if failed && refs == 0 && current == nil {
+	if refs == 0 && current == nil && active == 0 && !stopping {
 		entry.registry.removeSlot(entry.slot)
 	}
 }
@@ -852,17 +982,12 @@ func (registry *Registry) teardown(slot *accountSlot, entry *runtimeEntry, ctx c
 
 func (registry *Registry) finishTeardown(slot *accountSlot, entry *runtimeEntry) {
 	registry.mu.Lock()
+	slot.mu.Lock()
 	if slot.current == entry {
-		slot.mu.Lock()
-		slot.current = nil
-		slot.stopping = false
-		if slot.fenced {
-			slot.closed = true
-		} else {
-			slot.closed = false
-		}
-		slot.mu.Unlock()
+		slot.current, slot.stopping, slot.closed = nil, false, false
 	}
+	slot.mu.Unlock()
+	registry.unprotectFenceLocked(keyFor(entry.target), entry.target.Version)
 	registry.mu.Unlock()
 	registry.removeSlot(slot)
 }
@@ -881,10 +1006,13 @@ func (registry *Registry) boundedContext(ctx context.Context) (context.Context, 
 func (registry *Registry) removeSlot(slot *accountSlot) {
 	registry.mu.Lock()
 	for key, candidate := range registry.slots {
+		if candidate != slot {
+			continue
+		}
 		candidate.mu.Lock()
-		keepFence := candidate.fenced
+		remove := candidate.current == nil && candidate.refs == 0 && candidate.active == 0 && !candidate.stopping
 		candidate.mu.Unlock()
-		if candidate == slot && candidate.current == nil && !keepFence {
+		if remove {
 			delete(registry.slots, key)
 			break
 		}
@@ -905,6 +1033,7 @@ func (registry *Registry) makeCapacityLocked() *runtimeEntry {
 			slot.closed = true
 			slot.stopping = true
 			slot.mu.Unlock()
+			slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartFenced)
 			return entry
 		}
 		slot.mu.Unlock()
@@ -960,6 +1089,7 @@ func (registry *Registry) evictIdle() {
 				slot  *accountSlot
 				entry *runtimeEntry
 			}{slot: slot, entry: entry})
+			slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartFenced)
 		}
 		slot.mu.Unlock()
 	}
@@ -970,7 +1100,7 @@ func (registry *Registry) evictIdle() {
 	}
 }
 
-func validateAdmission(target operatoraccountauth.AuthTarget) error {
+func validateAdmission(target operatoraccounts.RuntimeTarget) error {
 	if failure := validateTarget(target); failure != nil {
 		return failure
 	}
@@ -982,26 +1112,26 @@ func validateAdmission(target operatoraccountauth.AuthTarget) error {
 	}
 }
 
-func validateStopTarget(target operatoraccountauth.AuthTarget) error {
+func validateStopTarget(target operatoraccounts.RuntimeTarget) error {
 	if failure := validateTarget(target); failure != nil {
 		return failure
 	}
 	switch target.Status {
-	case operatoraccount.StatusAuthenticating, operatoraccount.StatusDisconnecting:
+	case operatoraccount.StatusAuthenticating, operatoraccount.StatusActive, operatoraccount.StatusDisconnecting:
 		return nil
 	default:
 		return ErrInvalidAdmission
 	}
 }
 
-func validateTarget(target operatoraccountauth.AuthTarget) error {
+func validateTarget(target operatoraccounts.RuntimeTarget) error {
 	if target.Actor.OperatorID == uuid.Nil || target.AccountID.IsZero() || target.Version == 0 {
 		return ErrInvalidAdmission
 	}
 	return nil
 }
 
-func keyFor(target operatoraccountauth.AuthTarget) accountKey {
+func keyFor(target operatoraccounts.RuntimeTarget) accountKey {
 	return accountKey{
 		operatorID: target.Actor.OperatorID,
 		accountID:  target.AccountID.UUID(),

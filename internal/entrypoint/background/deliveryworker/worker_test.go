@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
 	"github.com/notrodans/cresora/internal/domain/mailing"
+	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/domain/recipient"
 )
 
@@ -227,6 +230,111 @@ func TestWorkerResolverFailureReleasesAndIsFatal(t *testing.T) {
 	}
 	if got := task.releaseCount(); got != 1 {
 		t.Fatalf("Release() called %d times, want 1", got)
+	}
+}
+
+func TestWorkerPassesClaimedAdmissionToResolver(t *testing.T) {
+	want := applicationdelivery.AccountAdmission{
+		Route:   applicationdelivery.Routing(uuid.MustParse("22222222-2222-2222-2222-222222222222")),
+		Version: operatoraccount.Version(17),
+	}
+	executed := make(chan struct{})
+	task := &taskStub{
+		admission: want,
+		execute: func(context.Context, applicationdelivery.Command) error {
+			closeOnce(executed)
+			return nil
+		},
+	}
+	commands := &commandsStub{}
+	parent, cancel := context.WithCancel(context.Background())
+	result := runWorker(New(&claimsStub{tasks: []applicationdelivery.Task{task}}, commands, testConfig()), parent)
+	awaitSignal(t, executed)
+	cancel()
+	if err := awaitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	got, ok := commands.admissionValue()
+	if !ok {
+		t.Fatal("resolver did not receive an admission")
+	}
+	if got.Route != want.Route || got.Version != want.Version {
+		t.Fatalf("resolver admission = %+v, want route %s and version %d", got, want.Route.UUID(), want.Version)
+	}
+}
+
+func TestWorkerMissingAdmissionReleasesAndIsFatal(t *testing.T) {
+	released := make(chan struct{})
+	first := &taskStub{release: func(_ context.Context, cause error) error {
+		if !errors.Is(cause, ErrMalformedTask) {
+			t.Errorf("Release() cause = %v, want ErrMalformedTask", cause)
+		}
+		closeOnce(released)
+		return nil
+	}}
+	commands := &commandsStub{}
+	err := runAndAwait(t, New(&claimsStub{
+		tasks: []applicationdelivery.Task{missingAdmissionTask{task: first}},
+	}, commands, testConfig()))
+	awaitSignal(t, released)
+	if !errors.Is(err, ErrMalformedTask) {
+		t.Fatalf("Run() error = %v, want ErrMalformedTask", err)
+	}
+	if errors.Is(err, applicationdelivery.ErrAccountAdmissionRejected) {
+		t.Fatalf("Run() error = %v, must not be ErrAccountAdmissionRejected", err)
+	}
+	if got := commands.callCount(); got != 0 {
+		t.Fatalf("resolver calls = %d, want 0 for malformed task", got)
+	}
+}
+
+func TestWorkerAdmissionPanicReleasesAndIsFatal(t *testing.T) {
+	panicCause := errors.New("admission accessor panic")
+	released := make(chan struct{})
+	task := &taskStub{
+		admissionPanic: panicCause,
+		release: func(_ context.Context, cause error) error {
+			if !errors.Is(cause, ErrMalformedTask) || !errors.Is(cause, panicCause) {
+				t.Errorf("Release() cause = %v, want malformed task and panic cause", cause)
+			}
+			closeOnce(released)
+			return nil
+		},
+	}
+
+	err := runAndAwait(t, New(&claimsStub{tasks: []applicationdelivery.Task{task}}, &commandsStub{}, testConfig()))
+	awaitSignal(t, released)
+	if !errors.Is(err, ErrMalformedTask) || !errors.Is(err, panicCause) {
+		t.Fatalf("Run() error = %v, want malformed task and panic cause", err)
+	}
+}
+
+func TestWorkerAdmissionRejectionReleasesAndContinues(t *testing.T) {
+	released := make(chan struct{})
+	executed := make(chan struct{})
+	first := &taskStub{release: func(_ context.Context, cause error) error {
+		if !errors.Is(cause, applicationdelivery.ErrAccountAdmissionRejected) {
+			t.Errorf("Release() cause = %v, want ErrAccountAdmissionRejected", cause)
+		}
+		closeOnce(released)
+		return nil
+	}}
+	second := &taskStub{execute: func(context.Context, applicationdelivery.Command) error {
+		closeOnce(executed)
+		return nil
+	}}
+	commands := &commandsStub{
+		failures: []error{applicationdelivery.ErrAccountAdmissionRejected},
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	result := runWorker(New(&claimsStub{
+		tasks: []applicationdelivery.Task{first, second},
+	}, commands, testConfig()), parent)
+	awaitSignal(t, released)
+	awaitSignal(t, executed)
+	cancel()
+	if err := awaitResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -743,14 +851,44 @@ func (stub *claimsStub) count() int {
 }
 
 type commandsStub struct {
-	err error
+	err        error
+	failures   []error
+	mutex      sync.Mutex
+	calls      int
+	admissions []applicationdelivery.AccountAdmission
 }
 
-func (stub *commandsStub) Command(context.Context, applicationdelivery.Route) (applicationdelivery.Command, error) {
+func (stub *commandsStub) Command(
+	_ context.Context,
+	admission applicationdelivery.AccountAdmission,
+) (applicationdelivery.Command, error) {
+	stub.mutex.Lock()
+	call := stub.calls
+	stub.calls++
+	stub.admissions = append(stub.admissions, admission)
+	stub.mutex.Unlock()
+	if call < len(stub.failures) && stub.failures[call] != nil {
+		return nil, stub.failures[call]
+	}
 	if stub.err != nil {
 		return nil, stub.err
 	}
 	return commandStub{}, nil
+}
+
+func (stub *commandsStub) callCount() int {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
+	return stub.calls
+}
+
+func (stub *commandsStub) admissionValue() (applicationdelivery.AccountAdmission, bool) {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
+	if len(stub.admissions) == 0 {
+		return applicationdelivery.AccountAdmission{}, false
+	}
+	return stub.admissions[len(stub.admissions)-1], true
 }
 
 type commandStub struct{}
@@ -768,6 +906,8 @@ func (commandStub) Execute(
 type taskStub struct {
 	mutex             sync.Mutex
 	route             applicationdelivery.Route
+	admission         applicationdelivery.AccountAdmission
+	admissionPanic    error
 	renew             func(context.Context, time.Duration) error
 	renewals          int
 	execute           func(context.Context, applicationdelivery.Command) error
@@ -781,6 +921,13 @@ type taskStub struct {
 
 func (stub *taskStub) Route() applicationdelivery.Route {
 	return stub.route
+}
+
+func (stub *taskStub) Admission() applicationdelivery.AccountAdmission {
+	if stub.admissionPanic != nil {
+		panic(stub.admissionPanic)
+	}
+	return stub.admission
 }
 
 func (stub *taskStub) Renew(ctx context.Context, duration time.Duration) error {
@@ -852,4 +999,27 @@ func (stub *taskStub) executeDone() chan struct{} {
 		stub.executeDoneCh = make(chan struct{})
 	}
 	return stub.executeDoneCh
+}
+
+type missingAdmissionTask struct {
+	task *taskStub
+}
+
+func (task missingAdmissionTask) Route() applicationdelivery.Route {
+	return task.task.Route()
+}
+
+func (task missingAdmissionTask) Renew(ctx context.Context, duration time.Duration) error {
+	return task.task.Renew(ctx, duration)
+}
+
+func (task missingAdmissionTask) Execute(
+	ctx context.Context,
+	command applicationdelivery.Command,
+) error {
+	return task.task.Execute(ctx, command)
+}
+
+func (task missingAdmissionTask) Release(ctx context.Context, cause error) error {
+	return task.task.Release(ctx, cause)
 }

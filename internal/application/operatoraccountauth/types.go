@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	applicationroot "github.com/notrodans/cresora/internal/application"
+	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 )
 
@@ -48,15 +48,9 @@ type Account struct {
 	TelegramLastName  string
 }
 
-// AuthTarget fences one provider or runtime operation to one actor-owned
-// account lifecycle version. It is the only scope type in this application
-// contract.
-type AuthTarget struct {
-	Actor     applicationroot.Actor
-	AccountID operatoraccount.ID
-	Status    operatoraccount.Status
-	Version   operatoraccount.Version
-}
+// AuthTarget is the compatibility name for the canonical application-owned
+// runtime admission value.
+type AuthTarget = operatoraccounts.RuntimeTarget
 
 // Challenge is the safe projection of one in-memory phone-auth attempt. The
 // Telegram phone-code hash is intentionally absent: it is retained only by

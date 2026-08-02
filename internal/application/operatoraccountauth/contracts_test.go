@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	applicationroot "github.com/notrodans/cresora/internal/application"
+	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 )
 
@@ -214,7 +215,7 @@ func TestBeginOutcomesDistinguishAdmissionDecisions(t *testing.T) {
 	}
 }
 
-func TestAuthTargetUsesCanonicalActorAndLifecycleTypes(t *testing.T) {
+func TestAuthTargetAliasesCanonicalRuntimeTarget(t *testing.T) {
 	actor := applicationroot.Actor{OperatorID: uuid.New()}
 	accountID := operatoraccount.Identity(uuid.New())
 	target := AuthTarget{
@@ -226,5 +227,8 @@ func TestAuthTargetUsesCanonicalActorAndLifecycleTypes(t *testing.T) {
 
 	if target.Actor != actor || target.AccountID != accountID || target.Status != operatoraccount.StatusDisconnecting || target.Version != operatoraccount.Version(9) {
 		t.Fatalf("auth target = %+v, want actor/account/version fence", target)
+	}
+	if reflect.TypeOf(target) != reflect.TypeOf(operatoraccounts.RuntimeTarget{}) {
+		t.Fatalf("AuthTarget type = %v, want %v", reflect.TypeOf(target), reflect.TypeOf(operatoraccounts.RuntimeTarget{}))
 	}
 }

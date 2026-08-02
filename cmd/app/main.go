@@ -23,10 +23,9 @@ import (
 	mailingconsolerequests "github.com/notrodans/cresora/internal/application/requests/mailing-console"
 	mailingconsole "github.com/notrodans/cresora/internal/application/services/mailingconsole"
 	backgroundjobs "github.com/notrodans/cresora/internal/entrypoint/background"
-	deliverybackground "github.com/notrodans/cresora/internal/entrypoint/background/delivery"
-	"github.com/notrodans/cresora/internal/entrypoint/background/delivery/actor"
 	deliveryreaper "github.com/notrodans/cresora/internal/entrypoint/background/deliveryreaper"
 	deliveryreconciler "github.com/notrodans/cresora/internal/entrypoint/background/deliveryreconciler"
+	deliveryworker "github.com/notrodans/cresora/internal/entrypoint/background/deliveryworker"
 	"github.com/notrodans/cresora/internal/entrypoint/http/authentication"
 	"github.com/notrodans/cresora/internal/entrypoint/http/console"
 	"github.com/notrodans/cresora/internal/infrastracture/logger/slog"
@@ -37,6 +36,8 @@ import (
 	pgreaper "github.com/notrodans/cresora/internal/infrastracture/storage/pg/reaper"
 	pgreconciler "github.com/notrodans/cresora/internal/infrastracture/storage/pg/reconciler"
 	telegramaccount "github.com/notrodans/cresora/internal/transport/telegram/account"
+	"github.com/notrodans/cresora/internal/transport/telegram/accountowner"
+	"github.com/notrodans/cresora/internal/transport/telegram/gotdclient"
 )
 
 const (
@@ -99,10 +100,15 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	if failure != nil {
 		return fmt.Errorf("open PostgreSQL database: %w", failure)
 	}
-	databaseClosed := false
+	sharedRuntime, failure := composeTelegramRuntime(cfg, database)
+	if failure != nil {
+		database.Close()
+		return fmt.Errorf("compose telegram account runtime: %w", failure)
+	}
+	resourcesClosed := false
 	defer func() {
-		if !databaseClosed {
-			database.Close()
+		if !resourcesClosed {
+			_ = shutdownApplicationResources(nil, sharedRuntime, database)
 		}
 	}()
 
@@ -117,11 +123,6 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	reconcilerLoop := deliveryreconciler.New(runReconciler, deliveryreconciler.Config{
 		Interval: cfg.DeliveryReconcilerInterval,
 	})
-	apis, targets, failure := configureTelegramDeliveryAdapters(cfg, database)
-	if failure != nil {
-		return failure
-	}
-
 	// Создаём сервис для работы с таблицами рассылок.
 	service := mailingconsole.NewService(mailings.NewMailingConsole(database), mailings.NewMailings(database))
 	credentialStore := pg.NewOperatorCredentialStore(database)
@@ -157,6 +158,7 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 			router,
 			sessionProvider,
 			cfg.PublicOrigin.String(),
+			sharedRuntime,
 		)
 		if failure != nil {
 			return fmt.Errorf("compose telegram operator account authentication: %w", failure)
@@ -185,7 +187,7 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		worker := make(chan error, 1)
 		workerErrors = worker
 		go func() {
-			worker <- run(rootContext, database, apis, targets)
+			worker <- run(rootContext, database, sharedRuntime)
 		}()
 	}
 
@@ -202,8 +204,8 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	}()
 
 	runtimeFailure := monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, backgroundErrors)
-	authFailure := shutdownApplicationResources(operatorAuth, database)
-	databaseClosed = true
+	authFailure := shutdownApplicationResources(operatorAuth, sharedRuntime, database)
+	resourcesClosed = true
 	if runtimeFailure != nil && authFailure != nil {
 		return errors.Join(runtimeFailure, authFailure)
 	}
@@ -213,44 +215,48 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	return authFailure
 }
 
-// APIs и Targets — это адаптеры уровня приложения вокруг существующего
-// жизненного цикла аккаунтов gotd и проекций Telegram в PostgreSQL.
-type APIs = telegramaccount.APIs
-type Targets = telegramaccount.Targets
-
-func configureTelegramDeliveryAdapters(cfg *config.Config, database *pgxpool.Pool) (APIs, Targets, error) {
-	if cfg.WebOnly {
-		return nil, nil, nil
-	}
-
-	// The current slice has no process-wide Telegram API owner for delivery
-	// workers. Reject the mode before operator authentication can construct its
-	// account runtime rather than creating a runtime that cannot be used.
-	var apis APIs
-	targets := telegramaccount.NewTargets(pg.NewTelegramPeerLookup(database))
-	if apis == nil || targets == nil {
-		return nil, nil, errors.New("WEB_ONLY=false requires configured Telegram account adapters")
-	}
-	return apis, targets, nil
+func sharedTelegramRuntimeRequired(cfg *config.Config) bool {
+	return cfg != nil && (cfg.TelegramAuthEnabled || !cfg.WebOnly)
 }
 
-func run(context context.Context, database *pgxpool.Pool, apis APIs, targets Targets) error {
-	deliveries := deliveries.NewDeliveries(database)
-	commands := telegramaccount.NewCommands(apis, targets, deliveries)
-	factory := actor.NewFactory(commands, 4, 32)
-	supervisor := actor.NewSupervisor(context, factory)
-	claims := claims.NewClaims(database, 5*time.Minute)
-	pump := deliverybackground.New(claims, supervisor, 4, 250*time.Millisecond)
+func composeTelegramRuntime(cfg *config.Config, database *pgxpool.Pool) (*accountowner.Registry, error) {
+	if cfg == nil {
+		return nil, errors.New("telegram runtime configuration is required")
+	}
+	if !sharedTelegramRuntimeRequired(cfg) {
+		return nil, nil
+	}
+	if failure := validateTelegramRuntimeConfig(cfg); failure != nil {
+		return nil, failure
+	}
 
-	failure := pump.Run(context)
-	actorFailure := supervisor.Wait()
-	if actorFailure != nil {
-		return fmt.Errorf("run mailing delivery actors: %w", actorFailure)
+	sessionStore, failure := pg.NewTelegramSessionStore(
+		database,
+		cfg.TelegramSessionKeyID,
+		cfg.TelegramSessionEncryptionKey.Bytes(),
+	)
+	if failure != nil {
+		return nil, fmt.Errorf("construct encrypted telegram session store: %w", failure)
 	}
-	if failure != nil && !errors.Is(failure, context.Err()) {
-		return fmt.Errorf("run mailing delivery background: %w", failure)
+	factory := gotdclient.New(sessionStore)
+	runtime, failure := accountowner.NewRegistry(accountowner.RegistryConfig{
+		Factory: factory,
+		AppID:   cfg.TelegramAPIID,
+		AppHash: cfg.TelegramAPIHash.Value(),
+	})
+	if failure != nil {
+		return nil, fmt.Errorf("construct telegram account runtime: %w", failure)
 	}
-	return nil
+	return runtime, nil
+}
+
+func run(context context.Context, database *pgxpool.Pool, runtime telegramaccount.Runtime) error {
+	deliveryClaims := claims.NewClaims(database, 5*time.Minute)
+	deliveryStore := deliveries.NewDeliveries(database)
+	targets := telegramaccount.NewTargets(pg.NewTelegramPeerLookup(database))
+	commands := telegramaccount.NewAdmissionCommands(deliveryClaims, deliveryStore, targets, runtime)
+	worker := deliveryworker.New(deliveryClaims, commands, deliveryworker.Defaults())
+	return worker.Run(context)
 }
 
 type serverController interface {
