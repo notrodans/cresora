@@ -4,19 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	slogger "log/slog"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/notrodans/cresora/config"
+	application "github.com/notrodans/cresora/internal/application"
 	operatoraccountcommands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
 	applicationoperatoraccountauth "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	applicationoperatoraccounts "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	operatoraccountrequests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
+	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 	pgoperatoraccounts "github.com/notrodans/cresora/internal/infrastracture/storage/pg/operatoraccounts"
 	transportoperatoraccountauth "github.com/notrodans/cresora/internal/transport/telegram/operatoraccountauth"
+	transportoperatoraccounts "github.com/notrodans/cresora/internal/transport/telegram/operatoraccounts"
 )
 
 type operatorAuthService interface {
@@ -44,12 +50,75 @@ type operatorAuthPorts struct {
 	status   operatoraccountrequests.Status
 }
 
+type operatorAccountComposition struct {
+	runtime    operatorAuthRuntime
+	store      *pgoperatoraccounts.Store
+	disconnect *applicationoperatoraccounts.Service
+}
+
+type operatorAccountDisconnectCommand struct {
+	service *applicationoperatoraccounts.Service
+}
+
+func (command operatorAccountDisconnectCommand) Execute(
+	ctx context.Context,
+	actor application.Actor,
+	accountID operatoraccount.ID,
+) (applicationoperatoraccounts.DisconnectResult, error) {
+	return command.service.Disconnect(ctx, actor, accountID)
+}
+
+type authenticationPersistenceWithoutRemoteIntents struct {
+	applicationoperatoraccountauth.AuthenticationPersistence
+	remoteIntents applicationoperatoraccounts.RemoteLogoutIntentLister
+}
+
+func (persistence authenticationPersistenceWithoutRemoteIntents) ListOrphanAuthenticationLifecycles(
+	ctx context.Context,
+) ([]applicationoperatoraccountauth.AuthTarget, error) {
+	targets, err := persistence.AuthenticationPersistence.ListOrphanAuthenticationLifecycles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	remoteTargets, err := persistence.remoteIntents.ListRemoteLogoutIntents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list remote logout intents while recovering authentication: %w", err)
+	}
+	remote := make(map[operatorAccountTargetKey]struct{}, len(remoteTargets))
+	for _, target := range remoteTargets {
+		remote[operatorAccountTargetKey{
+			operatorID: target.Actor.OperatorID,
+			accountID:  target.AccountID.UUID(),
+			version:    target.Version,
+		}] = struct{}{}
+	}
+	filtered := make([]applicationoperatoraccountauth.AuthTarget, 0, len(targets))
+	for _, target := range targets {
+		if _, excluded := remote[operatorAccountTargetKey{
+			operatorID: target.Actor.OperatorID,
+			accountID:  target.AccountID.UUID(),
+			version:    target.Version,
+		}]; excluded {
+			continue
+		}
+		filtered = append(filtered, target)
+	}
+	return filtered, nil
+}
+
+type operatorAccountTargetKey struct {
+	operatorID uuid.UUID
+	accountID  uuid.UUID
+	version    operatoraccount.Version
+}
+
 type operatorAuthDatabaseCloser interface {
 	Close()
 }
 
 type operatorAuthLifecycle struct {
-	service operatorAuthService
+	service    operatorAuthService
+	disconnect *applicationoperatoraccounts.Service
 }
 
 func composeOperatorAuth(
@@ -70,10 +139,64 @@ func composeOperatorAuth(
 	if runtime == nil {
 		return nil, errors.New("telegram authentication requires the shared telegram account runtime")
 	}
+	composition, failure := composeOperatorAccounts(database, runtime)
+	if failure != nil {
+		return nil, failure
+	}
+	return composeOperatorAuthWithComposition(
+		rootContext,
+		cfg,
+		router,
+		principalProvider,
+		publicOrigin,
+		composition,
+	)
+}
 
-	provider := transportoperatoraccountauth.New(runtime)
-	persistence := pgoperatoraccounts.New(database)
-	service := applicationoperatoraccountauth.NewService(persistence, provider, runtime)
+func composeOperatorAccounts(
+	database *pgxpool.Pool,
+	runtime operatorAuthRuntime,
+) (*operatorAccountComposition, error) {
+	if runtime == nil {
+		return nil, errors.New("telegram account disconnect requires the shared telegram account runtime")
+	}
+	revokerRuntime, ok := any(runtime).(transportoperatoraccounts.Runtime)
+	if !ok || revokerRuntime == nil {
+		return nil, errors.New("telegram account disconnect requires the shared runtime revocation capability")
+	}
+	store := pgoperatoraccounts.New(database)
+	revoker := transportoperatoraccounts.New(revokerRuntime)
+	return &operatorAccountComposition{
+		runtime:    runtime,
+		store:      store,
+		disconnect: applicationoperatoraccounts.NewService(store, revoker),
+	}, nil
+}
+
+func composeOperatorAuthWithComposition(
+	rootContext context.Context,
+	cfg *config.Config,
+	router chi.Router,
+	principalProvider principal.Provider,
+	publicOrigin string,
+	composition *operatorAccountComposition,
+) (*operatorAuthLifecycle, error) {
+	if cfg == nil {
+		return nil, errors.New("telegram authentication configuration is required")
+	}
+	if !cfg.TelegramAuthEnabled {
+		return nil, nil
+	}
+	if composition == nil || composition.runtime == nil || composition.store == nil || composition.disconnect == nil {
+		return nil, errors.New("telegram authentication requires the composed operator account services")
+	}
+
+	provider := transportoperatoraccountauth.New(composition.runtime)
+	authPersistence := authenticationPersistenceWithoutRemoteIntents{
+		AuthenticationPersistence: composition.store,
+		remoteIntents:             composition.store,
+	}
+	service := applicationoperatoraccountauth.NewService(authPersistence, provider, composition.runtime)
 	commands := operatoraccountcommands.NewApplication(service)
 	ports := operatorAuthPorts{
 		start:    commands.Start,
@@ -83,15 +206,20 @@ func composeOperatorAuth(
 		status:   operatoraccountrequests.NewStatus(service),
 	}
 
-	return orchestrateOperatorAuth(rootContext, service, func() {
-		registerLiveOperatorAuth(
+	lifecycle, failure := orchestrateOperatorAuth(rootContext, service, func() {
+		registerLiveOperatorAuthWithDisconnect(
 			router,
 			ports,
 			principalProvider,
 			publicOrigin,
 			operatorAuthRouteOptions(cfg),
+			operatorAccountDisconnectCommand{service: composition.disconnect},
 		)
 	})
+	if lifecycle != nil {
+		lifecycle.disconnect = composition.disconnect
+	}
+	return lifecycle, failure
 }
 
 // orchestrateOperatorAuth is deliberately limited to lifecycle ordering. All
@@ -158,17 +286,72 @@ func registerLiveOperatorAuth(
 	publicOrigin string,
 	options operatoraccounts.RouteOptions,
 ) {
-	authenticationRouter := operatoraccounts.NewWithPhoneAuth(
+	registerLiveOperatorAuthWithDisconnect(router, ports, principalProvider, publicOrigin, options, nil)
+}
+
+func registerLiveOperatorAuthWithDisconnect(
+	router chi.Router,
+	ports operatorAuthPorts,
+	principalProvider principal.Provider,
+	publicOrigin string,
+	options operatoraccounts.RouteOptions,
+	disconnectCommand operatoraccountsDisconnectCommand,
+) {
+	authenticationRouter := operatoraccounts.NewWithPhoneAuthAndDisconnect(
 		ports.start,
 		ports.code,
 		ports.password,
 		ports.cancel,
 		ports.status,
+		disconnectCommand,
 		principalProvider,
 		publicOrigin,
 		options,
 	)
 	router.Mount("/", authenticationRouter)
+}
+
+// operatoraccountsDisconnectCommand is intentionally structural. The concrete
+// command is owned by this composition root while the HTTP package consumes
+// only its narrow application port.
+type operatoraccountsDisconnectCommand interface {
+	Execute(context.Context, application.Actor, operatoraccount.ID) (applicationoperatoraccounts.DisconnectResult, error)
+}
+
+type operatorAccountRecovery interface {
+	Recover(context.Context) (applicationoperatoraccounts.RecoveryResult, error)
+}
+
+func recoverOperatorAccountDisconnect(
+	ctx context.Context,
+	service operatorAccountRecovery,
+	log *slogger.Logger,
+) error {
+	result, failure := service.Recover(ctx)
+	if failure != nil {
+		return fmt.Errorf("recover telegram account disconnect intents: %w", failure)
+	}
+	if result.Pending == 0 {
+		return nil
+	}
+	if log == nil {
+		log = slogger.Default()
+	}
+	log.LogAttrs(
+		ctx,
+		slogger.LevelWarn,
+		"telegram account disconnect recovery remains pending",
+		slogger.Int("attempted", result.Attempted),
+		slogger.Int("completed", result.Completed),
+		slogger.Int("pending", result.Pending),
+		slogger.Int("skipped", result.Skipped),
+		slogger.Int("pending_flood_wait", result.PendingByKind[applicationoperatoraccounts.RemoteLogoutFailureFloodWait]),
+		slogger.Int("pending_transient", result.PendingByKind[applicationoperatoraccounts.RemoteLogoutFailureTransient]),
+		slogger.Int("pending_ambiguous", result.PendingByKind[applicationoperatoraccounts.RemoteLogoutFailureAmbiguous]),
+		slogger.Int("pending_permanent", result.PendingByKind[applicationoperatoraccounts.RemoteLogoutFailurePermanent]),
+		slogger.Int("pending_unavailable", result.PendingByKind[applicationoperatoraccounts.RemoteLogoutFailureUnavailable]),
+	)
+	return nil
 }
 
 func registerDisabledOperatorAuth(router chi.Router, principalProvider principal.Provider, cfg *config.Config) {

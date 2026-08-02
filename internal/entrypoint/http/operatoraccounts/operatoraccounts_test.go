@@ -20,7 +20,9 @@ import (
 	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
 	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 	authmock "github.com/notrodans/cresora/internal/application/operatoraccountauth/mock"
+	applicationoperatoraccounts "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
+	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 	requestlogger "github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 )
@@ -189,6 +191,193 @@ func operatorPost(t *testing.T, handler http.Handler, jar *cookieJar, path strin
 func newMockOperatorHandler(provider principal.Provider) http.Handler {
 	mock := authmock.New()
 	return New(mock.StartPhone, mock.VerifyPhone, mock.StartQR, mock.RefreshQR, mock.Status, provider, "http://example.test")
+}
+
+type disconnectProbe struct {
+	result  applicationoperatoraccounts.DisconnectResult
+	failure error
+	calls   []operatoraccount.ID
+}
+
+func (probe *disconnectProbe) Execute(_ context.Context, _ application.Actor, accountID operatoraccount.ID) (applicationoperatoraccounts.DisconnectResult, error) {
+	probe.calls = append(probe.calls, accountID)
+	return probe.result, probe.failure
+}
+
+func newDisconnectRouter(t *testing.T, command disconnectCommand, options RouteOptions) http.Handler {
+	t.Helper()
+	return NewWithPhoneAuthAndDisconnect(
+		canonicalStartProbe{},
+		canonicalCodeProbe{},
+		canonicalPasswordProbe{},
+		canonicalCancelProbe{},
+		canonicalStatusProbe{},
+		command,
+		newTestActorProvider(application.Actor{OperatorID: uuid.New()}),
+		"https://example.test",
+		options,
+	)
+}
+
+func TestOperatorAccountDisconnectRouteAvailabilityIsFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mode    RouteMode
+		env     DeploymentEnvironment
+		command disconnectCommand
+		want    int
+	}{
+		{name: "live without command", mode: RouteLive, command: nil, want: http.StatusServiceUnavailable},
+		{name: "development mock", mode: RouteDevelopmentTestMock, env: EnvironmentTesting, command: &disconnectProbe{}, want: http.StatusServiceUnavailable},
+		{name: "disabled", mode: RouteDisabled, command: nil, want: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			environment := test.env
+			if environment == "" {
+				environment = EnvironmentStaging
+			}
+			router := newDisconnectRouter(t, test.command, RouteOptions{
+				Mode:                     test.mode,
+				Environment:              environment,
+				Cookie:                   SecureCookieConfig(),
+				AllowDevelopmentTestMock: test.mode == RouteDevelopmentTestMock,
+			})
+			jar := newCookieJar()
+			if test.mode == RouteDisabled {
+				response := operatorRequestAtOrigin(t, router, jar, http.MethodPost, "/operator-accounts/disconnect", url.Values{"account_id": {uuid.NewString()}}, "https://example.test")
+				if response.Code != test.want {
+					t.Fatalf("disabled disconnect: got %d, want %d", response.Code, test.want)
+				}
+				return
+			}
+			operatorPageAtOrigin(t, router, jar, "https://example.test")
+			response := operatorPostAtOrigin(t, router, jar, "/operator-accounts/disconnect", url.Values{"account_id": {uuid.NewString()}}, "https://example.test", productionCSRFCookie)
+			if response.Code != test.want {
+				t.Fatalf("%s disconnect: got %d, want %d", test.name, response.Code, test.want)
+			}
+		})
+	}
+}
+
+func TestOperatorAccountDisconnectRouteAuthenticatesAndProtectsPost(t *testing.T) {
+	actor := application.Actor{OperatorID: uuid.New()}
+	probe := &disconnectProbe{result: applicationoperatoraccounts.DisconnectResult{Outcome: applicationoperatoraccounts.DisconnectCompleted}}
+	router := NewWithPhoneAuthAndDisconnect(
+		canonicalStartProbe{},
+		canonicalCodeProbe{},
+		canonicalPasswordProbe{},
+		canonicalCancelProbe{},
+		canonicalStatusProbe{},
+		probe,
+		newTestActorProvider(actor),
+		"https://example.test",
+		RouteOptions{Mode: RouteLive, Cookie: SecureCookieConfig()},
+	)
+	jar := newCookieJar()
+	operatorPageAtOrigin(t, router, jar, "https://example.test")
+
+	for _, test := range []struct {
+		name   string
+		method string
+		origin string
+		csrf   string
+		want   int
+	}{
+		{name: "get", method: http.MethodGet, origin: "https://example.test", csrf: jar.csrfNamed(productionCSRFCookie), want: http.StatusMethodNotAllowed},
+		{name: "wrong origin", method: http.MethodPost, origin: "https://attacker.example", csrf: jar.csrfNamed(productionCSRFCookie), want: http.StatusForbidden},
+		{name: "wrong csrf", method: http.MethodPost, origin: "https://example.test", csrf: "wrong", want: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := url.Values{"account_id": {uuid.NewString()}, "csrf_token": {test.csrf}}
+			response := operatorRequestAtOrigin(t, router, jar, test.method, "/operator-accounts/disconnect", values, test.origin)
+			if response.Code != test.want {
+				t.Fatalf("%s: got %d, want %d", test.name, response.Code, test.want)
+			}
+		})
+	}
+	if len(probe.calls) != 0 {
+		t.Fatalf("protected requests called disconnect command %d times, want 0", len(probe.calls))
+	}
+
+	unauthenticated := principal.ProviderFunc(func(*http.Request) (application.Actor, error) {
+		return application.Actor{}, principal.ErrUnavailable
+	})
+	unauthedRouter := NewWithPhoneAuthAndDisconnect(
+		canonicalStartProbe{}, canonicalCodeProbe{}, canonicalPasswordProbe{}, canonicalCancelProbe{}, canonicalStatusProbe{},
+		probe, unauthenticated, "https://example.test", RouteOptions{Mode: RouteLive, Cookie: SecureCookieConfig()},
+	)
+	response := httptest.NewRecorder()
+	unauthedRouter.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "https://example.test/operator-accounts/disconnect", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated disconnect: got %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestOperatorAccountDisconnectRouteHandlesInvalidForeignSuccessAndSafeFailure(t *testing.T) {
+	accountID := uuid.New()
+	actor := application.Actor{OperatorID: uuid.New()}
+	for _, test := range []struct {
+		name         string
+		result       applicationoperatoraccounts.DisconnectResult
+		failure      error
+		wantLocation string
+		wantCalls    int
+		canary       string
+	}{
+		{name: "invalid id", wantLocation: "/operator-accounts/authenticate?error=disconnect", wantCalls: 0},
+		{name: "foreign account", failure: applicationoperatoraccounts.ErrAccountNotFound, wantLocation: "/operator-accounts/authenticate?error=disconnect", wantCalls: 1},
+		{name: "completed", result: applicationoperatoraccounts.DisconnectResult{Outcome: applicationoperatoraccounts.DisconnectCompleted}, wantLocation: "/operator-accounts/authenticate?notice=account-disconnected", wantCalls: 1},
+		{name: "resumed", result: applicationoperatoraccounts.DisconnectResult{Outcome: applicationoperatoraccounts.DisconnectCompleted}, wantLocation: "/operator-accounts/authenticate?notice=account-disconnected", wantCalls: 1},
+		{name: "idempotent", result: applicationoperatoraccounts.DisconnectResult{Outcome: applicationoperatoraccounts.DisconnectAlreadyDisconnected}, wantLocation: "/operator-accounts/authenticate?notice=account-already-disconnected", wantCalls: 1},
+		{name: "pending", result: applicationoperatoraccounts.DisconnectResult{Outcome: applicationoperatoraccounts.DisconnectPending}, failure: fmt.Errorf("provider secret: %w", applicationoperatoraccounts.ErrRemoteLogoutTransient), wantLocation: "/operator-accounts/authenticate?error=disconnect-pending", wantCalls: 1, canary: "provider secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probe := &disconnectProbe{result: test.result, failure: test.failure}
+			router := NewWithPhoneAuthAndDisconnect(
+				canonicalStartProbe{}, canonicalCodeProbe{}, canonicalPasswordProbe{}, canonicalCancelProbe{}, canonicalStatusProbe{},
+				probe, newTestActorProvider(actor), "https://example.test", RouteOptions{Mode: RouteLive, Cookie: SecureCookieConfig()},
+			)
+			jar := newCookieJar()
+			operatorPageAtOrigin(t, router, jar, "https://example.test")
+			value := accountID.String()
+			if test.name == "invalid id" {
+				value = "not-a-uuid"
+			}
+			var logs bytes.Buffer
+			logger := slogger.New(slogger.NewTextHandler(&logs, nil))
+			response := operatorPostAtOriginWithLogger(t, router, jar, "/operator-accounts/disconnect", url.Values{"account_id": {value}}, "https://example.test", productionCSRFCookie, logger)
+			if response.Code != http.StatusSeeOther || response.Header().Get("Location") != test.wantLocation {
+				t.Fatalf("%s response: status=%d location=%q, want location %q", test.name, response.Code, response.Header().Get("Location"), test.wantLocation)
+			}
+			if len(probe.calls) != test.wantCalls {
+				t.Fatalf("%s command calls = %d, want %d", test.name, len(probe.calls), test.wantCalls)
+			}
+			if test.canary != "" && strings.Contains(logs.String(), test.canary) {
+				t.Fatalf("%s logged raw failure %q: %q", test.name, test.canary, logs.String())
+			}
+		})
+	}
+}
+
+func TestOperatorAccountRowsExposeDisconnectMetadata(t *testing.T) {
+	accounts := mapAccounts([]common.Account{
+		{ID: uuid.New(), Status: operatoraccount.StatusActive},
+		{ID: uuid.New(), Status: operatoraccount.StatusAuthenticating},
+		{ID: uuid.New(), Status: operatoraccount.StatusDisconnected},
+		{ID: uuid.New(), Status: operatoraccount.StatusDisconnecting},
+	})
+	if !accounts[0].CanDisconnect || accounts[0].ID == "" || accounts[0].DisconnectDisabledReason != "" {
+		t.Fatalf("active account disconnect metadata = %+v", accounts[0])
+	}
+	if accounts[1].CanDisconnect || accounts[1].DisconnectDisabledReason != "authentication_in_progress" {
+		t.Fatalf("authenticating account disconnect metadata = %+v", accounts[1])
+	}
+	if accounts[2].CanDisconnect || accounts[2].DisconnectDisabledReason != "already_disconnected" {
+		t.Fatalf("disconnected account disconnect metadata = %+v", accounts[2])
+	}
+	if !accounts[3].CanDisconnect {
+		t.Fatalf("disconnecting account cannot resume disconnect: %+v", accounts[3])
+	}
 }
 
 func TestOperatorAccountHTTPScopesBrowserFlowByActor(t *testing.T) {
