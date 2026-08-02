@@ -3,15 +3,19 @@ package operatoraccounts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gotd/td/session"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
 	application "github.com/notrodans/cresora/internal/application/operatoraccounts"
+	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
 	"github.com/notrodans/cresora/internal/transport/telegram/accountowner"
 )
 
@@ -38,13 +42,14 @@ func (runtime *revokeRuntimeFake) RevokeAndStop(
 }
 
 type logoutClientFake struct {
-	err   error
-	calls atomic.Int32
+	response *tg.AuthLoggedOut
+	err      error
+	calls    atomic.Int32
 }
 
-func (client *logoutClientFake) logOut(context.Context) error {
+func (client *logoutClientFake) logOut(context.Context) (*tg.AuthLoggedOut, error) {
 	client.calls.Add(1)
-	return client.err
+	return client.response, client.err
 }
 
 func newTestAdapter(runtime Runtime, client *logoutClientFake) Adapter {
@@ -78,7 +83,7 @@ func TestAdapterRevokeAndStopMapsLogoutOutcomesWithoutRetry(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &logoutClientFake{err: test.err}
+			client := &logoutClientFake{response: &tg.AuthLoggedOut{}, err: test.err}
 			adapter := newTestAdapter(new(revokeRuntimeFake), client)
 			outcome := adapter.RevokeAndStop(context.Background(), application.RuntimeTarget{})
 			if err := outcome.Validate(); err != nil {
@@ -127,8 +132,70 @@ func TestAdapterRevokeAndStopMapsRuntimeFailureToClosedOutcome(t *testing.T) {
 	}
 }
 
+func TestAdapterRevokeAndStopRejectsNilLogoutResponse(t *testing.T) {
+	client := new(logoutClientFake)
+	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
+
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome.Validate() error = %v", err)
+	}
+	if outcome.Converged() {
+		t.Fatal("nil auth.loggedOut response was incorrectly reported as converged")
+	}
+	failure, ok := outcome.Failure()
+	if !ok || failure.Kind() != application.RemoteLogoutFailurePermanent {
+		t.Fatalf("nil logout response outcome = %#v, want permanent failure", outcome)
+	}
+	if got := client.calls.Load(); got != 1 {
+		t.Fatalf("AuthLogOut callback calls = %d, want 1", got)
+	}
+}
+
+func TestAdapterRevokeAndStopClassifiesTopLevelFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		converged  bool
+		wantKind   application.RemoteLogoutFailureKind
+		wantSecret string
+	}{
+		{name: "rpc unauthorized", err: fmt.Errorf("owner startup: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED")), converged: true},
+		{name: "missing gotd session", err: fmt.Errorf("session detail: %w", session.ErrNotFound), wantKind: application.RemoteLogoutFailurePermanent, wantSecret: "session detail"},
+		{name: "missing application session", err: application.ErrSessionNotFound, wantKind: application.RemoteLogoutFailurePermanent},
+		{name: "invalid session", err: transporttelegram.ErrSessionInvalid, wantKind: application.RemoteLogoutFailurePermanent},
+		{name: "oversized session", err: transporttelegram.ErrSessionTooLarge, wantKind: application.RemoteLogoutFailurePermanent},
+		{name: "corrupt session", err: transporttelegram.ErrSessionCorrupt, wantKind: application.RemoteLogoutFailurePermanent},
+		{name: "registry unavailable", err: accountowner.ErrRegistryStopped, wantKind: application.RemoteLogoutFailureUnavailable},
+		{name: "owner startup failure", err: errors.New("owner startup secret"), wantKind: application.RemoteLogoutFailureUnavailable, wantSecret: "owner startup secret"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &logoutClientFake{response: &tg.AuthLoggedOut{}}
+			outcome := newTestAdapter(&revokeRuntimeFake{err: test.err}, client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
+			if err := outcome.Validate(); err != nil {
+				t.Fatalf("outcome.Validate() error = %v", err)
+			}
+			if outcome.Converged() != test.converged {
+				t.Fatalf("outcome.Converged() = %t, want %t", outcome.Converged(), test.converged)
+			}
+			if !test.converged {
+				failure, ok := outcome.Failure()
+				if !ok || failure.Kind() != test.wantKind {
+					t.Fatalf("top-level failure = %#v, want kind %q", outcome, test.wantKind)
+				}
+				if test.wantSecret != "" && strings.Contains(failure.Error(), test.wantSecret) {
+					t.Fatalf("top-level failure leaked %q: %q", test.wantSecret, failure.Error())
+				}
+			}
+			if got := client.calls.Load(); got != 0 {
+				t.Fatalf("AuthLogOut callback calls = %d for top-level failure, want 0", got)
+			}
+		})
+	}
+}
+
 func TestAdapterRevokeAndStopSanitizesRawLogoutFailure(t *testing.T) {
-	client := &logoutClientFake{err: errors.New("provider secret response")}
+	client := &logoutClientFake{response: &tg.AuthLoggedOut{}, err: errors.New("provider secret response")}
 	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 	failure, ok := outcome.Failure()
 	if !ok {
@@ -141,7 +208,7 @@ func TestAdapterRevokeAndStopSanitizesRawLogoutFailure(t *testing.T) {
 
 func TestAdapterRevokeAndStopDoesNotConverge401WhenTeardownFails(t *testing.T) {
 	runtime := &revokeRuntimeFake{teardownErr: context.DeadlineExceeded}
-	client := &logoutClientFake{err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}
+	client := &logoutClientFake{response: &tg.AuthLoggedOut{}, err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}
 	outcome := newTestAdapter(runtime, client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 
 	if err := outcome.Validate(); err != nil {
@@ -161,7 +228,7 @@ func TestAdapterRevokeAndStopDoesNotConverge401WhenTeardownFails(t *testing.T) {
 
 func TestAdapterRevokeAndStopRequiresTeardownForSuccess(t *testing.T) {
 	runtime := &revokeRuntimeFake{teardownErr: errors.New("owner teardown failed")}
-	client := new(logoutClientFake)
+	client := &logoutClientFake{response: &tg.AuthLoggedOut{}}
 	outcome := newTestAdapter(runtime, client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 
 	if outcome.Converged() {

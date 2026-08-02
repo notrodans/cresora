@@ -6,10 +6,13 @@ import (
 	"context"
 	"errors"
 
+	"github.com/gotd/td/session"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
 	application "github.com/notrodans/cresora/internal/application/operatoraccounts"
+	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
 	"github.com/notrodans/cresora/internal/transport/telegram/accountowner"
 )
 
@@ -52,16 +55,26 @@ func (adapter Adapter) RevokeAndStop(
 		if client == nil {
 			return logoutFailure{err: errLogoutClientUnavailable}
 		}
-		if failure := client.logOut(callbackContext); failure != nil {
+		response, failure := client.logOut(callbackContext)
+		if failure != nil {
 			return logoutFailure{err: failure}
+		}
+		if response == nil {
+			return logoutFailure{err: errInvalidLogoutResponse}
 		}
 		return nil
 	})
 	if failure == nil {
 		return application.RevokeSucceeded()
 	}
+	if isUnauthorizedFailure(failure) {
+		return application.RevokeAlreadyComplete()
+	}
 	var transportFailure logoutFailure
 	if !errors.As(failure, &transportFailure) {
+		if isPermanentSessionFailure(failure) {
+			return failedOutcome(application.NewRemoteLogoutFailure(application.RemoteLogoutFailurePermanent, 0))
+		}
 		return failedOutcome(application.NewRemoteLogoutFailure(application.RemoteLogoutFailureUnavailable, 0))
 	}
 	if rpcFailure, ok := tgerr.As(transportFailure.err); ok && rpcFailure != nil && rpcFailure.Code == 401 {
@@ -73,7 +86,7 @@ func (adapter Adapter) RevokeAndStop(
 // logoutClient is deliberately transport-local. Tests can substitute it
 // without constructing a gotd client or issuing a request.
 type logoutClient interface {
-	logOut(context.Context) error
+	logOut(context.Context) (*tg.AuthLoggedOut, error)
 }
 
 type logoutFailure struct {
@@ -99,14 +112,16 @@ func newGotdLogoutClient(client *gotdtelegram.Client) logoutClient {
 	return gotdLogoutClient{client: client}
 }
 
-func (client gotdLogoutClient) logOut(ctx context.Context) error {
-	_, err := client.client.API().AuthLogOut(ctx)
-	return err
+func (client gotdLogoutClient) logOut(ctx context.Context) (*tg.AuthLoggedOut, error) {
+	return client.client.API().AuthLogOut(ctx)
 }
 
 func classifyRevokeFailure(failure error) (*application.RemoteLogoutFailure, error) {
 	if failure == nil {
 		return application.NewRemoteLogoutFailure(application.RemoteLogoutFailureUnavailable, 0)
+	}
+	if errors.Is(failure, errInvalidLogoutResponse) || isPermanentSessionFailure(failure) {
+		return application.NewRemoteLogoutFailure(application.RemoteLogoutFailurePermanent, 0)
 	}
 	if errors.Is(failure, context.Canceled) || errors.Is(failure, context.DeadlineExceeded) {
 		return application.NewRemoteLogoutFailure(application.RemoteLogoutFailureAmbiguous, 0)
@@ -129,6 +144,26 @@ func classifyRevokeFailure(failure error) (*application.RemoteLogoutFailure, err
 		return application.NewRemoteLogoutFailure(application.RemoteLogoutFailureUnavailable, 0)
 	}
 	return application.NewRemoteLogoutFailure(application.RemoteLogoutFailureTransient, 0)
+}
+
+func isUnauthorizedFailure(failure error) bool {
+	rpcFailure, ok := tgerr.As(failure)
+	return ok && rpcFailure != nil && rpcFailure.Code == 401
+}
+
+func isPermanentSessionFailure(failure error) bool {
+	for _, sessionFailure := range []error{
+		session.ErrNotFound,
+		application.ErrSessionNotFound,
+		transporttelegram.ErrSessionInvalid,
+		transporttelegram.ErrSessionTooLarge,
+		transporttelegram.ErrSessionCorrupt,
+	} {
+		if errors.Is(failure, sessionFailure) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRuntimeFailure(failure error) bool {
@@ -161,3 +196,5 @@ func failedOutcome(failure *application.RemoteLogoutFailure, err error) applicat
 }
 
 var errLogoutClientUnavailable = errors.New("telegram account logout client unavailable")
+
+var errInvalidLogoutResponse = errors.New("telegram account logout response is invalid")
