@@ -60,6 +60,18 @@ func TestMigrationsContainCurrentBaselineAndRepair(t *testing.T) {
 				"The current schema migration owns this index, so rollback is intentionally a no-op.",
 			},
 		},
+		{
+			name: "20260802000000_add_operator_account_remote_logout_required.sql",
+			contents: []string{
+				"-- +goose Up",
+				"ADD COLUMN remote_logout_required boolean NOT NULL DEFAULT FALSE",
+				"ADD CONSTRAINT ck_operator_accounts_remote_logout_required CHECK",
+				"remote_logout_required = FALSE OR status = 'disconnecting'",
+				"-- +goose Down",
+				"DROP CONSTRAINT IF EXISTS ck_operator_accounts_remote_logout_required",
+				"DROP COLUMN IF EXISTS remote_logout_required",
+			},
+		},
 	}
 	if len(entries) != len(expected) {
 		t.Fatalf("migration file count = %d, want %d", len(entries), len(expected))

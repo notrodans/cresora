@@ -10,10 +10,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	application "github.com/notrodans/cresora/internal/application"
 	applicationdelivery "github.com/notrodans/cresora/internal/application/commands/delivery"
 	applicationoperatoraccounts "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	pgclaims "github.com/notrodans/cresora/internal/infrastracture/storage/pg/claims"
+	pgoperatoraccounts "github.com/notrodans/cresora/internal/infrastracture/storage/pg/operatoraccounts"
 )
 
 func TestPostgreSQLDeliveryClaimAccountAdmission(t *testing.T) {
@@ -159,6 +161,73 @@ func TestPostgreSQLDeliveryClaimAccountAdmission(t *testing.T) {
 		}
 	})
 
+	t.Run("durable disconnect fences ready delivery admission", func(t *testing.T) {
+		context, cancel := deliveryAdmissionContext()
+		defer cancel()
+		operatorID, accountID := createDeliveryAdmissionAccount(t, context, database)
+		registerDeliveryAdmissionCleanup(t, database, operatorID)
+		claims := pgclaims.NewClaims(database, time.Minute)
+
+		_ = createLifecycleDelivery(t, context, database, operatorID, accountID)
+		task, claimFailure := claims.Claim(context)
+		if claimFailure != nil {
+			t.Fatalf("capture ready delivery admission: %v", claimFailure)
+		}
+		admitted, ok := task.(applicationdelivery.AdmittedTask)
+		if !ok {
+			t.Fatalf("claimed task type %T does not expose account admission", task)
+		}
+		captured := admitted.Admission()
+		remaining := createLifecycleDelivery(t, context, database, operatorID, accountID)
+		assertReadyPendingDelivery(t, context, database, remaining)
+
+		actor := application.Actor{OperatorID: operatorID}
+		store := pgoperatoraccounts.New(database)
+		account, loadFailure := store.LoadAccount(context, actor, operatoraccount.Identity(accountID))
+		if loadFailure != nil {
+			t.Fatalf("load active account before durable disconnect: %v", loadFailure)
+		}
+		if account.Version() != captured.Version || account.Status() != operatoraccount.StatusActive {
+			t.Fatalf("active account = status %q version %d, want active version %d", account.Status(), account.Version(), captured.Version)
+		}
+		expectedVersion := account.Version()
+		if failure := account.BeginDisconnect(); failure != nil {
+			t.Fatalf("begin disconnect in domain: %v", failure)
+		}
+		if failure := store.PersistLifecycle(context, actor, account, expectedVersion); failure != nil {
+			t.Fatalf("persist durable disconnect intent: %v", failure)
+		}
+
+		stored, loadFailure := store.LoadAccount(context, actor, operatoraccount.Identity(accountID))
+		if loadFailure != nil {
+			t.Fatalf("reload durable disconnect intent: %v", loadFailure)
+		}
+		if stored.Status() != operatoraccount.StatusDisconnecting || !stored.RemoteLogoutRequired() || stored.Version() != expectedVersion+1 {
+			t.Fatalf("stored disconnect = status %q remote=%t version %d, want disconnecting remote=true version %d", stored.Status(), stored.RemoteLogoutRequired(), stored.Version(), expectedVersion+1)
+		}
+
+		assertReadyPendingDelivery(t, context, database, remaining)
+		if task, claimFailure = claims.Claim(context); !errors.Is(claimFailure, applicationdelivery.ErrEmpty) {
+			t.Fatalf("claim after durable disconnect error = %v, want %v", claimFailure, applicationdelivery.ErrEmpty)
+		} else if task != nil {
+			t.Fatal("claim after durable disconnect returned a task")
+		}
+		assertReadyPendingDelivery(t, context, database, remaining)
+
+		if target, revalidationFailure := claims.Revalidate(context, captured); !errors.Is(revalidationFailure, applicationoperatoraccounts.ErrAccountNotFound) {
+			t.Fatalf("revalidate captured active admission error = %v, want %v", revalidationFailure, applicationoperatoraccounts.ErrAccountNotFound)
+		} else if target != (applicationoperatoraccounts.RuntimeTarget{}) {
+			t.Fatalf("revalidate captured active admission target = %+v, want zero target", target)
+		}
+		current := captured
+		current.Version = stored.Version()
+		if target, revalidationFailure := claims.Revalidate(context, current); !errors.Is(revalidationFailure, applicationoperatoraccounts.ErrAccountNotFound) {
+			t.Fatalf("revalidate disconnecting version error = %v, want %v", revalidationFailure, applicationoperatoraccounts.ErrAccountNotFound)
+		} else if target != (applicationoperatoraccounts.RuntimeTarget{}) {
+			t.Fatalf("revalidate disconnecting version target = %+v, want zero target", target)
+		}
+	})
+
 	t.Run("route to another operator account is not claimable", func(t *testing.T) {
 		context, cancel := deliveryAdmissionContext()
 		defer cancel()
@@ -238,4 +307,31 @@ func registerDeliveryAdmissionCleanup(t *testing.T, database *pgxpool.Pool, oper
 			}
 		}
 	})
+}
+
+func assertReadyPendingDelivery(
+	t *testing.T,
+	context stdcontext.Context,
+	database *pgxpool.Pool,
+	item lifecycleDelivery,
+) {
+	t.Helper()
+	var (
+		status string
+		ready  bool
+	)
+	if failure := database.QueryRow(
+		context,
+		`SELECT status::text, ready_at <= CURRENT_TIMESTAMP
+		 FROM mailing_deliveries
+		 WHERE mailing_id = $1 AND run_id = $2 AND recipient_id = $3`,
+		item.mailingID,
+		item.runID,
+		item.recipientID,
+	).Scan(&status, &ready); failure != nil {
+		t.Fatalf("read remaining delivery: %v", failure)
+	}
+	if status != "pending" || !ready {
+		t.Fatalf("remaining delivery = status %q ready=%t, want pending and ready", status, ready)
+	}
 }

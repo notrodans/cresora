@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	slogger "log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/notrodans/cresora/config"
 	application "github.com/notrodans/cresora/internal/application"
 	applicationoperatoraccountauth "github.com/notrodans/cresora/internal/application/operatoraccountauth"
+	applicationoperatoraccounts "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 	"github.com/notrodans/cresora/internal/transport/telegram/accountowner"
 )
@@ -68,6 +72,55 @@ func TestComposeOperatorAuthRequiresSharedRuntime(t *testing.T) {
 	}
 	if failure == nil || !containsText(failure.Error(), "shared telegram account runtime") {
 		t.Fatalf("missing shared runtime failure = %v", failure)
+	}
+}
+
+func TestComposeOperatorAccountsBuildsOneDisconnectServiceForTheSharedRuntime(t *testing.T) {
+	runtime := &fakeOperatorAuthRuntime{events: new([]string)}
+	composition, failure := composeOperatorAccounts(nil, runtime)
+	if failure != nil {
+		t.Fatalf("compose operator account services: %v", failure)
+	}
+	if composition == nil || composition.store == nil || composition.disconnect == nil {
+		t.Fatalf("incomplete operator account composition: %#v", composition)
+	}
+	if composition.runtime != runtime {
+		t.Fatal("operator account composition did not retain the shared runtime")
+	}
+	if _, ok := any(runtime).(transportRuntimeRevoker); !ok {
+		t.Fatal("shared runtime does not satisfy the revocation boundary")
+	}
+}
+
+func TestRecoverOperatorAccountDisconnectPendingIsNonfatalAndSafe(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slogger.New(slogger.NewTextHandler(&logs, nil))
+	service := &fakeOperatorAccountRecovery{result: applicationoperatoraccounts.RecoveryResult{
+		Attempted: 1,
+		Pending:   1,
+		PendingByKind: map[applicationoperatoraccounts.RemoteLogoutFailureKind]int{
+			applicationoperatoraccounts.RemoteLogoutFailureFloodWait: 1,
+		},
+	}}
+	if failure := recoverOperatorAccountDisconnect(context.Background(), service, logger); failure != nil {
+		t.Fatalf("pending disconnect recovery: %v", failure)
+	}
+	output := logs.String()
+	for _, field := range []string{"pending=1", "pending_flood_wait=1"} {
+		if !strings.Contains(output, field) {
+			t.Fatalf("pending recovery log omitted %q: %q", field, output)
+		}
+	}
+	if strings.Contains(output, "provider") || strings.Contains(output, "secret") {
+		t.Fatalf("pending recovery log contains unsafe details: %q", output)
+	}
+}
+
+func TestRecoverOperatorAccountDisconnectFatalFailureStopsStartup(t *testing.T) {
+	expected := errors.New("durable state failure")
+	service := &fakeOperatorAccountRecovery{failure: expected}
+	if failure := recoverOperatorAccountDisconnect(context.Background(), service, slogger.New(slogger.NewTextHandler(&bytes.Buffer{}, nil))); failure == nil || !errors.Is(failure, expected) {
+		t.Fatalf("fatal disconnect recovery = %v, want %v", failure, expected)
 	}
 }
 
@@ -184,6 +237,10 @@ type fakeOperatorAuthRuntime struct {
 	stop   func(context.Context) error
 }
 
+type transportRuntimeRevoker interface {
+	RevokeAndStop(context.Context, applicationoperatoraccounts.RuntimeTarget, accountowner.ClientCallback) error
+}
+
 func (runtime *fakeOperatorAuthRuntime) Execute(context.Context, applicationoperatoraccountauth.AuthTarget, accountowner.ClientCallback) error {
 	return nil
 }
@@ -198,6 +255,19 @@ func (runtime *fakeOperatorAuthRuntime) Stop(ctx context.Context) error {
 		return runtime.stop(ctx)
 	}
 	return nil
+}
+
+func (runtime *fakeOperatorAuthRuntime) RevokeAndStop(context.Context, applicationoperatoraccounts.RuntimeTarget, accountowner.ClientCallback) error {
+	return nil
+}
+
+type fakeOperatorAccountRecovery struct {
+	result  applicationoperatoraccounts.RecoveryResult
+	failure error
+}
+
+func (service *fakeOperatorAccountRecovery) Recover(context.Context) (applicationoperatoraccounts.RecoveryResult, error) {
+	return service.result, service.failure
 }
 
 type fakeOperatorAuthDatabase struct {

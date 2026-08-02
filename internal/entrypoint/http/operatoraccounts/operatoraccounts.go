@@ -24,6 +24,7 @@ import (
 	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
 	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
 	challengecoordinator "github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges"
+	disconnect "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
@@ -161,6 +162,8 @@ const (
 	canonicalFailureApplication      = "application_failure"
 	canonicalFailureInvalidResult    = "invalid_application_result"
 	canonicalFailureRequestCancelled = "request_cancelled"
+
+	disconnectOperation = "disconnect"
 )
 
 //go:embed templates/authenticate.html style.css authenticate.js
@@ -174,9 +177,11 @@ type handler struct {
 	password                       commands.Password
 	cancel                         commands.Cancel
 	status                         requests.Status
+	disconnect                     disconnectCommand
 	tmpl                           *template.Template
 	publicOrigin                   *url.URL
 	disabled                       bool
+	disconnectDisabled             bool
 	cookie                         CookieConfig
 	canonical                      bool
 	allowLocalNullOriginNativeForm bool
@@ -210,9 +215,19 @@ type requestScope struct {
 }
 
 type accountRow struct {
-	Name  string
-	Phone string
-	State string
+	ID                       string
+	Name                     string
+	Phone                    string
+	State                    string
+	CanDisconnect            bool
+	DisconnectDisabledReason string
+}
+
+// disconnectCommand is the narrow application port consumed by the HTTP
+// handler. It keeps the handler independent of the concrete service and of
+// persistence or transport types.
+type disconnectCommand interface {
+	Execute(context.Context, application.Actor, operatoraccount.ID) (disconnect.DisconnectResult, error)
 }
 
 // New constructs the chi router for operator account authentication.
@@ -236,7 +251,17 @@ func NewWithOptions(startPhone commands.StartPhone, verifyPhone commands.VerifyP
 // composition and cannot be called by the live HTTP handler.
 func NewWithPhoneAuth(start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, provider principal.Provider, publicOrigin string, options RouteOptions) chi.Router {
 	r := chi.NewRouter()
-	registerPhoneAuth(r, start, code, password, cancel, status, provider, publicOrigin, options)
+	registerPhoneAuth(r, start, code, password, cancel, status, nil, provider, publicOrigin, options)
+	return r
+}
+
+// NewWithPhoneAuthAndDisconnect constructs the live phone-auth router with the
+// authenticated account disconnect command. A nil command is intentionally
+// fail-closed; the route remains unavailable rather than becoming a partial
+// live composition.
+func NewWithPhoneAuthAndDisconnect(start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, disconnectCommand disconnectCommand, provider principal.Provider, publicOrigin string, options RouteOptions) chi.Router {
+	r := chi.NewRouter()
+	registerPhoneAuth(r, start, code, password, cancel, status, disconnectCommand, provider, publicOrigin, options)
 	return r
 }
 
@@ -334,18 +359,20 @@ func RegisterWithOptions(
 		panic("live operator account routes require Secure cookies in production and staging")
 	}
 	h := &handler{
-		startPhone:   startPhone,
-		verifyPhone:  verifyPhone,
-		status:       status,
-		publicOrigin: origin,
-		disabled:     options.Mode == RouteDisabled,
-		cookie:       options.Cookie,
+		startPhone:         startPhone,
+		verifyPhone:        verifyPhone,
+		status:             status,
+		publicOrigin:       origin,
+		disabled:           options.Mode == RouteDisabled,
+		disconnectDisabled: true,
+		cookie:             options.Cookie,
 	}
 	h.tmpl = template.Must(template.New("authenticate.html").ParseFS(assets, "templates/authenticate.html"))
 	protected := router.With(principal.Middleware(provider))
 	protected.Get("/operator-accounts/authenticate", h.authenticate)
 	protected.Post("/operator-accounts/authenticate/phone", h.phone)
 	protected.Post("/operator-accounts/authenticate/phone/code", h.code)
+	registerDisconnectRoutes(protected, h)
 	router.Get("/operator-accounts/authenticate/style.css", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, assets, "style.css")
 	})
@@ -354,7 +381,7 @@ func RegisterWithOptions(
 	})
 }
 
-func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, provider principal.Provider, configuredOrigin string, options RouteOptions) {
+func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, disconnectCommand disconnectCommand, provider principal.Provider, configuredOrigin string, options RouteOptions) {
 	origin, failure := parsePublicOrigin(configuredOrigin)
 	if failure != nil {
 		panic(failure)
@@ -404,9 +431,11 @@ func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Co
 		password:                       password,
 		cancel:                         cancel,
 		status:                         status,
+		disconnect:                     disconnectCommand,
 		canonical:                      true,
 		publicOrigin:                   origin,
 		disabled:                       options.Mode == RouteDisabled,
+		disconnectDisabled:             options.Mode != RouteLive || disconnectCommand == nil,
 		cookie:                         options.Cookie,
 		allowLocalNullOriginNativeForm: allowLocalNullOriginNativeForm,
 	}
@@ -417,8 +446,14 @@ func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Co
 	protected.Post("/operator-accounts/authenticate/phone/code", h.codeCanonical)
 	protected.Post("/operator-accounts/authenticate/phone/password", h.passwordStep)
 	protected.Post("/operator-accounts/authenticate/phone/cancel", h.cancelStep)
+	registerDisconnectRoutes(protected, h)
 	router.Get("/operator-accounts/authenticate/style.css", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, assets, "style.css") })
 	router.Get("/operator-accounts/authenticate/authenticate.js", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, assets, "authenticate.js") })
+}
+
+func registerDisconnectRoutes(router chi.Router, h *handler) {
+	router.Post("/operator-accounts/disconnect", h.disconnectAccount)
+	router.Post("/operator-accounts/{accountID}/disconnect", h.disconnectAccount)
 }
 
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
@@ -600,6 +635,49 @@ func (h *handler) cancelStep(w http.ResponseWriter, r *http.Request) {
 	h.redirect(w, "/operator-accounts/authenticate?notice=cancelled")
 }
 
+func (h *handler) disconnectAccount(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if h.disconnectUnavailable(w) {
+		return
+	}
+	actor, ok := requestActor(w, r)
+	if !ok || !h.protectPost(w, r) {
+		return
+	}
+
+	accountIDValue := strings.TrimSpace(chi.URLParam(r, "accountID"))
+	if accountIDValue == "" {
+		accountIDValue = strings.TrimSpace(r.FormValue("account_id"))
+	}
+	accountID, err := uuid.Parse(accountIDValue)
+	if err != nil || accountID == uuid.Nil {
+		logDisconnectFailure(r, disconnect.ErrInvalidInput)
+		redirectError(w, "disconnect")
+		return
+	}
+
+	result, err := h.disconnect.Execute(r.Context(), actor, operatoraccount.Identity(accountID))
+	if err != nil {
+		logDisconnectFailure(r, err)
+		if result.Outcome == disconnect.DisconnectPending || errors.Is(err, disconnect.ErrRemoteLogoutNotConverged) {
+			redirectError(w, "disconnect-pending")
+			return
+		}
+		redirectError(w, "disconnect")
+		return
+	}
+
+	switch result.Outcome {
+	case disconnect.DisconnectCompleted:
+		h.redirect(w, "/operator-accounts/authenticate?notice=account-disconnected")
+	case disconnect.DisconnectAlreadyDisconnected:
+		h.redirect(w, "/operator-accounts/authenticate?notice=account-already-disconnected")
+	default:
+		logDisconnectFailure(r, disconnect.ErrInvalidRemoteLogoutFailure)
+		redirectError(w, "disconnect")
+	}
+}
+
 func (h *handler) phone(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if h.unavailable(w) {
@@ -743,6 +821,19 @@ func (h *handler) unavailable(w http.ResponseWriter) bool {
 	if !h.disabled {
 		return false
 	}
+	h.renderUnavailable(w)
+	return true
+}
+
+func (h *handler) disconnectUnavailable(w http.ResponseWriter) bool {
+	if !h.disconnectDisabled {
+		return false
+	}
+	h.renderUnavailable(w)
+	return true
+}
+
+func (h *handler) renderUnavailable(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	page := page{
 		// Keep this state explicit in the view model so the designer can replace
@@ -760,12 +851,11 @@ func (h *handler) unavailable(w http.ResponseWriter) bool {
 	var body bytes.Buffer
 	if err := h.tmpl.Execute(&body, page); err != nil {
 		http.Error(w, "Unable to render page.", http.StatusInternalServerError)
-		return true
+		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write(body.Bytes())
-	return true
 }
 
 func noStore(w http.ResponseWriter) {
@@ -785,6 +875,10 @@ func requestActor(w http.ResponseWriter, r *http.Request) (application.Actor, bo
 }
 
 func (h *handler) protectPost(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return false
+	}
 	if !h.sameOrigin(r) && !h.localNullOriginNativeForm(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return false
@@ -862,6 +956,46 @@ func logCanonicalFailure(r *http.Request, operation string, failure error) {
 		level,
 		"operator account authentication failed",
 		slogger.String("operation", operation),
+		slogger.String("failure_class", failureClass),
+	)
+}
+
+func logDisconnectFailure(r *http.Request, failure error) {
+	failureClass := canonicalFailureApplication
+	switch {
+	case errors.Is(failure, disconnect.ErrInvalidInput):
+		failureClass = "invalid_input"
+	case errors.Is(failure, disconnect.ErrAccountNotFound):
+		failureClass = "account_not_found"
+	case errors.Is(failure, disconnect.ErrAccountStateConflict):
+		failureClass = "state_conflict"
+	case errors.Is(failure, disconnect.ErrAccountVersionConflict):
+		failureClass = "version_conflict"
+	case errors.Is(failure, disconnect.ErrSessionNotFound):
+		failureClass = "session_not_found"
+	case errors.Is(failure, disconnect.ErrRemoteLogoutFloodWait):
+		failureClass = string(disconnect.RemoteLogoutFailureFloodWait)
+	case errors.Is(failure, disconnect.ErrRemoteLogoutTransient):
+		failureClass = string(disconnect.RemoteLogoutFailureTransient)
+	case errors.Is(failure, disconnect.ErrRemoteLogoutAmbiguous):
+		failureClass = string(disconnect.RemoteLogoutFailureAmbiguous)
+	case errors.Is(failure, disconnect.ErrRemoteLogoutPermanent):
+		failureClass = string(disconnect.RemoteLogoutFailurePermanent)
+	case errors.Is(failure, disconnect.ErrRuntimeUnavailable):
+		failureClass = string(disconnect.RemoteLogoutFailureUnavailable)
+	}
+
+	level := slogger.LevelError
+	if errors.Is(failure, context.Canceled) {
+		failureClass = canonicalFailureRequestCancelled
+		level = slogger.LevelInfo
+	}
+	sloggerForRequest := slog.LoggerOr(r.Context(), slogger.Default())
+	sloggerForRequest.LogAttrs(
+		r.Context(),
+		level,
+		"operator account disconnect failed",
+		slogger.String("operation", disconnectOperation),
 		slogger.String("failure_class", failureClass),
 	)
 }
@@ -972,6 +1106,10 @@ func notice(code string) string {
 		return "Authentication password required."
 	case "cancelled":
 		return "Challenge cancelled."
+	case "account-disconnected":
+		return "Telegram account disconnected."
+	case "account-already-disconnected":
+		return "Telegram account is already disconnected."
 	}
 	return ""
 }
@@ -991,6 +1129,10 @@ func errorMessage(code string) string {
 		return "Telegram временно ограничил попытки входа. Подождите немного и повторите попытку."
 	case "invalid":
 		return "Please check the form and try again."
+	case "disconnect":
+		return "We could not disconnect that account. Try again."
+	case "disconnect-pending":
+		return "The account could not be disconnected yet. Try again later."
 	}
 	return ""
 }
@@ -1013,9 +1155,30 @@ func mapAccounts(accounts []common.Account) []accountRow {
 		if name == "" {
 			name = "Telegram account"
 		}
-		rows = append(rows, accountRow{Name: name, Phone: account.Phone, State: accountState(account.Status)})
+		canDisconnect, disabledReason := disconnectAvailability(account.Status)
+		rows = append(rows, accountRow{
+			ID:                       account.ID.String(),
+			Name:                     name,
+			Phone:                    account.Phone,
+			State:                    accountState(account.Status),
+			CanDisconnect:            canDisconnect,
+			DisconnectDisabledReason: disabledReason,
+		})
 	}
 	return rows
+}
+
+func disconnectAvailability(status operatoraccount.Status) (bool, string) {
+	switch status {
+	case operatoraccount.StatusActive, operatoraccount.StatusReauthRequired, operatoraccount.StatusDisconnecting:
+		return true, ""
+	case operatoraccount.StatusAuthenticating:
+		return false, "authentication_in_progress"
+	case operatoraccount.StatusDisconnected:
+		return false, "already_disconnected"
+	default:
+		return false, "unavailable"
+	}
 }
 
 func accountState(status operatoraccount.Status) string {

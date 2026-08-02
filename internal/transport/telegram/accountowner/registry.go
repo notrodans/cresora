@@ -36,6 +36,10 @@ var (
 	ErrFenceCapacity = errors.New("telegram account runtime fence capacity is exhausted")
 	// ErrNilCallback means that no operation was supplied to Execute.
 	ErrNilCallback = errors.New("telegram account runtime callback is required")
+	// errRevokeCallbackPanicked is kept private so a panic from a privileged
+	// callback can be recovered long enough to tear down its owner and then be
+	// re-raised to the caller.
+	errRevokeCallbackPanicked = errors.New("telegram account revoke callback panicked")
 )
 
 const (
@@ -134,7 +138,6 @@ type accountSlot struct {
 	closed     bool
 	stopping   bool
 	generation uint64
-	teardownMu sync.Mutex
 	startMu    sync.Mutex
 	startState atomic.Uint32
 
@@ -143,13 +146,22 @@ type accountSlot struct {
 	activeDone   chan struct{}
 	activeCancel context.CancelFunc
 	lastUsed     time.Time
+
+	// revokeRunning and revokeWaiters form a bounded per-account rendezvous for
+	// privileged revoke operations. The slot is retained while either is set,
+	// so a waiting same-intent revoke cannot race a replacement owner.
+	revokeRunning bool
+	revokeWaiters int
+	revokeChanged chan struct{}
+	teardownGate  chan struct{}
 }
 
 type runtimeEntry struct {
-	registry   *Registry
-	slot       *accountSlot
-	target     operatoraccounts.RuntimeTarget
-	generation uint64
+	registry      *Registry
+	slot          *accountSlot
+	target        operatoraccounts.RuntimeTarget
+	generation    uint64
+	privateRevoke bool
 
 	mu       sync.Mutex
 	owner    ownerRuntime
@@ -337,7 +349,6 @@ func (registry *Registry) StopAccount(
 		registry.mu.Unlock()
 		return failure
 	}
-
 	slot.mu.Lock()
 	entry := slot.current
 	if entry != nil {
@@ -379,6 +390,316 @@ func (registry *Registry) StopAccount(
 		return nil
 	}
 	return registry.teardown(slot, entry, ctx)
+}
+
+// RevokeAndStop fences the disconnecting lifecycle version, drains ordinary
+// callbacks, runs exactly one privileged callback, and then tears down the
+// account owner. The privileged callback is deliberately outside the ordinary
+// admission path: it is the final operation allowed after the N+1 fence.
+//
+// A callback panic is recovered only long enough to stop and join the owner;
+// the original panic value is then re-raised. This keeps owner teardown
+// unconditional without converting programmer errors into runtime failures.
+func (registry *Registry) RevokeAndStop(
+	ctx context.Context,
+	disconnecting operatoraccounts.RuntimeTarget,
+	callback ClientCallback,
+) (failure error) {
+	if failure := validateRevokeTarget(disconnecting); failure != nil {
+		return failure
+	}
+	if callback == nil {
+		return ErrNilCallback
+	}
+
+	slot, entry, cancel, failure := registry.prepareRevoke(ctx, disconnecting)
+	if failure != nil {
+		return failure
+	}
+	if cancel != nil {
+		cancel()
+	}
+
+	callbackFailure, panicValue, panicked := registry.executeRevoke(ctx, slot, entry, callback)
+	teardownFailure := registry.teardownRevoke(slot, entry, disconnecting.Version, callbackFailure)
+	registry.releaseRevoke(slot)
+
+	if panicked {
+		panic(panicValue)
+	}
+	if teardownFailure != nil {
+		return teardownFailure
+	}
+	return callbackFailure
+}
+
+func (registry *Registry) prepareRevoke(
+	ctx context.Context,
+	disconnecting operatoraccounts.RuntimeTarget,
+) (*accountSlot, *runtimeEntry, context.CancelFunc, error) {
+	key := keyFor(disconnecting)
+	slot, failure := registry.acquireRevoke(ctx, key)
+	if failure != nil {
+		return nil, nil, nil, failure
+	}
+
+	for {
+		var (
+			entry        *runtimeEntry
+			cancel       context.CancelFunc
+			build        bool
+			prepareErr   error
+			stalePrivate *runtimeEntry
+		)
+		registry.mu.Lock()
+		if registry.stopped {
+			prepareErr = ErrRegistryStopped
+		} else {
+			slot.mu.Lock()
+			entry = slot.current
+			if entry != nil && entry.privateRevoke && entry.target == disconnecting {
+				stalePrivate = entry
+			} else if entry != nil {
+				sameIdentity := entry.target.Actor == disconnecting.Actor &&
+					entry.target.AccountID == disconnecting.AccountID
+				if !sameIdentity || entry.target.Version != disconnecting.Version-1 {
+					prepareErr = ErrStaleAdmission
+				} else {
+					switch entry.target.Status {
+					case operatoraccount.StatusActive, operatoraccount.StatusReauthRequired:
+					default:
+						prepareErr = ErrInvalidAdmission
+					}
+				}
+			}
+
+			if stalePrivate == nil && prepareErr == nil {
+				prepareErr = registry.recordFenceLocked(key, disconnecting.Version, true)
+			}
+			if stalePrivate == nil && prepareErr == nil {
+				slot.closed = true
+				slot.stopping = true
+				cancel = slot.closeAdmissionLocked()
+				if entry == nil {
+					entry = registry.newEntry(slot, disconnecting)
+					entry.privateRevoke = true
+					slot.current = entry
+					slot.generation++
+					entry.generation = slot.generation
+					build = true
+				}
+			}
+			slot.mu.Unlock()
+			if entry != nil && stalePrivate == nil {
+				slot.startState.CompareAndSwap(runtimeStartOpen, runtimeStartFenced)
+			}
+		}
+		registry.mu.Unlock()
+
+		if stalePrivate != nil {
+			cleanupFailure := registry.teardownRevoke(slot, stalePrivate, disconnecting.Version, nil)
+			registry.mu.Lock()
+			slot.mu.Lock()
+			gone := slot.current != stalePrivate
+			slot.mu.Unlock()
+			registry.mu.Unlock()
+			if !gone {
+				if cleanupFailure == nil {
+					cleanupFailure = ErrAccountStopped
+				}
+				registry.releaseRevoke(slot)
+				return nil, nil, nil, cleanupFailure
+			}
+			continue
+		}
+
+		if prepareErr != nil {
+			registry.releaseRevoke(slot)
+			return nil, nil, nil, prepareErr
+		}
+		if build {
+			go registry.buildEntry(entry)
+		}
+		return slot, entry, cancel, nil
+	}
+}
+
+// acquireRevoke claims the account's single teardown gate before publishing a
+// revoke as running. Every teardown uses the same gate, so an owner cannot be
+// stopped between revoke admission and the privileged callback. Waiters are
+// counted before blocking and use the gate itself rather than a one-shot
+// completion channel, which keeps queued retries from being missed.
+func (registry *Registry) acquireRevoke(ctx context.Context, key accountKey) (*accountSlot, error) {
+	registry.mu.Lock()
+	if registry.stopped {
+		registry.mu.Unlock()
+		return nil, ErrRegistryStopped
+	}
+	slot := registry.slots[key]
+	if slot == nil {
+		evicted := registry.makeCapacityLocked()
+		if evicted != nil {
+			registry.mu.Unlock()
+			if failure := registry.teardown(evicted.slot, evicted, ctx); failure != nil {
+				return nil, failure
+			}
+			return registry.acquireRevoke(ctx, key)
+		}
+		if len(registry.slots) >= registry.config.Capacity {
+			registry.mu.Unlock()
+			return nil, ErrRuntimeCapacity
+		}
+		slot = newAccountSlot()
+		registry.slots[key] = slot
+	}
+	slot.revokeWaiters++
+	signalRevokeLocked(slot)
+	registry.mu.Unlock()
+
+	select {
+	case <-slot.teardownGate:
+	case <-ctx.Done():
+		registry.mu.Lock()
+		slot.revokeWaiters--
+		signalRevokeLocked(slot)
+		registry.mu.Unlock()
+		return nil, ctx.Err()
+	}
+
+	registry.mu.Lock()
+	slot.revokeWaiters--
+	if registry.stopped {
+		signalRevokeLocked(slot)
+		registry.mu.Unlock()
+		slot.teardownGate <- struct{}{}
+		return nil, ErrRegistryStopped
+	}
+	slot.revokeRunning = true
+	signalRevokeLocked(slot)
+	registry.mu.Unlock()
+	return slot, nil
+}
+
+func signalRevokeLocked(slot *accountSlot) {
+	previous := slot.revokeChanged
+	slot.revokeChanged = make(chan struct{})
+	close(previous)
+}
+
+func (registry *Registry) executeRevoke(
+	ctx context.Context,
+	slot *accountSlot,
+	entry *runtimeEntry,
+	callback ClientCallback,
+) (failure error, panicValue any, panicked bool) {
+	defer func() {
+		if value := recover(); value != nil {
+			panicked = true
+			panicValue = value
+			failure = errRevokeCallbackPanicked
+		}
+	}()
+	drainContext, cancel := registry.boundedContext(ctx)
+	defer cancel()
+	if failure := entry.waitBuilt(drainContext); failure != nil {
+		return failure, nil, false
+	}
+	if failure := slot.waitDrained(drainContext); failure != nil {
+		return failure, nil, false
+	}
+	owner := entry.getOwner()
+	if owner == nil {
+		return ErrAccountStopped, nil, false
+	}
+	if failure := owner.WaitReady(drainContext); failure != nil {
+		return failure, nil, false
+	}
+	if failure := ctx.Err(); failure != nil {
+		return failure, nil, false
+	}
+
+	failure = owner.Execute(ctx, func(callbackContext context.Context, client *gotdtelegram.Client) (callbackFailure error) {
+		defer func() {
+			if value := recover(); value != nil {
+				panicked = true
+				panicValue = value
+				callbackFailure = errRevokeCallbackPanicked
+			}
+		}()
+		return callback(callbackContext, client)
+	})
+	return failure, panicValue, panicked
+}
+
+func (registry *Registry) teardownRevoke(
+	slot *accountSlot,
+	entry *runtimeEntry,
+	fencedVersion operatoraccount.Version,
+	callbackFailure error,
+) error {
+	cleanupContext, cancel := registry.boundedContext(context.Background())
+	defer cancel()
+
+	var first error
+	built := true
+	if failure := entry.waitBuilt(cleanupContext); failure != nil {
+		built = !isContextFailure(failure)
+		if !errors.Is(failure, ErrAccountStopped) {
+			first = failure
+		}
+	}
+	if failure := slot.waitDrained(cleanupContext); failure != nil && first == nil {
+		first = failure
+	}
+
+	owner := entry.getOwner()
+	joined := owner == nil
+	if owner != nil {
+		owner.Stop()
+		failure := owner.Wait(cleanupContext)
+		if callbackFailure != nil && errors.Is(failure, callbackFailure) {
+			failure = nil
+		}
+		joined = failure == nil || errors.Is(failure, ErrStopped) || !isContextFailure(failure)
+		if failure != nil && !errors.Is(failure, ErrStopped) && first == nil {
+			first = failure
+		}
+	}
+	if built && joined {
+		registry.finishTeardown(slot, entry)
+		registry.mu.Lock()
+		registry.unprotectFenceLocked(keyFor(entry.target), fencedVersion)
+		registry.mu.Unlock()
+	}
+	return first
+}
+
+func (registry *Registry) releaseRevoke(slot *accountSlot) {
+	registry.mu.Lock()
+	if slot.revokeRunning {
+		slot.revokeRunning = false
+		signalRevokeLocked(slot)
+	}
+	slot.mu.Lock()
+	if slot.current == nil && slot.active == 0 {
+		slot.closed = false
+		slot.stopping = false
+	}
+	remove := slot.revokeWaiters == 0
+	if remove {
+		remove = slot.current == nil && slot.refs == 0 && slot.active == 0 && !slot.stopping
+	}
+	slot.mu.Unlock()
+	if remove {
+		for key, candidate := range registry.slots {
+			if candidate == slot {
+				delete(registry.slots, key)
+				break
+			}
+		}
+	}
+	registry.mu.Unlock()
+	slot.teardownGate <- struct{}{}
 }
 
 // Stop closes every account admission and joins each owner within the supplied
@@ -580,6 +901,10 @@ func (registry *Registry) reserve(
 		stopping := slot.stopping
 		closed := slot.closed
 		slot.mu.Unlock()
+		if slot.revokeRunning || slot.revokeWaiters > 0 {
+			registry.mu.Unlock()
+			return nil, ErrAccountStopped
+		}
 
 		if current != nil {
 			switch {
@@ -670,7 +995,7 @@ func (registry *Registry) buildEntry(entry *runtimeEntry) {
 	entry.slot.mu.Lock()
 	closed := entry.slot.closed
 	entry.slot.mu.Unlock()
-	valid := !registry.stopped && entry.slot.current == entry && !closed
+	valid := !registry.stopped && entry.slot.current == entry && (!closed || entry.slot.revokeRunning)
 	if failure != nil || !valid {
 		if failure == nil {
 			failure = ErrAccountStopped
@@ -905,10 +1230,14 @@ func (entry *runtimeEntry) releaseRef() {
 func newAccountSlot() *accountSlot {
 	gate := make(chan struct{}, 1)
 	gate <- struct{}{}
+	teardownGate := make(chan struct{}, 1)
+	teardownGate <- struct{}{}
 	return &accountSlot{
-		gate:       gate,
-		activeDone: closedSignal(),
-		lastUsed:   time.Now(),
+		gate:          gate,
+		activeDone:    closedSignal(),
+		lastUsed:      time.Now(),
+		revokeChanged: make(chan struct{}),
+		teardownGate:  teardownGate,
 	}
 }
 
@@ -949,8 +1278,24 @@ func (slot *accountSlot) waitDrained(ctx context.Context) error {
 }
 
 func (registry *Registry) teardown(slot *accountSlot, entry *runtimeEntry, ctx context.Context) error {
-	slot.teardownMu.Lock()
-	defer slot.teardownMu.Unlock()
+	if failure := registry.waitForRevoke(slot, ctx); failure != nil {
+		return failure
+	}
+	select {
+	case <-slot.teardownGate:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { slot.teardownGate <- struct{}{} }()
+
+	registry.mu.Lock()
+	slot.mu.Lock()
+	current := slot.current
+	slot.mu.Unlock()
+	registry.mu.Unlock()
+	if current != entry {
+		return nil
+	}
 
 	drainContext, cancel := registry.boundedContext(ctx)
 	defer cancel()
@@ -978,6 +1323,23 @@ func (registry *Registry) teardown(slot *accountSlot, entry *runtimeEntry, ctx c
 	}
 	registry.finishTeardown(slot, entry)
 	return nil
+}
+
+func (registry *Registry) waitForRevoke(slot *accountSlot, ctx context.Context) error {
+	for {
+		registry.mu.Lock()
+		busy := slot.revokeRunning || slot.revokeWaiters > 0
+		changed := slot.revokeChanged
+		registry.mu.Unlock()
+		if !busy {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (registry *Registry) finishTeardown(slot *accountSlot, entry *runtimeEntry) {
@@ -1010,7 +1372,8 @@ func (registry *Registry) removeSlot(slot *accountSlot) {
 			continue
 		}
 		candidate.mu.Lock()
-		remove := candidate.current == nil && candidate.refs == 0 && candidate.active == 0 && !candidate.stopping
+		remove := candidate.current == nil && candidate.refs == 0 && candidate.active == 0 &&
+			!candidate.stopping && !candidate.revokeRunning && candidate.revokeWaiters == 0
 		candidate.mu.Unlock()
 		if remove {
 			delete(registry.slots, key)
@@ -1105,7 +1468,9 @@ func validateAdmission(target operatoraccounts.RuntimeTarget) error {
 		return failure
 	}
 	switch target.Status {
-	case operatoraccount.StatusAuthenticating, operatoraccount.StatusActive:
+	case operatoraccount.StatusAuthenticating,
+		operatoraccount.StatusActive,
+		operatoraccount.StatusReauthRequired:
 		return nil
 	default:
 		return ErrInvalidAdmission
@@ -1117,11 +1482,24 @@ func validateStopTarget(target operatoraccounts.RuntimeTarget) error {
 		return failure
 	}
 	switch target.Status {
-	case operatoraccount.StatusAuthenticating, operatoraccount.StatusActive, operatoraccount.StatusDisconnecting:
+	case operatoraccount.StatusAuthenticating,
+		operatoraccount.StatusActive,
+		operatoraccount.StatusReauthRequired,
+		operatoraccount.StatusDisconnecting:
 		return nil
 	default:
 		return ErrInvalidAdmission
 	}
+}
+
+func validateRevokeTarget(target operatoraccounts.RuntimeTarget) error {
+	if failure := validateTarget(target); failure != nil {
+		return failure
+	}
+	if target.Status != operatoraccount.StatusDisconnecting || target.Version <= operatoraccount.InitialVersion {
+		return ErrInvalidAdmission
+	}
+	return nil
 }
 
 func validateTarget(target operatoraccounts.RuntimeTarget) error {

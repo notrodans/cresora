@@ -20,6 +20,7 @@ func TestAccountLifecycleFollowsApprovedTransitionGraph(t *testing.T) {
 		failureCode   FailureCode
 		telegramID    int64
 		authExpiresAt time.Time
+		remoteIntent  bool
 	}{
 		{
 			name:          "disconnected to authenticating",
@@ -59,11 +60,12 @@ func TestAccountLifecycleFollowsApprovedTransitionGraph(t *testing.T) {
 			telegramID: 42,
 		},
 		{
-			name:       "active to disconnecting",
-			move:       account.BeginDisconnect,
-			status:     StatusDisconnecting,
-			version:    7,
-			telegramID: 42,
+			name:         "active to disconnecting",
+			move:         account.BeginDisconnect,
+			status:       StatusDisconnecting,
+			version:      7,
+			telegramID:   42,
+			remoteIntent: true,
 		},
 		{
 			name:       "disconnecting to disconnected",
@@ -94,6 +96,9 @@ func TestAccountLifecycleFollowsApprovedTransitionGraph(t *testing.T) {
 			if actual := account.AuthExpiresAt(); !actual.Equal(transition.authExpiresAt) {
 				t.Fatalf("account auth expiry = %s, want %s", actual, transition.authExpiresAt)
 			}
+			if actual := account.RemoteLogoutRequired(); actual != transition.remoteIntent {
+				t.Fatalf("account remote logout requirement = %t, want %t", actual, transition.remoteIntent)
+			}
 		})
 	}
 }
@@ -102,8 +107,9 @@ func TestAccountLifecycleAllowsAuthenticatingAndReauthenticationDisconnect(t *te
 	authExpiry := time.Date(2026, time.August, 1, 13, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name string
-		move func(*Account) error
+		name         string
+		move         func(*Account) error
+		remoteIntent bool
 	}{
 		{
 			name: "authenticating",
@@ -115,7 +121,8 @@ func TestAccountLifecycleAllowsAuthenticatingAndReauthenticationDisconnect(t *te
 			},
 		},
 		{
-			name: "reauthentication required",
+			name:         "reauthentication required",
+			remoteIntent: true,
 			move: func(account *Account) error {
 				if failure := account.BeginAuthentication(authExpiry); failure != nil {
 					return failure
@@ -140,11 +147,14 @@ func TestAccountLifecycleAllowsAuthenticatingAndReauthenticationDisconnect(t *te
 			if account.Status() != StatusDisconnecting {
 				t.Fatalf("account status = %q, want %q", account.Status(), StatusDisconnecting)
 			}
+			if actual := account.RemoteLogoutRequired(); actual != test.remoteIntent {
+				t.Fatalf("account remote logout requirement = %t, want %t", actual, test.remoteIntent)
+			}
 			if failure := account.MarkDisconnected(); failure != nil {
 				t.Fatalf("mark disconnected: %v", failure)
 			}
-			if account.Status() != StatusDisconnected || !account.AuthExpiresAt().IsZero() || account.FailureCode() != NoFailure {
-				t.Fatalf("disconnected account retained transient state: status=%q expiry=%s failure=%q", account.Status(), account.AuthExpiresAt(), account.FailureCode())
+			if account.Status() != StatusDisconnected || !account.AuthExpiresAt().IsZero() || account.FailureCode() != NoFailure || account.RemoteLogoutRequired() {
+				t.Fatalf("disconnected account retained transient state: status=%q expiry=%s failure=%q remote logout requirement=%t", account.Status(), account.AuthExpiresAt(), account.FailureCode(), account.RemoteLogoutRequired())
 			}
 		})
 	}
@@ -217,6 +227,7 @@ func TestRestoreRejectsInconsistentCurrentState(t *testing.T) {
 		failureCode   FailureCode
 		telegramID    int64
 		authExpiresAt time.Time
+		remoteIntent  bool
 	}{
 		{name: "zero id", id: ID{}, status: StatusDisconnected, version: InitialVersion},
 		{name: "unknown status", id: id, status: Status("unknown"), version: InitialVersion},
@@ -228,14 +239,36 @@ func TestRestoreRejectsInconsistentCurrentState(t *testing.T) {
 		{name: "reauthentication required without code", id: id, status: StatusReauthRequired, version: InitialVersion, telegramID: 42},
 		{name: "reauthentication required with unsupported code", id: id, status: StatusReauthRequired, version: InitialVersion, failureCode: FailureCode("unsupported"), telegramID: 42},
 		{name: "disconnected with code", id: id, status: StatusDisconnected, version: InitialVersion, failureCode: FailureCodeSessionInvalid},
+		{name: "active with remote disconnect intent", id: id, status: StatusActive, version: InitialVersion, telegramID: 42, remoteIntent: true},
+		{name: "disconnected with remote disconnect intent", id: id, status: StatusDisconnected, version: InitialVersion, remoteIntent: true},
+		{name: "authenticating with remote disconnect intent", id: id, status: StatusAuthenticating, version: InitialVersion, telegramID: 42, authExpiresAt: expiry, remoteIntent: true},
+		{name: "reauthentication required with remote disconnect intent", id: id, status: StatusReauthRequired, version: InitialVersion, failureCode: FailureCodeSessionInvalid, telegramID: 42, remoteIntent: true},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, failure := Restore(test.id, test.status, test.version, test.failureCode, test.telegramID, test.authExpiresAt); !errors.Is(failure, ErrInvalidState) {
+			if _, failure := Restore(test.id, test.status, test.version, test.failureCode, test.telegramID, test.authExpiresAt, test.remoteIntent); !errors.Is(failure, ErrInvalidState) {
 				t.Fatalf("restore error = %v, want ErrInvalidState", failure)
 			}
 		})
+	}
+}
+
+func TestRestoreAllowsRemoteLogoutRequirementOnlyWhileDisconnecting(t *testing.T) {
+	account, failure := Restore(
+		Identity(uuid.New()),
+		StatusDisconnecting,
+		InitialVersion,
+		NoFailure,
+		42,
+		time.Time{},
+		true,
+	)
+	if failure != nil {
+		t.Fatalf("restore disconnecting account: %v", failure)
+	}
+	if !account.RemoteLogoutRequired() {
+		t.Fatal("restored disconnecting account remote logout requirement = false, want true")
 	}
 }
 

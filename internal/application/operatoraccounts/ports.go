@@ -2,15 +2,10 @@ package operatoraccounts
 
 import (
 	"context"
-	"errors"
 
 	application "github.com/notrodans/cresora/internal/application"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 )
-
-// ErrAccountStateConflict indicates that an operation is not permitted while
-// the owned account is in its current lifecycle state.
-var ErrAccountStateConflict = errors.New("operator account lifecycle state conflict")
 
 // AccountLifecycleReader loads one current-only lifecycle snapshot in the
 // actor's ownership scope. Implementations should return ErrAccountNotFound
@@ -44,6 +39,33 @@ type AccountLifecycleWriter interface {
 type AccountLifecycleRepository interface {
 	AccountLifecycleReader
 	AccountLifecycleWriter
+}
+
+// RemoteLogoutIntentLister returns only persisted disconnecting accounts whose
+// remote Telegram session still needs revocation. The returned target carries
+// the actor-owned account identity and the exact persisted lifecycle version;
+// callers must not broaden this query to all disconnecting accounts.
+type RemoteLogoutIntentLister interface {
+	ListRemoteLogoutIntents(context.Context) ([]RuntimeTarget, error)
+}
+
+// DisconnectPersistence is the deliberately small persistence boundary used by
+// disconnect and startup recovery. Its final PersistLifecycle call is where an
+// adapter performs the disconnected-state write and transactional session
+// deletion; no session-deletion port is needed by this workflow.
+type DisconnectPersistence interface {
+	AccountLifecycleReader
+	AccountLifecycleWriter
+	RemoteLogoutIntentLister
+}
+
+// RuntimeRevoker owns one version-fenced remote logout and local runtime stop.
+// Its concrete result type prevents arbitrary provider errors from crossing
+// the boundary. Implementations must translate cancellation, provider status,
+// and runtime failures to RevokeOutcome constructors; gotd and other
+// transport types must not cross this boundary.
+type RuntimeRevoker interface {
+	RevokeAndStop(context.Context, RuntimeTarget) RevokeOutcome
 }
 
 // SessionDeleter removes the persisted Telegram session for one actor-owned

@@ -112,6 +112,17 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		}
 	}()
 
+	var operatorAccounts *operatorAccountComposition
+	if sharedRuntime != nil {
+		operatorAccounts, failure = composeOperatorAccounts(database, sharedRuntime)
+		if failure != nil {
+			return fmt.Errorf("compose telegram operator account services: %w", failure)
+		}
+		if failure = recoverOperatorAccountDisconnect(rootContext, operatorAccounts.disconnect, log); failure != nil {
+			return failure
+		}
+	}
+
 	// Lease recovery is transport-free and therefore runs in every mode,
 	// including WEB_ONLY. The PostgreSQL adapter retains its own batch, grace,
 	// and retry defaults; only the polling interval is application config.
@@ -151,21 +162,20 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	authentication.Register(router, authenticationService, sessionProvider, cfg.PublicOrigin.String(), cookieConfig)
 	var operatorAuth *operatorAuthLifecycle
 	if cfg.TelegramAuthEnabled {
-		operatorAuth, failure = composeOperatorAuth(
+		operatorAuth, failure = composeOperatorAuthWithComposition(
 			rootContext,
 			cfg,
-			database,
 			router,
 			sessionProvider,
 			cfg.PublicOrigin.String(),
-			sharedRuntime,
+			operatorAccounts,
 		)
 		if failure != nil {
 			return fmt.Errorf("compose telegram operator account authentication: %w", failure)
 		}
 	} else {
-		// The disabled route preserves the endpoint surface without constructing
-		// any Telegram runtime or adapter.
+		// The disabled route preserves the endpoint surface without exposing the
+		// authentication or disconnect command ports.
 		registerDisabledOperatorAuth(router, sessionProvider, cfg)
 	}
 	console.Register(router, createDraft, queueMailing, dashboard, sessionProvider, cfg.PublicOrigin.String(), log)
