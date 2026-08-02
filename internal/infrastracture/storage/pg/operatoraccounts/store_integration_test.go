@@ -204,6 +204,170 @@ func TestOperatorAccountStorePostgresLifecycleOwnershipAndSessionDeletion(t *tes
 	}
 }
 
+func TestOperatorAccountStorePostgresRemoteLogoutIntentLifecycle(t *testing.T) {
+	context, database := newOperatorAccountsIntegrationDatabase(t)
+	operatorID := uuid.New()
+	activeID := uuid.New()
+	reauthID := uuid.New()
+	authenticatingID := uuid.New()
+	localDisconnectingID := uuid.New()
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO operators (id, username) VALUES ($1, $2)`,
+		operatorID,
+		"operator-account-intent-"+operatorID.String()[:8],
+	); failure != nil {
+		t.Fatalf("insert operator: %v", failure)
+	}
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id, auth_expires_at, failure_code) VALUES
+			($1, $2, 'active', 1, 7101, NULL, NULL),
+			($3, $2, 'reauth_required', 4, 7102, NULL, 'session_invalid'),
+			($4, $2, 'authenticating', 6, NULL, CURRENT_TIMESTAMP + interval '1 hour', NULL),
+			($5, $2, 'disconnecting', 3, NULL, NULL, NULL)`,
+		activeID,
+		operatorID,
+		reauthID,
+		authenticatingID,
+		localDisconnectingID,
+	); failure != nil {
+		t.Fatalf("insert operator accounts: %v", failure)
+	}
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO sessions (account_id, format_version, key_id, nonce, ciphertext)
+		 VALUES ($1, 1, 'test', $2, $3)`,
+		activeID,
+		[]byte("012345678901"),
+		[]byte("0123456789012345"),
+	); failure != nil {
+		t.Fatalf("insert encrypted session: %v", failure)
+	}
+
+	store := New(database)
+	actor := application.Actor{OperatorID: operatorID}
+	active := mustLoadAccount(t, context, store, actor, activeID)
+	if active.RemoteLogoutRequired() {
+		t.Fatal("active account loaded with a remote logout intent")
+	}
+	staleActive := active
+	if failure := staleActive.BeginDisconnect(); failure != nil {
+		t.Fatalf("begin stale active disconnect: %v", failure)
+	}
+	if failure := store.PersistLifecycle(context, actor, staleActive, active.Version()); failure != nil {
+		t.Fatalf("persist active remote logout intent: %v", failure)
+	}
+	conflictingActive := active
+	if failure := conflictingActive.BeginDisconnect(); failure != nil {
+		t.Fatalf("begin conflicting active disconnect: %v", failure)
+	}
+	if failure := store.PersistLifecycle(context, actor, conflictingActive, active.Version()); !errors.Is(failure, applicationoperatoraccounts.ErrAccountVersionConflict) {
+		t.Fatalf("persist conflicting active intent error = %v, want %v", failure, applicationoperatoraccounts.ErrAccountVersionConflict)
+	}
+	assertRemoteLogoutIntentAndSession(t, context, database, activeID, true, true)
+	assertRemoteLogoutTargets(t, context, store, []uuid.UUID{activeID})
+
+	activeDisconnecting := mustLoadAccount(t, context, store, actor, activeID)
+	if !activeDisconnecting.RemoteLogoutRequired() || activeDisconnecting.Status() != operatoraccount.StatusDisconnecting {
+		t.Fatalf("active disconnecting account = status %q remote=%t, want disconnecting/true", activeDisconnecting.Status(), activeDisconnecting.RemoteLogoutRequired())
+	}
+	if failure := activeDisconnecting.MarkDisconnected(); failure != nil {
+		t.Fatalf("mark active account disconnected: %v", failure)
+	}
+	if failure := store.PersistLifecycle(context, actor, activeDisconnecting, activeDisconnecting.Version()-1); failure != nil {
+		t.Fatalf("persist completed active disconnect: %v", failure)
+	}
+	assertRemoteLogoutIntentAndSession(t, context, database, activeID, false, false)
+	if restored := mustLoadAccount(t, context, store, actor, activeID); restored.RemoteLogoutRequired() {
+		t.Fatal("disconnected account retained a remote logout intent")
+	}
+
+	reauth := mustLoadAccount(t, context, store, actor, reauthID)
+	if reauth.RemoteLogoutRequired() {
+		t.Fatal("reauthentication-required account loaded with a remote logout intent")
+	}
+	if failure := reauth.BeginDisconnect(); failure != nil {
+		t.Fatalf("begin reauthentication-required disconnect: %v", failure)
+	}
+	if !reauth.RemoteLogoutRequired() {
+		t.Fatal("reauthentication-required disconnect did not create a remote logout intent")
+	}
+	if failure := store.PersistLifecycle(context, actor, reauth, reauth.Version()-1); failure != nil {
+		t.Fatalf("persist reauthentication-required remote logout intent: %v", failure)
+	}
+	assertRemoteLogoutTargets(t, context, store, []uuid.UUID{reauthID})
+
+	authenticating := mustLoadAccount(t, context, store, actor, authenticatingID)
+	if authenticating.RemoteLogoutRequired() {
+		t.Fatal("authenticating account loaded with a remote logout intent")
+	}
+	if failure := authenticating.BeginDisconnect(); failure != nil {
+		t.Fatalf("begin local authenticating disconnect: %v", failure)
+	}
+	if authenticating.RemoteLogoutRequired() {
+		t.Fatal("local authenticating disconnect created a remote logout intent")
+	}
+	if failure := store.PersistLifecycle(context, actor, authenticating, authenticating.Version()-1); failure != nil {
+		t.Fatalf("persist local authenticating disconnect: %v", failure)
+	}
+	assertRemoteLogoutTargets(t, context, store, []uuid.UUID{reauthID})
+
+	var localIntent bool
+	if failure := database.QueryRow(context, `SELECT remote_logout_required FROM operator_accounts WHERE id = $1`, localDisconnectingID).Scan(&localIntent); failure != nil {
+		t.Fatalf("read local disconnecting remote intent: %v", failure)
+	}
+	if localIntent {
+		t.Fatal("local disconnecting account was included as a remote logout intent")
+	}
+}
+
+func assertRemoteLogoutIntentAndSession(
+	t *testing.T,
+	context context.Context,
+	database *pgxpool.Pool,
+	accountID uuid.UUID,
+	wantIntent bool,
+	wantSession bool,
+) {
+	t.Helper()
+	var remoteLogoutRequired bool
+	if failure := database.QueryRow(context, `SELECT remote_logout_required FROM operator_accounts WHERE id = $1`, accountID).Scan(&remoteLogoutRequired); failure != nil {
+		t.Fatalf("read remote logout intent for %s: %v", accountID, failure)
+	}
+	if remoteLogoutRequired != wantIntent {
+		t.Fatalf("remote logout intent for %s = %t, want %t", accountID, remoteLogoutRequired, wantIntent)
+	}
+	var sessionCount int
+	if failure := database.QueryRow(context, `SELECT count(*) FROM sessions WHERE account_id = $1`, accountID).Scan(&sessionCount); failure != nil {
+		t.Fatalf("count encrypted sessions for %s: %v", accountID, failure)
+	}
+	if (sessionCount > 0) != wantSession {
+		t.Fatalf("encrypted session presence for %s = %t, want %t", accountID, sessionCount > 0, wantSession)
+	}
+}
+
+func assertRemoteLogoutTargets(
+	t *testing.T,
+	context context.Context,
+	store *Store,
+	wantAccountIDs []uuid.UUID,
+) {
+	t.Helper()
+	targets, failure := store.ListRemoteLogoutIntents(context)
+	if failure != nil {
+		t.Fatalf("list remote logout intents: %v", failure)
+	}
+	if len(targets) != len(wantAccountIDs) {
+		t.Fatalf("remote logout intent count = %d, want %d (%+v)", len(targets), len(wantAccountIDs), targets)
+	}
+	for index, target := range targets {
+		if target.Actor.OperatorID == uuid.Nil || target.AccountID.UUID() != wantAccountIDs[index] || target.Status != operatoraccount.StatusDisconnecting || target.Version == 0 {
+			t.Fatalf("remote logout target[%d] = %+v, want actor, account %s, disconnecting, positive version", index, target, wantAccountIDs[index])
+		}
+	}
+}
+
 func mustLoadAccount(
 	t *testing.T,
 	context context.Context,

@@ -25,6 +25,7 @@ type database interface {
 
 var (
 	_ applicationoperatoraccounts.AccountLifecycleRepository = (*Store)(nil)
+	_ applicationoperatoraccounts.RemoteLogoutIntentLister   = (*Store)(nil)
 	_ applicationoperatoraccounts.SessionDeleter             = (*Store)(nil)
 )
 
@@ -53,12 +54,13 @@ func (store *Store) LoadAccount(
 	}
 
 	var (
-		id             uuid.UUID
-		status         string
-		version        int64
-		failureCode    pgtype.Text
-		telegramUserID pgtype.Int8
-		authExpiresAt  pgtype.Timestamptz
+		id                   uuid.UUID
+		status               string
+		version              int64
+		failureCode          pgtype.Text
+		telegramUserID       pgtype.Int8
+		authExpiresAt        pgtype.Timestamptz
+		remoteLogoutRequired bool
 	)
 	failure := store.database.QueryRow(
 		context,
@@ -67,7 +69,8 @@ func (store *Store) LoadAccount(
 		        account.status_version,
 		        account.failure_code,
 		        account.telegram_user_id,
-		        account.auth_expires_at
+		        account.auth_expires_at,
+		        account.remote_logout_required
 		 FROM operator_accounts AS account
 		 WHERE account.operator_id = $1
 		   AND account.id = $2`,
@@ -80,6 +83,7 @@ func (store *Store) LoadAccount(
 		&failureCode,
 		&telegramUserID,
 		&authExpiresAt,
+		&remoteLogoutRequired,
 	)
 	if errors.Is(failure, pgx.ErrNoRows) {
 		return operatoraccount.Account{}, applicationoperatoraccounts.ErrAccountNotFound
@@ -113,11 +117,58 @@ func (store *Store) LoadAccount(
 		failureValue,
 		identity,
 		expiry,
+		remoteLogoutRequired,
 	)
 	if failure != nil {
 		return operatoraccount.Account{}, fmt.Errorf("load operator account: %w", failure)
 	}
 	return restored, nil
+}
+
+// ListRemoteLogoutIntents returns only actor-scoped snapshots whose durable
+// remote logout intent still requires runtime reconciliation. Authentication
+// abort candidates are intentionally not included here.
+func (store *Store) ListRemoteLogoutIntents(
+	context context.Context,
+) ([]applicationoperatoraccounts.RuntimeTarget, error) {
+	rows, failure := store.database.Query(
+		context,
+		`SELECT operator_id, id, status::text, status_version
+		 FROM operator_accounts
+		 WHERE status = 'disconnecting'
+		   AND remote_logout_required = TRUE
+		 ORDER BY created_at, id`,
+	)
+	if failure != nil {
+		return nil, fmt.Errorf("list operator account remote logout intents: %w", failure)
+	}
+	defer rows.Close()
+
+	targets := make([]applicationoperatoraccounts.RuntimeTarget, 0)
+	for rows.Next() {
+		var (
+			operatorID uuid.UUID
+			accountID  uuid.UUID
+			status     string
+			version    int64
+		)
+		if failure = rows.Scan(&operatorID, &accountID, &status, &version); failure != nil {
+			return nil, fmt.Errorf("scan operator account remote logout intent: %w", failure)
+		}
+		if operatorID == uuid.Nil || accountID == uuid.Nil || version <= 0 || status != string(operatoraccount.StatusDisconnecting) {
+			return nil, fmt.Errorf("scan operator account remote logout intent: %w", operatoraccount.ErrInvalidState)
+		}
+		targets = append(targets, applicationoperatoraccounts.RuntimeTarget{
+			Actor:     application.Actor{OperatorID: operatorID},
+			AccountID: operatoraccount.Identity(accountID),
+			Status:    operatoraccount.Status(status),
+			Version:   operatoraccount.Version(version),
+		})
+	}
+	if failure = rows.Err(); failure != nil {
+		return nil, fmt.Errorf("list operator account remote logout intents: %w", failure)
+	}
+	return targets, nil
 }
 
 // PersistLifecycle atomically advances one valid domain transition. The
@@ -157,11 +208,12 @@ func (store *Store) PersistLifecycle(
 		     telegram_user_id = $4,
 		     auth_expires_at = $5,
 		     failure_code = $6,
+		     remote_logout_required = $7,
 		     updated_at = clock_timestamp()
 		 WHERE account.operator_id = $1
 		   AND account.id = $2
 		   AND account.status IN (`+previousStatuses+`)
-		   AND account.status_version = $7
+		   AND account.status_version = $8
 		   AND (
 		       $3::operator_account_status_type <> 'active'::operator_account_status_type
 		       OR EXISTS (
@@ -177,6 +229,7 @@ func (store *Store) PersistLifecycle(
 		optionalTelegramUserID(account.TelegramUserID()),
 		optionalAuthenticationExpiry(account.AuthExpiresAt()),
 		optionalFailureCode(account.FailureCode()),
+		account.RemoteLogoutRequired(),
 		int64(expectedVersion),
 	).Scan(&updatedID)
 	if failure == nil {
