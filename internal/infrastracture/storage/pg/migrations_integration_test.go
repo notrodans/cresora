@@ -21,6 +21,7 @@ import (
 const (
 	currentBaselineVersion  int64 = 20260801000000
 	phoneIndexRepairVersion int64 = 20260801200000
+	remoteLogoutVersion     int64 = 20260802000000
 )
 
 func TestCurrentMigrationsPostgres(t *testing.T) {
@@ -37,8 +38,8 @@ func TestCurrentMigrationsPostgres(t *testing.T) {
 	if failure := database.QueryRowContext(context, `SELECT count(*), max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&firstAppliedCount, &firstVersion); failure != nil {
 		t.Fatalf("read first applied migration version: %v", failure)
 	}
-	if firstAppliedCount != 3 || !firstVersion.Valid || firstVersion.Int64 != phoneIndexRepairVersion {
-		t.Fatalf("first applied migration history = count %d version %v, want count 3 version %d", firstAppliedCount, firstVersion, phoneIndexRepairVersion)
+	if firstAppliedCount != 4 || !firstVersion.Valid || firstVersion.Int64 != remoteLogoutVersion {
+		t.Fatalf("first applied migration history = count %d version %v, want count 4 version %d", firstAppliedCount, firstVersion, remoteLogoutVersion)
 	}
 
 	applyCurrentMigrations(t, context, databaseURL)
@@ -49,8 +50,8 @@ func TestCurrentMigrationsPostgres(t *testing.T) {
 	if failure := database.QueryRowContext(context, `SELECT count(*), max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&repeatedAppliedCount, &repeatedVersion); failure != nil {
 		t.Fatalf("read repeated migration history: %v", failure)
 	}
-	if repeatedAppliedCount != firstAppliedCount || !repeatedVersion.Valid || repeatedVersion.Int64 != phoneIndexRepairVersion {
-		t.Fatalf("repeated migration history = count %d version %v, want count %d version %d", repeatedAppliedCount, repeatedVersion, firstAppliedCount, phoneIndexRepairVersion)
+	if repeatedAppliedCount != firstAppliedCount || !repeatedVersion.Valid || repeatedVersion.Int64 != remoteLogoutVersion {
+		t.Fatalf("repeated migration history = count %d version %v, want count %d version %d", repeatedAppliedCount, repeatedVersion, firstAppliedCount, remoteLogoutVersion)
 	}
 
 	assertOperatorAccountCatalog(t, context, database)
@@ -68,6 +69,100 @@ func TestCurrentMigrationsPostgres(t *testing.T) {
 	if apiIDColumns != 0 {
 		t.Fatal("operator_accounts contains api_id")
 	}
+}
+
+func TestOperatorAccountRemoteLogoutMigrationUpgradePreservesDisconnectingAccountPostgres(t *testing.T) {
+	context, databaseURL := newMigrationTestDatabase(t)
+	database := openMigrationDatabase(t, context, databaseURL)
+	defer database.Close()
+	provider, failure := goose.NewProvider(goose.DialectPostgres, database, os.DirFS(migrationsPathForTest(t)))
+	if failure != nil {
+		t.Fatalf("create migration provider: %v", failure)
+	}
+	defer provider.Close()
+	if _, failure = provider.UpTo(context, phoneIndexRepairVersion); failure != nil {
+		t.Fatalf("apply migrations through phone index repair: %v", failure)
+	}
+
+	operatorID := uuid.New()
+	if _, failure = database.ExecContext(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "upgrade-"+operatorID.String()[:8]); failure != nil {
+		t.Fatalf("insert preexisting upgrade operator: %v", failure)
+	}
+	accountID := uuid.New()
+	if _, failure = database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version) VALUES ($1, $2, 'disconnecting', 1)`, accountID, operatorID); failure != nil {
+		t.Fatalf("insert preexisting disconnecting account: %v", failure)
+	}
+
+	if _, failure = provider.ApplyVersion(context, remoteLogoutVersion, true); failure != nil {
+		t.Fatalf("apply remote logout migration: %v", failure)
+	}
+
+	var remoteLogoutRequired bool
+	if failure = database.QueryRowContext(context, `SELECT remote_logout_required FROM operator_accounts WHERE id = $1 AND status = 'disconnecting'`, accountID).Scan(&remoteLogoutRequired); failure != nil {
+		t.Fatalf("read preexisting account after remote logout migration: %v", failure)
+	}
+	if remoteLogoutRequired {
+		t.Fatal("preexisting disconnecting account remote logout requirement = true, want false")
+	}
+}
+
+func TestOperatorAccountRemoteLogoutMigrationRollbackAndReapplyPreservesBaselinePostgres(t *testing.T) {
+	context, databaseURL := newMigrationTestDatabase(t)
+	applyCurrentMigrations(t, context, databaseURL)
+
+	database := openMigrationDatabase(t, context, databaseURL)
+	defer database.Close()
+	provider, failure := goose.NewProvider(goose.DialectPostgres, database, os.DirFS(migrationsPathForTest(t)))
+	if failure != nil {
+		t.Fatalf("create migration provider: %v", failure)
+	}
+	defer provider.Close()
+	if _, failure = provider.ApplyVersion(context, remoteLogoutVersion, false); failure != nil {
+		t.Fatalf("roll back remote logout migration: %v", failure)
+	}
+
+	var remoteLogoutColumns int
+	if failure = database.QueryRowContext(context, `
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name = 'operator_accounts'
+		  AND column_name = 'remote_logout_required'`).Scan(&remoteLogoutColumns); failure != nil {
+		t.Fatalf("inspect remote logout column after rollback: %v", failure)
+	}
+	if remoteLogoutColumns != 0 {
+		t.Fatalf("remote logout column count after rollback = %d, want 0", remoteLogoutColumns)
+	}
+
+	var baselineConstraintCount int
+	if failure = database.QueryRowContext(context, `
+		SELECT count(*)
+		FROM pg_constraint
+		WHERE conrelid = 'operator_accounts'::regclass
+		  AND conname = 'ck_operator_accounts_timestamp_order'`).Scan(&baselineConstraintCount); failure != nil {
+		t.Fatalf("inspect baseline account constraint after rollback: %v", failure)
+	}
+	if baselineConstraintCount != 1 {
+		t.Fatalf("baseline account constraint count after rollback = %d, want 1", baselineConstraintCount)
+	}
+
+	var phoneIndexCount int
+	if failure = database.QueryRowContext(context, `
+		SELECT count(*)
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'operator_accounts'
+		  AND indexname = 'uq_operator_accounts_operator_phone'`).Scan(&phoneIndexCount); failure != nil {
+		t.Fatalf("inspect baseline phone index after rollback: %v", failure)
+	}
+	if phoneIndexCount != 1 {
+		t.Fatalf("baseline phone index count after rollback = %d, want 1", phoneIndexCount)
+	}
+
+	if _, failure = provider.ApplyVersion(context, remoteLogoutVersion, true); failure != nil {
+		t.Fatalf("reapply remote logout migration: %v", failure)
+	}
+	assertOperatorAccountCatalog(t, context, database)
 }
 
 func TestOperatorAccountPhoneIndexRepairRollbackPreservesBaselinePostgres(t *testing.T) {
@@ -188,6 +283,7 @@ func TestOperatorAccountPhoneIndexMigrationRepairPostgres(t *testing.T) {
 		{version: 0, applied: true},
 		{version: currentBaselineVersion, applied: true},
 		{version: phoneIndexRepairVersion, applied: true},
+		{version: remoteLogoutVersion, applied: true},
 	}
 	for index, want := range wantHistory {
 		if !rows.Next() {
@@ -221,6 +317,17 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 	operatorID := uuid.New()
 	if _, failure := database.ExecContext(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "account-constraints-"+operatorID.String()[:8]); failure != nil {
 		t.Fatalf("insert account constraint operator: %v", failure)
+	}
+	defaultAccount := uuid.New()
+	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version) VALUES ($1, $2, 'disconnected', 1)`, defaultAccount, operatorID); failure != nil {
+		t.Fatalf("insert account with remote logout default: %v", failure)
+	}
+	var remoteLogoutRequired bool
+	if failure := database.QueryRowContext(context, `SELECT remote_logout_required FROM operator_accounts WHERE id = $1`, defaultAccount).Scan(&remoteLogoutRequired); failure != nil {
+		t.Fatalf("read remote logout default: %v", failure)
+	}
+	if remoteLogoutRequired {
+		t.Fatal("remote logout default = true, want false")
 	}
 
 	for _, test := range []struct {
@@ -279,6 +386,11 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 			args:  []any{uuid.New(), operatorID},
 		},
 		{
+			name:  "remote logout required outside disconnecting",
+			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, remote_logout_required) VALUES ($1, $2, 'disconnected', 1, TRUE)`,
+			args:  []any{uuid.New(), operatorID},
+		},
+		{
 			name:  "invalid non-null phone",
 			query: `INSERT INTO operator_accounts (id, operator_id, status, status_version, phone) VALUES ($1, $2, 'disconnected', 1, 'not-a-phone')`,
 			args:  []any{uuid.New(), operatorID},
@@ -299,6 +411,17 @@ func TestOperatorAccountConstraintsPostgres(t *testing.T) {
 				t.Fatal("invalid operator account state was accepted")
 			}
 		})
+	}
+
+	validRemoteLogoutAccount := uuid.New()
+	if _, failure := database.ExecContext(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version, remote_logout_required) VALUES ($1, $2, 'disconnecting', 1, TRUE)`, validRemoteLogoutAccount, operatorID); failure != nil {
+		t.Fatalf("insert disconnecting account with remote logout required: %v", failure)
+	}
+	if failure := database.QueryRowContext(context, `SELECT remote_logout_required FROM operator_accounts WHERE id = $1`, validRemoteLogoutAccount).Scan(&remoteLogoutRequired); failure != nil {
+		t.Fatalf("read accepted remote logout requirement: %v", failure)
+	}
+	if !remoteLogoutRequired {
+		t.Fatal("accepted remote logout requirement = false, want true")
 	}
 
 	firstIdentity := uuid.New()
@@ -481,6 +604,7 @@ func assertOperatorAccountCatalog(t *testing.T, context context.Context, databas
 		"ck_operator_accounts_identity_required",
 		"ck_operator_accounts_auth_expiry",
 		"ck_operator_accounts_failure_code",
+		"ck_operator_accounts_remote_logout_required",
 	} {
 		var count int
 		if failure := database.QueryRowContext(context, `
