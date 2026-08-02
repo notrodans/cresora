@@ -19,13 +19,27 @@ func TestRegistryRevokeAndStopFencesDrainsAndTearsDown(t *testing.T) {
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	prior := registryTarget()
 	prior.Status = operatoraccount.StatusActive
+	ordinaryContext, cancelOrdinary := context.WithTimeout(context.Background(), time.Second)
+	defer cancelOrdinary()
 	ordinaryEntered := make(chan struct{})
+	ordinaryCanceled := make(chan struct{})
 	ordinaryDrained := make(chan struct{})
+	releaseOrdinary := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOrdinary) }) }
+	t.Cleanup(release)
+	var ordinaryCalls atomic.Int32
 	ordinaryDone := make(chan error, 1)
 	go func() {
-		ordinaryDone <- registry.Execute(context.Background(), prior, func(ctx context.Context, _ *gotdtelegram.Client) error {
+		ordinaryDone <- registry.Execute(ordinaryContext, prior, func(ctx context.Context, _ *gotdtelegram.Client) error {
+			ordinaryCalls.Add(1)
 			close(ordinaryEntered)
-			<-ctx.Done()
+			select {
+			case <-ctx.Done():
+				close(ordinaryCanceled)
+				<-releaseOrdinary
+			case <-releaseOrdinary:
+			}
 			close(ordinaryDrained)
 			return nil
 		})
@@ -36,42 +50,129 @@ func TestRegistryRevokeAndStopFencesDrainsAndTearsDown(t *testing.T) {
 		t.Fatal("timed out waiting for ordinary callback")
 	}
 
+	queuedContext, cancelQueued := context.WithTimeout(context.Background(), time.Second)
+	defer cancelQueued()
+	var queuedCalls atomic.Int32
+	queuedDone := make(chan error, 1)
+	queuedChecked := make(chan error, 1)
+	// Open is the public admission barrier. The first callback is still holding
+	// the account gate, so this admitted handle's Execute cannot reach its body.
+	queuedHandle, openFailure := registry.Open(queuedContext, prior)
+	if openFailure != nil {
+		t.Fatalf("Open() second ordinary admission error = %v", openFailure)
+	}
+	t.Cleanup(func() { _ = queuedHandle.Close() })
+	queuedGateWaitContext := &executeGateWaitContext{
+		Context:  queuedContext,
+		observed: make(chan struct{}),
+	}
+	go func() {
+		queuedDone <- queuedHandle.Execute(queuedGateWaitContext, func(context.Context, *gotdtelegram.Client) error {
+			queuedCalls.Add(1)
+			return nil
+		})
+	}()
+	select {
+	case <-queuedGateWaitContext.observed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second ordinary Execute gate admission")
+	}
+
 	logoutCalls := atomic.Int32{}
+	privilegedEntered := make(chan struct{}, 1)
 	disconnecting := prior
 	disconnecting.Status = operatoraccount.StatusDisconnecting
 	disconnecting.Version++
 	owner := factory.owner(0)
-	if failure := registry.RevokeAndStop(context.Background(), disconnecting, func(context.Context, *gotdtelegram.Client) error {
-		if owner.closed.Load() {
-			t.Error("owner stopped before privileged callback")
-		}
-		select {
-		case <-ordinaryDrained:
-		default:
-			t.Error("privileged callback began before ordinary callback drained")
-		}
-		logoutCalls.Add(1)
-		return nil
-	}); failure != nil {
+	revokeContext, cancelRevoke := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRevoke()
+	revokeDone := make(chan error, 1)
+	go func() {
+		revokeDone <- registry.RevokeAndStop(revokeContext, disconnecting, func(callbackContext context.Context, _ *gotdtelegram.Client) error {
+			select {
+			case <-owner.stopped:
+				t.Error("owner stopped before privileged callback")
+			default:
+			}
+			select {
+			case <-ordinaryDrained:
+			default:
+				t.Error("privileged callback began before ordinary callback drained")
+			}
+			select {
+			case failure := <-queuedDone:
+				if !errors.Is(failure, ErrAccountStopped) {
+					t.Errorf("queued ordinary Execute() error = %v, want %v", failure, ErrAccountStopped)
+				}
+				queuedChecked <- failure
+			case <-callbackContext.Done():
+				return callbackContext.Err()
+			}
+			logoutCalls.Add(1)
+			privilegedEntered <- struct{}{}
+			return nil
+		})
+	}()
+	select {
+	case <-ordinaryCanceled:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for revoke to cancel ordinary callback")
+	}
+	select {
+	case <-ordinaryDrained:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ordinary callback to drain")
+	}
+	select {
+	case <-privilegedEntered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for privileged callback")
+	}
+	if failure := <-revokeDone; failure != nil {
 		t.Fatalf("RevokeAndStop() error = %v", failure)
 	}
 	if got := logoutCalls.Load(); got != 1 {
 		t.Fatalf("privileged callback calls = %d, want 1", got)
+	}
+	if got := ordinaryCalls.Load(); got != 1 {
+		t.Fatalf("ordinary callback calls = %d, want 1", got)
+	}
+	if got := queuedCalls.Load(); got != 0 {
+		t.Fatalf("queued ordinary callback calls = %d, want 0", got)
 	}
 	select {
 	case <-owner.stopped:
 	default:
 		t.Fatal("owner was not stopped after privileged callback")
 	}
-	if failure := registry.Execute(context.Background(), prior, func(context.Context, *gotdtelegram.Client) error {
-		t.Fatal("ordinary callback ran after revoke fence")
-		return nil
-	}); !errors.Is(failure, ErrAccountStopped) {
-		t.Fatalf("ordinary Execute() error = %v, want ErrAccountStopped", failure)
+	select {
+	case failure := <-queuedChecked:
+		if !errors.Is(failure, ErrAccountStopped) {
+			t.Fatalf("queued ordinary Execute() error = %v, want ErrAccountStopped", failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queued ordinary Execute")
 	}
-	if failure := <-ordinaryDone; !errors.Is(failure, ErrAccountStopped) {
-		t.Fatalf("ordinary Execute() result = %v, want ErrAccountStopped", failure)
+	select {
+	case failure := <-ordinaryDone:
+		if !errors.Is(failure, ErrAccountStopped) {
+			t.Fatalf("ordinary Execute() result = %v, want ErrAccountStopped", failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ordinary Execute")
 	}
+}
+
+type executeGateWaitContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (context *executeGateWaitContext) Done() <-chan struct{} {
+	context.once.Do(func() { close(context.observed) })
+	return context.Context.Done()
 }
 
 func TestRegistryRevokeAndStopSerializesSameIntentAndBuildsPrivateOwners(t *testing.T) {

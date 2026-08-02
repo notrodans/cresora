@@ -384,6 +384,266 @@ func TestServiceRecoveryDurableEnumerationAndLoadErrorsAreFatal(t *testing.T) {
 	})
 }
 
+func TestServiceRecoveryDecisionMatrix(t *testing.T) {
+	reloadFailure := errors.New("post-runtime reload unavailable")
+	completionFailure := errors.New("completion persistence unavailable")
+	tests := []struct {
+		name            string
+		accountStatus   operatoraccount.Status
+		accountVersion  operatoraccount.Version
+		remote          bool
+		targetVersion   operatoraccount.Version
+		outcome         string
+		failureKind     RemoteLogoutFailureKind
+		retryAfter      time.Duration
+		loadFailures    []error
+		persistFailures []error
+		duplicate       bool
+		wantError       error
+		wantStatus      operatoraccount.Status
+		wantVersion     operatoraccount.Version
+		wantRemote      bool
+		wantAttempted   int
+		wantCompleted   int
+		wantPending     int
+		wantSkipped     int
+		wantRuntimeCall int
+		wantWrites      int
+	}{
+		{
+			name:            "stale pre-runtime target skips",
+			accountStatus:   operatoraccount.StatusDisconnected,
+			accountVersion:  22,
+			targetVersion:   21,
+			outcome:         "none",
+			wantStatus:      operatoraccount.StatusDisconnected,
+			wantVersion:     22,
+			wantAttempted:   0,
+			wantSkipped:     1,
+			wantRuntimeCall: 0,
+		},
+		{
+			name:            "direct convergence",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "success",
+			wantStatus:      operatoraccount.StatusDisconnected,
+			wantVersion:     22,
+			wantAttempted:   1,
+			wantCompleted:   1,
+			wantRuntimeCall: 1,
+			wantWrites:      1,
+		},
+		{
+			name:            "semantic 401 convergence",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "already complete",
+			wantStatus:      operatoraccount.StatusDisconnected,
+			wantVersion:     22,
+			wantAttempted:   1,
+			wantCompleted:   1,
+			wantRuntimeCall: 1,
+			wantWrites:      1,
+		},
+		{
+			name:            "flood wait retains intent",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "failure",
+			failureKind:     RemoteLogoutFailureFloodWait,
+			retryAfter:      3 * time.Second,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantPending:     1,
+			wantRuntimeCall: 1,
+		},
+		{
+			name:            "transient retains intent",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "failure",
+			failureKind:     RemoteLogoutFailureTransient,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantPending:     1,
+			wantRuntimeCall: 1,
+		},
+		{
+			name:            "ambiguous retains intent",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "failure",
+			failureKind:     RemoteLogoutFailureAmbiguous,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantPending:     1,
+			wantRuntimeCall: 1,
+		},
+		{
+			name:            "permanent retains intent",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "failure",
+			failureKind:     RemoteLogoutFailurePermanent,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantPending:     1,
+			wantRuntimeCall: 1,
+		},
+		{
+			name:            "unavailable retains intent",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			outcome:         "failure",
+			failureKind:     RemoteLogoutFailureUnavailable,
+			remote:          true,
+			targetVersion:   21,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantPending:     1,
+			wantRuntimeCall: 1,
+		},
+		{
+			name:            "post-runtime reload failure",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "success",
+			loadFailures:    []error{nil, reloadFailure},
+			wantError:       reloadFailure,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantRuntimeCall: 1,
+		},
+		{
+			name:            "completion persistence failure",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "success",
+			persistFailures: []error{completionFailure},
+			wantError:       completionFailure,
+			wantStatus:      operatoraccount.StatusDisconnecting,
+			wantVersion:     21,
+			wantRemote:      true,
+			wantAttempted:   1,
+			wantRuntimeCall: 1,
+			wantWrites:      1,
+		},
+		{
+			name:            "duplicate target is attempted once",
+			accountStatus:   operatoraccount.StatusDisconnecting,
+			accountVersion:  21,
+			remote:          true,
+			targetVersion:   21,
+			outcome:         "success",
+			duplicate:       true,
+			wantStatus:      operatoraccount.StatusDisconnected,
+			wantVersion:     22,
+			wantAttempted:   1,
+			wantCompleted:   1,
+			wantRuntimeCall: 1,
+			wantWrites:      1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actor := testActor()
+			accountID := testAccountID(t)
+			account := restoreAccount(t, accountID, test.accountStatus, test.accountVersion, operatoraccount.NoFailure, 1, test.remote)
+			persistence := newDisconnectPersistence(actor, account)
+			target := RuntimeTarget{
+				Actor:     actor,
+				AccountID: accountID,
+				Status:    operatoraccount.StatusDisconnecting,
+				Version:   test.targetVersion,
+			}
+			persistence.intents = []RuntimeTarget{target}
+			if test.duplicate {
+				persistence.intents = append(persistence.intents, target)
+			}
+			persistence.loadFailures = append([]error(nil), test.loadFailures...)
+			persistence.persistFailures = append([]error(nil), test.persistFailures...)
+
+			runtime := &revokeRuntime{}
+			switch test.outcome {
+			case "success":
+				runtime.outcomes = map[operatoraccount.ID][]RevokeOutcome{accountID: {RevokeSucceeded()}}
+			case "already complete":
+				runtime.outcomes = map[operatoraccount.ID][]RevokeOutcome{accountID: {RevokeAlreadyComplete()}}
+			case "failure":
+				outcome := revokeFailureOutcome(t, test.failureKind, test.retryAfter)
+				failure, failed := outcome.Failure()
+				if !failed || failure.Kind() != test.failureKind || failure.RetryAfter() != test.retryAfter {
+					t.Fatalf("bounded failure = %#v, want kind %q retry-after %s", failure, test.failureKind, test.retryAfter)
+				}
+				runtime.outcomes = map[operatoraccount.ID][]RevokeOutcome{accountID: {outcome}}
+			case "none":
+			default:
+				t.Fatalf("unknown recovery outcome %q", test.outcome)
+			}
+
+			result, err := NewService(persistence, runtime).Recover(context.Background())
+			if test.wantError == nil {
+				if err != nil {
+					t.Fatalf("Recover() error = %v, want nil", err)
+				}
+			} else if !errors.Is(err, ErrStartupRecovery) || !errors.Is(err, test.wantError) {
+				t.Fatalf("Recover() error = %v, want startup recovery wrapping %v", err, test.wantError)
+			}
+			if result.Attempted != test.wantAttempted || result.Completed != test.wantCompleted || result.Pending != test.wantPending || result.Skipped != test.wantSkipped {
+				t.Fatalf("RecoveryResult = %#v, want attempted=%d completed=%d pending=%d skipped=%d", result, test.wantAttempted, test.wantCompleted, test.wantPending, test.wantSkipped)
+			}
+			if got := len(runtime.calls); got != test.wantRuntimeCall {
+				t.Fatalf("runtime calls = %d, want %d", got, test.wantRuntimeCall)
+			}
+			if got := len(persistence.writes); got != test.wantWrites {
+				t.Fatalf("lifecycle writes = %d, want %d", got, test.wantWrites)
+			}
+			if test.failureKind == RemoteLogoutFailureUnknown {
+				if len(result.PendingByKind) != 0 {
+					t.Fatalf("pending classes = %#v, want none", result.PendingByKind)
+				}
+			} else if len(result.PendingByKind) != 1 || result.PendingByKind[test.failureKind] != 1 {
+				t.Fatalf("pending classes = %#v, want one %q", result.PendingByKind, test.failureKind)
+			}
+
+			stored := persistence.account(actor, accountID)
+			if stored.Status() != test.wantStatus || stored.Version() != test.wantVersion || stored.RemoteLogoutRequired() != test.wantRemote {
+				t.Fatalf("stored account = status %q version %d remote=%t, want status %q version %d remote=%t", stored.Status(), stored.Version(), stored.RemoteLogoutRequired(), test.wantStatus, test.wantVersion, test.wantRemote)
+			}
+		})
+	}
+}
+
 type lifecycleWrite struct {
 	account  operatoraccount.Account
 	expected operatoraccount.Version
