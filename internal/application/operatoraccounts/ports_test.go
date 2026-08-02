@@ -26,9 +26,19 @@ func (lifecyclePortProbe) DeleteSession(context.Context, application.Actor, oper
 	return nil
 }
 
+func (lifecyclePortProbe) ListRemoteLogoutIntents(context.Context) ([]RuntimeTarget, error) {
+	return nil, nil
+}
+
+func (lifecyclePortProbe) RevokeAndStop(context.Context, RuntimeTarget) RevokeOutcome {
+	return RevokeSucceeded()
+}
+
 var (
 	_ AccountLifecycleReader     = lifecyclePortProbe{}
 	_ AccountLifecycleWriter     = lifecyclePortProbe{}
 	_ AccountLifecycleRepository = lifecyclePortProbe{}
+	_ DisconnectPersistence      = lifecyclePortProbe{}
 	_ SessionDeleter             = lifecyclePortProbe{}
+	_ RuntimeRevoker             = lifecyclePortProbe{}
 )
