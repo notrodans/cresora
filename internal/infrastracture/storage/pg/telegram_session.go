@@ -154,7 +154,7 @@ func (store *telegramSessionStore) Store(
 	if failure != nil {
 		return fmt.Errorf("store telegram session: begin transaction: %w", failure)
 	}
-	defer func() { _ = transaction.Rollback(context) }()
+	defer transaction.Rollback(context)
 
 	var status string
 	failure = transaction.QueryRow(
