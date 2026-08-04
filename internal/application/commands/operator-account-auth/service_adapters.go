@@ -29,32 +29,54 @@ func NewApplication(service *auth.Service) Application {
 
 // StartAdapter implements Start without allowing transport input to select the
 // actor scope.
-type StartAdapter struct{ service *auth.Service }
+type StartAdapter struct {
+	service *auth.Service
+}
 
 // NewStart constructs the start command adapter.
-func NewStart(service *auth.Service) Start { return StartAdapter{service: service} }
+func NewStart(service *auth.Service) Start {
+	return StartAdapter{service: service}
+}
 
 func (adapter StartAdapter) Execute(ctx context.Context, actor applicationroot.Actor, phone string) (auth.Result, error) {
 	return adapter.service.Start(ctx, actor, phone)
 }
 
 // CodeAdapter implements Code.
-type CodeAdapter struct{ service *auth.Service }
+type CodeAdapter struct {
+	service *auth.Service
+}
 
 // NewCode constructs the code command adapter.
-func NewCode(service *auth.Service) Code { return CodeAdapter{service: service} }
+func NewCode(service *auth.Service) Code {
+	return CodeAdapter{service: service}
+}
 
-func (adapter CodeAdapter) Execute(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID, code string) (auth.Result, error) {
+func (adapter CodeAdapter) Execute(
+	ctx context.Context,
+	actor applicationroot.Actor,
+	requestID uuid.UUID,
+	code string,
+) (auth.Result, error) {
 	return adapter.service.Code(ctx, actor, requestID, code)
 }
 
 // PasswordAdapter implements Password.
-type PasswordAdapter struct{ service *auth.Service }
+type PasswordAdapter struct {
+	service *auth.Service
+}
 
 // NewPassword constructs the password command adapter.
-func NewPassword(service *auth.Service) Password { return PasswordAdapter{service: service} }
+func NewPassword(service *auth.Service) Password {
+	return PasswordAdapter{service: service}
+}
 
-func (adapter PasswordAdapter) Execute(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID, password string) (auth.Result, error) {
+func (adapter PasswordAdapter) Execute(
+	ctx context.Context,
+	actor applicationroot.Actor,
+	requestID uuid.UUID,
+	password string,
+) (auth.Result, error) {
 	return adapter.service.Password(ctx, actor, requestID, password)
 }
 
@@ -64,7 +86,11 @@ type CancelAdapter struct{ service *auth.Service }
 // NewCancel constructs the cancel command adapter.
 func NewCancel(service *auth.Service) Cancel { return CancelAdapter{service: service} }
 
-func (adapter CancelAdapter) Execute(ctx context.Context, actor applicationroot.Actor, requestID uuid.UUID) error {
+func (adapter CancelAdapter) Execute(
+	ctx context.Context,
+	actor applicationroot.Actor,
+	requestID uuid.UUID,
+) error {
 	return adapter.service.Cancel(ctx, actor, requestID)
 }
 
