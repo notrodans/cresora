@@ -199,9 +199,7 @@ func TestRegistryRevokeAndStopSerializesSameIntentAndBuildsPrivateOwners(t *test
 		calls.Add(1)
 		if current == 1 {
 			firstOnce.Do(func() { close(firstEntered) })
-			select {
-			case <-releaseFirst:
-			}
+			<-releaseFirst
 		}
 		active.Add(-1)
 		return nil
@@ -217,11 +215,9 @@ func TestRegistryRevokeAndStopSerializesSameIntentAndBuildsPrivateOwners(t *test
 
 	var wait sync.WaitGroup
 	secondDone := make(chan error, 1)
-	wait.Add(1)
-	go func() {
-		defer wait.Done()
+	wait.Go(func() {
 		secondDone <- registry.RevokeAndStop(context.Background(), target, callback)
-	}()
+	})
 	close(releaseFirst)
 	if failure := <-firstDone; failure != nil {
 		t.Fatalf("first RevokeAndStop() error = %v", failure)
@@ -355,7 +351,7 @@ func TestRegistryPrivateRevokeBuildFailureIgnoresStaleHandleRefs(t *testing.T) {
 	// Keep staleHandle open deliberately. Stopping its owner leaves the handle
 	// reference behind while making the entry non-current.
 	factory.owner(0).Stop()
-	waitForNoCurrentEntry(t, registry, keyFor(prior))
+	waitForNoCurrentEntry(t, registry, accountKeyFromTarget(prior))
 
 	buildFailure := errors.New("private owner build failed with stale handle")
 	factory.mu.Lock()
@@ -481,7 +477,7 @@ func TestRegistryRevokeWaitsForTeardownAndQueuedRetry(t *testing.T) {
 
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- registry.RevokeAndStop(context.Background(), disconnecting, callback) }()
-	waitForRevokeWaiter(t, registry, keyFor(disconnecting))
+	waitForRevokeWaiter(t, registry, accountKeyFromTarget(disconnecting))
 	close(releaseFirst)
 	if failure := <-firstDone; failure != nil {
 		t.Fatalf("first RevokeAndStop() error = %v", failure)

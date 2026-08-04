@@ -61,10 +61,10 @@ type Owner struct {
 	requests   chan clientRequest
 }
 
-// New constructs an owner around exactly one client made by factory. The
+// NewOwner constructs an owner around exactly one client made by factory. The
 // factory error is returned unchanged so invalid construction never produces
 // a partially initialized owner.
-func New(
+func NewOwner(
 	factory gotdclient.Factory,
 	scope transporttelegram.SessionScope,
 	appID int,
@@ -229,6 +229,12 @@ func (owner *Owner) Wait(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (tracker *readinessTracker) Ready() <-chan struct{} {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	return tracker.ready
 }
 
 // Execute queues callback for the dispatcher owned by client.Run. The client
@@ -425,12 +431,6 @@ func (tracker *readinessTracker) observe(state gotdtelegram.ConnectionState) {
 	close(previousChanges)
 }
 
-func (tracker *readinessTracker) Ready() <-chan struct{} {
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-	return tracker.ready
-}
-
 func (tracker *readinessTracker) snapshot() (<-chan struct{}, <-chan struct{}, bool) {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
@@ -468,10 +468,6 @@ func (tracker *readinessTracker) waitReady(
 type gotdLifecycle struct {
 	client    *gotdtelegram.Client
 	readiness *readinessTracker
-}
-
-func newGotdLifecycle(client *gotdtelegram.Client) *gotdLifecycle {
-	return newGotdLifecycleWithReadiness(client, newReadinessTracker())
 }
 
 func newGotdLifecycleWithReadiness(

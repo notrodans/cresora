@@ -50,20 +50,24 @@ func (adapter Adapter) RevokeAndStop(
 	ctx context.Context,
 	target application.RuntimeTarget,
 ) application.RevokeOutcome {
-	failure := adapter.runtime.RevokeAndStop(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
-		client := adapter.clientFactory(raw)
-		if client == nil {
-			return logoutFailure{err: errLogoutClientUnavailable}
-		}
-		response, failure := client.logOut(callbackContext)
-		if failure != nil {
-			return logoutFailure{err: failure}
-		}
-		if response == nil {
-			return logoutFailure{err: errInvalidLogoutResponse}
-		}
-		return nil
-	})
+	failure := adapter.runtime.RevokeAndStop(
+		ctx,
+		target,
+		func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+			client := adapter.clientFactory(raw)
+			if client == nil {
+				return logoutFailure{err: errLogoutClientUnavailable}
+			}
+			response, failure := client.logOut(callbackContext)
+			if failure != nil {
+				return logoutFailure{err: failure}
+			}
+			if response == nil {
+				return logoutFailure{err: errInvalidLogoutResponse}
+			}
+			return nil
+		},
+	)
 	if failure == nil {
 		return application.RevokeSucceeded()
 	}
@@ -174,7 +178,6 @@ func isRuntimeFailure(failure error) bool {
 		accountowner.ErrFenceCapacity,
 		accountowner.ErrStaleAdmission,
 		accountowner.ErrInvalidAdmission,
-		accountowner.ErrNilCallback,
 	} {
 		if errors.Is(failure, runtimeFailure) {
 			return true

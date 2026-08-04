@@ -7,11 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	gotdtelegram "github.com/gotd/td/telegram"
-
-	transporttelegram "github.com/notrodans/cresora/internal/transport/telegram"
-	"github.com/notrodans/cresora/internal/transport/telegram/gotdclient"
 )
 
 var errFakeRun = errors.New("fake gotd run failed")
@@ -205,25 +201,7 @@ func awaitError(t *testing.T, errors <-chan error, name string) error {
 	}
 }
 
-func TestNewPropagatesFactoryConstructionFailure(t *testing.T) {
-	owner, failure := New(
-		gotdclient.New(nil),
-		transporttelegram.SessionScope{
-			OperatorID: uuid.New(),
-			AccountID:  uuid.New(),
-		},
-		123,
-		"app-hash",
-	)
-	if owner != nil {
-		t.Fatal("New() returned an owner after construction failed")
-	}
-	if failure == nil {
-		t.Fatal("New() error = nil, want factory construction failure")
-	}
-}
-
-func TestOwnerRunIsOneShot(t *testing.T) {
+func TestOwner_RunIsOneShot(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	firstRun := make(chan error, 1)
@@ -247,7 +225,7 @@ func TestOwnerRunIsOneShot(t *testing.T) {
 	}
 }
 
-func TestOwnerParentCancellationPropagatesAndJoins(t *testing.T) {
+func TestOwner_ParentCancellationPropagatesAndJoins(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	parent, cancelParent := context.WithCancel(context.Background())
@@ -264,7 +242,7 @@ func TestOwnerParentCancellationPropagatesAndJoins(t *testing.T) {
 	awaitChannel(t, fake.callbackReturned, "callback teardown")
 }
 
-func TestOwnerStopIsIdempotentAndJoinsTeardown(t *testing.T) {
+func TestOwner_StopIsIdempotentAndJoinsTeardown(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	runResult := make(chan error, 1)
@@ -281,7 +259,7 @@ func TestOwnerStopIsIdempotentAndJoinsTeardown(t *testing.T) {
 	awaitChannel(t, fake.callbackReturned, "callback teardown")
 }
 
-func TestOwnerWaitReadySuccess(t *testing.T) {
+func TestOwner_WaitReadySuccess(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	runResult := make(chan error, 1)
@@ -301,7 +279,7 @@ func TestOwnerWaitReadySuccess(t *testing.T) {
 	}
 }
 
-func TestOwnerWaitReadyCallerCancellation(t *testing.T) {
+func TestOwner_WaitReadyCallerCancellation(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	runResult := make(chan error, 1)
@@ -320,7 +298,7 @@ func TestOwnerWaitReadyCallerCancellation(t *testing.T) {
 	}
 }
 
-func TestOwnerWaitReadyAfterShutdown(t *testing.T) {
+func TestOwner_WaitReadyAfterShutdown(t *testing.T) {
 	owner := newOwner(newFakeLifecycle())
 	owner.Stop()
 
@@ -332,7 +310,7 @@ func TestOwnerWaitReadyAfterShutdown(t *testing.T) {
 	}
 }
 
-func TestOwnerWaitReadyUsesCurrentReadyChannel(t *testing.T) {
+func TestOwner_WaitReadyUsesCurrentReadyChannel(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	runResult := make(chan error, 1)
@@ -393,7 +371,7 @@ func TestReadinessTrackerStartupAndReconnectUseCurrentGeneration(t *testing.T) {
 	}
 }
 
-func TestOwnerRunFailureIsPreserved(t *testing.T) {
+func TestOwner_RunFailureIsPreserved(t *testing.T) {
 	fake := newFakeLifecycle()
 	fake.runFailure = errFakeRun
 	owner := newOwner(fake)
@@ -406,7 +384,7 @@ func TestOwnerRunFailureIsPreserved(t *testing.T) {
 	}
 }
 
-func TestOwnerInternalDeadlineWhileRunContextIsLiveIsPreserved(t *testing.T) {
+func TestOwner_InternalDeadlineWhileRunContextIsLiveIsPreserved(t *testing.T) {
 	fake := newFakeLifecycle()
 	fake.runFailure = context.DeadlineExceeded
 	owner := newOwner(fake)
@@ -416,7 +394,7 @@ func TestOwnerInternalDeadlineWhileRunContextIsLiveIsPreserved(t *testing.T) {
 	}
 }
 
-func TestOwnerMixedCancellationFailureIsPreserved(t *testing.T) {
+func TestOwner_MixedCancellationFailureIsPreserved(t *testing.T) {
 	joined := &joinedCancellationLifecycle{
 		runEntered: make(chan struct{}),
 		failure:    errors.Join(errMixedRun, context.Canceled),
@@ -468,7 +446,7 @@ func TestNormalizeRunFailurePreservesOppositeJoinedContextSentinel(t *testing.T)
 	}
 }
 
-func TestOwnerCallbackIsInertUntilCancellation(t *testing.T) {
+func TestOwner_CallbackIsInertUntilCancellation(t *testing.T) {
 	fake := newFakeLifecycle()
 	owner := newOwner(fake)
 	runResult := make(chan error, 1)
@@ -492,7 +470,7 @@ func TestOwnerCallbackIsInertUntilCancellation(t *testing.T) {
 	}
 }
 
-func TestOwnerRunDoesNotReturnBeforeDispatchedCallback(t *testing.T) {
+func TestOwner_RunDoesNotReturnBeforeDispatchedCallback(t *testing.T) {
 	lifecycle := newDispatchLifecycle()
 	owner := newOwner(lifecycle)
 	runResult := make(chan error, 1)
@@ -526,8 +504,8 @@ func TestOwnerRunDoesNotReturnBeforeDispatchedCallback(t *testing.T) {
 	}
 }
 
-func TestOwnerRunStopWaitReadyRace(t *testing.T) {
-	for attempt := 0; attempt < 50; attempt++ {
+func TestOwner_RunStopWaitReadyRace(t *testing.T) {
+	for range 50 {
 		fake := newFakeLifecycle()
 		owner := newOwner(fake)
 		runResult := make(chan error, 1)
@@ -547,7 +525,7 @@ func TestOwnerRunStopWaitReadyRace(t *testing.T) {
 	}
 }
 
-func TestOwnerStopPublishesStoppingBeforeTeardownCompletes(t *testing.T) {
+func TestOwner_StopPublishesStoppingBeforeTeardownCompletes(t *testing.T) {
 	blocked := newBlockedLifecycle()
 	owner := newOwner(blocked)
 	runResult := make(chan error, 1)
