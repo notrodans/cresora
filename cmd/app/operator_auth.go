@@ -121,38 +121,6 @@ type operatorAuthLifecycle struct {
 	disconnect *applicationoperatoraccounts.Service
 }
 
-func composeOperatorAuth(
-	rootContext context.Context,
-	cfg *config.Config,
-	database *pgxpool.Pool,
-	router chi.Router,
-	principalProvider principal.Provider,
-	publicOrigin string,
-	runtime operatorAuthRuntime,
-) (*operatorAuthLifecycle, error) {
-	if cfg == nil {
-		return nil, errors.New("telegram authentication configuration is required")
-	}
-	if !cfg.TelegramAuthEnabled {
-		return nil, nil
-	}
-	if runtime == nil {
-		return nil, errors.New("telegram authentication requires the shared telegram account runtime")
-	}
-	composition, failure := composeOperatorAccounts(database, runtime)
-	if failure != nil {
-		return nil, failure
-	}
-	return composeOperatorAuthWithComposition(
-		rootContext,
-		cfg,
-		router,
-		principalProvider,
-		publicOrigin,
-		composition,
-	)
-}
-
 func composeOperatorAccounts(
 	database *pgxpool.Pool,
 	runtime operatorAuthRuntime,
@@ -196,17 +164,17 @@ func composeOperatorAuthWithComposition(
 		AuthenticationPersistence: composition.store,
 		remoteIntents:             composition.store,
 	}
-	service := applicationoperatoraccountauth.NewService(authPersistence, provider, composition.runtime)
-	commands := operatoraccountcommands.NewApplication(service)
+	applicationOperatorAccountAuthService := applicationoperatoraccountauth.NewService(authPersistence, provider, composition.runtime)
+	commands := operatoraccountcommands.NewApplication(applicationOperatorAccountAuthService)
 	ports := operatorAuthPorts{
 		start:    commands.Start,
 		code:     commands.Code,
 		password: commands.Password,
 		cancel:   commands.Cancel,
-		status:   operatoraccountrequests.NewStatus(service),
+		status:   operatoraccountrequests.NewStatus(applicationOperatorAccountAuthService),
 	}
 
-	lifecycle, failure := orchestrateOperatorAuth(rootContext, service, func() {
+	lifecycle, failure := orchestrateOperatorAuth(rootContext, applicationOperatorAccountAuthService, func() {
 		registerLiveOperatorAuthWithDisconnect(
 			router,
 			ports,
