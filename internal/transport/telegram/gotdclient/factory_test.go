@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -63,29 +64,6 @@ func validScope() transporttelegram.SessionScope {
 	return transporttelegram.SessionScope{
 		OperatorID: uuid.MustParse("11111111-1111-4111-8111-111111111111"),
 		AccountID:  uuid.MustParse("22222222-2222-4222-8222-222222222222"),
-	}
-}
-
-func TestNewClientRejectsNilStore(t *testing.T) {
-	var store *sessionStoreStub
-
-	called := false
-	previous := newClient
-	newClient = func(int, string, gotdtelegram.Options) *gotdtelegram.Client {
-		called = true
-		return nil
-	}
-	t.Cleanup(func() { newClient = previous })
-
-	client, err := New(store).NewClient(validScope(), 123, "app-hash")
-	if client != nil {
-		t.Fatal("client is non-nil for a nil session store")
-	}
-	if !errors.Is(err, errNilSessionStore) {
-		t.Fatalf("error = %v, want nil-store validation error", err)
-	}
-	if called {
-		t.Fatal("gotd constructor was called for a nil session store")
 	}
 }
 
@@ -393,13 +371,7 @@ func TestNewClientConcurrentConstructionKeepsScopesIsolated(t *testing.T) {
 		seen[storage] = struct{}{}
 	}
 	for _, storage := range storages {
-		matched := false
-		for _, scope := range scopes {
-			if storage.scope == scope {
-				matched = true
-				break
-			}
-		}
+		matched := slices.Contains(scopes, storage.scope)
 		if !matched {
 			t.Fatalf("adapter captured unexpected scope %+v", storage.scope)
 		}

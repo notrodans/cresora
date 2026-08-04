@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/google/uuid"
@@ -73,9 +72,6 @@ func (factory Factory) newClient(
 	appHash string,
 	onConnectionState func(gotdtelegram.ConnectionState),
 ) (*gotdtelegram.Client, error) {
-	if sessionStoreIsNil(factory.store) {
-		return nil, errNilSessionStore
-	}
 	if scope.OperatorID == uuid.Nil || scope.AccountID == uuid.Nil {
 		return nil, errInvalidScope
 	}
@@ -94,23 +90,6 @@ func (factory Factory) newClient(
 		SessionStorage:    storage,
 		OnConnectionState: onConnectionState,
 	}), nil
-}
-
-// sessionStoreIsNil also rejects an interface containing a typed nil store.
-// Calling a method through such an interface would otherwise defer the
-// failure until gotd starts and loads the session.
-func sessionStoreIsNil(store transporttelegram.SessionStore) bool {
-	if store == nil {
-		return true
-	}
-
-	value := reflect.ValueOf(store)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }
 
 // scopedSessionStorage adapts one complete operator/account scope to gotd's
