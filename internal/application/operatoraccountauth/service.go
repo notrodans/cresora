@@ -593,16 +593,12 @@ func classifyProviderFailure(err error, expiresAt, now time.Time) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return context.DeadlineExceeded
 	}
-	var retry *RetryAfterError
-	if errors.As(err, &retry) {
+	if retry, ok := errors.AsType[*RetryAfterError](err); ok {
 		remaining := expiresAt.Sub(now)
 		if remaining <= 0 {
 			return ErrChallengeExpired
 		}
-		after := retry.RetryAfter()
-		if after > remaining {
-			after = remaining
-		}
+		after := min(retry.RetryAfter(), remaining)
 		bounded, boundedErr := NewRetryAfterError(after)
 		if boundedErr == nil {
 			return bounded
