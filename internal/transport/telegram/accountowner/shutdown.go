@@ -210,7 +210,7 @@ func (registry *Registry) removeSlot(slot *accountSlot) {
 		if candidate != slot {
 			continue
 		}
-		if candidate.removable() {
+		if candidate.removable() && !candidate.revokeRunning && candidate.revokeWaiters == 0 {
 			delete(registry.slots, key)
 			break
 		}

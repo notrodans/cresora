@@ -172,10 +172,10 @@ func (slot *accountSlot) currentEntry() *runtimeEntry {
 	return slot.current
 }
 
-// removable reports whether the slot is referenced by nothing and only revoke
-// bookkeeping or a concurrent admission can still hold it. Callers use it as
-// the single gate before dropping a slot from the registry map; removeSlot
-// re-checks the same predicate under registry.mu as the authoritative guard.
+// removable reports whether slot-lifetime state references nothing. Revoke
+// bookkeeping (revokeRunning, revokeWaiters) is guarded by registry.mu, not
+// slot.mu, so it is excluded here; callers that already hold registry.mu check
+// it separately before dropping the slot.
 func (slot *accountSlot) removable() bool {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
@@ -183,7 +183,5 @@ func (slot *accountSlot) removable() bool {
 	return slot.current == nil &&
 		slot.handles == 0 &&
 		slot.active == 0 &&
-		!slot.stopping &&
-		!slot.revokeRunning &&
-		slot.revokeWaiters == 0
+		!slot.stopping
 }
