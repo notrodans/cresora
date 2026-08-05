@@ -95,16 +95,13 @@ func (entry *runtimeEntry) execute(
 
 func (entry *runtimeEntry) releaseHandle() {
 	entry.slot.mu.Lock()
-	if entry.slot.handles > 0 {
-		entry.slot.handles--
+	if entry.slot.handles <= 0 {
+		panic("telegram account slot released a handle that was not reserved")
 	}
+	entry.slot.handles--
 	entry.slot.lastUsed = time.Now()
-	handles := entry.slot.handles
-	current := entry.slot.current
-	active := entry.slot.active
-	stopping := entry.slot.stopping
 	entry.slot.mu.Unlock()
-	if handles == 0 && current == nil && active == 0 && !stopping {
+	if entry.slot.removable() {
 		entry.registry.removeSlot(entry.slot)
 	}
 }
@@ -162,24 +159,16 @@ func (registry *Registry) finishStoppedEntry(entry *runtimeEntry) {
 	default:
 		return
 	}
-	entry.slot.mu.Lock()
-	if entry.slot.current != nil {
-		entry.slot.mu.Unlock()
+	if entry.slot.currentEntry() != nil {
 		return
 	}
-	active, handles := entry.slot.active, entry.slot.handles
-	entry.slot.mu.Unlock()
-	if active == 0 && handles == 0 {
+	if entry.slot.removable() {
 		registry.removeSlot(entry.slot)
 	}
 }
 
 func (registry *Registry) cleanupFailedEntry(entry *runtimeEntry) {
-	entry.slot.mu.Lock()
-	handles := entry.slot.handles
-	current := entry.slot.current
-	entry.slot.mu.Unlock()
-	if handles == 0 && current == nil {
+	if entry.slot.removable() {
 		registry.removeSlot(entry.slot)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// makeCapacity makes room for a new slot by evicting one idle slot. Caller
+// must hold registry.mu.
 func (registry *Registry) makeCapacity() *runtimeEntry {
 	if registry.liveCount() < registry.config.Capacity {
 		return nil
@@ -21,6 +23,8 @@ func (registry *Registry) makeCapacity() *runtimeEntry {
 	return nil
 }
 
+// liveCount returns how many slots currently hold a live owner. Caller must
+// hold registry.mu.
 func (registry *Registry) liveCount() int {
 	count := 0
 	for _, slot := range registry.slots {

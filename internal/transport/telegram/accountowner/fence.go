@@ -55,7 +55,7 @@ func (registry *Registry) recordFence(key accountKey, version operatoraccount.Ve
 			return ErrFenceCapacity
 		}
 		if len(registry.fences.records) >= registry.fences.limit {
-			oldestKey, evictable := registry.oldestEvictableFenceLocked()
+			oldestKey, evictable := registry.oldEvictableFence()
 			if !evictable {
 				return ErrFenceCapacity
 			}
@@ -68,7 +68,9 @@ func (registry *Registry) recordFence(key accountKey, version operatoraccount.Ve
 	return nil
 }
 
-func (registry *Registry) oldestEvictableFenceLocked() (accountKey, bool) {
+// oldEvictableFence finds the state fence evictable first when capacity is
+// reached. Caller must hold registry.mu.
+func (registry *Registry) oldEvictableFence() (accountKey, bool) {
 	var oldestKey accountKey
 	var oldest uint64
 	found := false
@@ -81,16 +83,18 @@ func (registry *Registry) oldestEvictableFenceLocked() (accountKey, bool) {
 	return oldestKey, found
 }
 
-func (registry *Registry) unprotectFenceLocked(key accountKey, version operatoraccount.Version) {
+func (registry *Registry) unprotectFence(key accountKey, version operatoraccount.Version) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.fences.unprotect(key, version)
-	registry.trimFencesLocked()
+	registry.trimFenceRecords()
 }
 
-func (registry *Registry) trimFencesLocked() {
+// trimFenceRecords drops unprotected fences beyond capacity. Caller must hold
+// registry.mu.
+func (registry *Registry) trimFenceRecords() {
 	for len(registry.fences.records) > registry.fences.limit {
-		oldestKey, evictable := registry.oldestEvictableFenceLocked()
+		oldestKey, evictable := registry.oldEvictableFence()
 		if !evictable {
 			return
 		}

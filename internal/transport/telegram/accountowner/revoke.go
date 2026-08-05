@@ -280,7 +280,7 @@ func (registry *Registry) teardownRevoke(
 	}
 	if built && joined {
 		registry.finishTeardown(slot, entry)
-		registry.unprotectFenceLocked(accountKeyFromTarget(entry.target), fencedVersion)
+		registry.unprotectFence(accountKeyFromTarget(entry.target), fencedVersion)
 	}
 	return first
 }

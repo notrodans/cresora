@@ -117,6 +117,8 @@ func (registry *Registry) checkAdmission(
 	return admissionError(entry.slot, entry, target)
 }
 
+// admissionError validates an operation target against the slot state. Caller
+// must hold slot.mu.
 func admissionError(
 	slot *accountSlot,
 	entry *runtimeEntry,

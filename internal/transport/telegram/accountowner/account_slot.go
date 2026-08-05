@@ -1,6 +1,11 @@
 // Package accountowner owns the process-local lifetime of gotd Telegram clients,
 // one per operator/account scope, with versioned admission fencing.
-
+//
+// Concurrency: registry.mu guards the account table, the fence set and
+// registry-level shutdown state; accountSlot.mu guards the fields of one slot.
+// Locks nest strictly as registry.mu outside slot.mu, never the reverse.
+// Helpers that read or mutate guarded state lock themselves unless their doc
+// comment states that the caller must already hold the lock.
 package accountowner
 
 import (
@@ -80,6 +85,7 @@ func closedSignal() chan struct{} {
 	return closed
 }
 
+// reserveHandle records one open handle on rentry. Caller must hold slot.mu.
 func (slot *accountSlot) reserveHandle(rentry *runtimeEntry) bool {
 	if slot.closed || slot.stopping {
 		return false
@@ -127,6 +133,9 @@ func (slot *accountSlot) beginOperation(
 
 func (slot *accountSlot) finishOperation() {
 	slot.mu.Lock()
+	if slot.active <= 0 {
+		panic("telegram account slot finished an operation that was not active")
+	}
 	slot.active--
 	slot.activeCancel = nil
 	if slot.active == 0 {
@@ -148,6 +157,8 @@ func (slot *accountSlot) waitDrained(ctx context.Context) error {
 	}
 }
 
+// signalRevoke notifies revoke waiters that the account state changed. Caller
+// must hold registry.mu.
 func (slot *accountSlot) signalRevoke() {
 	previous := slot.revokeChanged
 	slot.revokeChanged = make(chan struct{})
@@ -161,6 +172,10 @@ func (slot *accountSlot) currentEntry() *runtimeEntry {
 	return slot.current
 }
 
+// removable reports whether the slot is referenced by nothing and only revoke
+// bookkeeping or a concurrent admission can still hold it. Callers use it as
+// the single gate before dropping a slot from the registry map; removeSlot
+// re-checks the same predicate under registry.mu as the authoritative guard.
 func (slot *accountSlot) removable() bool {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
@@ -168,5 +183,7 @@ func (slot *accountSlot) removable() bool {
 	return slot.current == nil &&
 		slot.handles == 0 &&
 		slot.active == 0 &&
-		!slot.stopping
+		!slot.stopping &&
+		!slot.revokeRunning &&
+		slot.revokeWaiters == 0
 }

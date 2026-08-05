@@ -200,7 +200,7 @@ func (registry *Registry) finishTeardown(slot *accountSlot, entry *runtimeEntry)
 		slot.current, slot.stopping, slot.closed = nil, false, false
 	}
 	slot.mu.Unlock()
-	registry.unprotectFenceLocked(accountKeyFromTarget(entry.target), entry.target.Version)
+	registry.unprotectFence(accountKeyFromTarget(entry.target), entry.target.Version)
 	registry.removeSlot(slot)
 }
 
@@ -210,11 +210,7 @@ func (registry *Registry) removeSlot(slot *accountSlot) {
 		if candidate != slot {
 			continue
 		}
-		candidate.mu.Lock()
-		remove := candidate.current == nil && candidate.handles == 0 && candidate.active == 0 &&
-			!candidate.stopping && !candidate.revokeRunning && candidate.revokeWaiters == 0
-		candidate.mu.Unlock()
-		if remove {
+		if candidate.removable() {
 			delete(registry.slots, key)
 			break
 		}

@@ -1072,3 +1072,61 @@ func TestRegistry_FailedBuildRemovesEmptySlot(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistry_QuiescesToEmptySlotTableAfterStop(t *testing.T) {
+	factory := new(registryOwnerFactory)
+	registry := newFakeRegistry(t, factory, RegistryConfig{Capacity: 4, IdleTimeout: time.Hour})
+	target := registryTarget()
+
+	execute := func(tr operatoraccounts.RuntimeTarget) {
+		t.Helper()
+		if failure := registry.Execute(context.Background(), tr, func(context.Context, *gotdtelegram.Client) error {
+			return nil
+		}); failure != nil {
+			t.Fatalf("Execute() error = %v", failure)
+		}
+	}
+
+	first := target
+	execute(first)
+	if failure := registry.StopAccount(context.Background(), first); failure != nil {
+		t.Fatalf("StopAccount() error = %v", failure)
+	}
+	replacement := first
+	replacement.Version++
+	execute(replacement)
+
+	revoked := registryTarget()
+	revoked.AccountID = operatoraccount.Identity(uuid.MustParse("33333333-3333-4333-8333-333333333333"))
+	revoked.Status = operatoraccount.StatusActive
+	execute(revoked)
+	disconnecting := revoked
+	disconnecting.Status = operatoraccount.StatusDisconnecting
+	disconnecting.Version++
+	if failure := registry.RevokeAndStop(context.Background(), disconnecting, func(context.Context, *gotdtelegram.Client) error {
+		return nil
+	}); failure != nil {
+		t.Fatalf("RevokeAndStop() error = %v", failure)
+	}
+
+	idle := registryTarget()
+	idle.AccountID = operatoraccount.Identity(uuid.MustParse("44444444-4444-4444-8444-444444444444"))
+	execute(idle)
+	registry.mu.Lock()
+	idleSlot := registry.slots[accountKeyFromTarget(idle)]
+	registry.mu.Unlock()
+	idleSlot.mu.Lock()
+	idleSlot.lastUsed = time.Now().Add(-time.Hour)
+	idleSlot.mu.Unlock()
+	registry.evictIdle()
+
+	if failure := registry.Stop(context.Background()); failure != nil {
+		t.Fatalf("Stop() error = %v", failure)
+	}
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.slots) != 0 {
+		t.Fatalf("slot table after Stop = %d entries, want 0", len(registry.slots))
+	}
+}
