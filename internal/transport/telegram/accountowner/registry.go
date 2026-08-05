@@ -26,12 +26,12 @@ type Registry struct {
 	fences  fenceSet
 	stopped bool
 
-	context     context.Context
-	cancel      context.CancelFunc
-	reaperDone  chan struct{}
-	stopReaper  chan struct{}
-	stopOnce    sync.Once
-	rootStopped bool
+	runtimeContext context.Context
+	cancel         context.CancelFunc
+	reaperDone     chan struct{}
+	stopReaper     chan struct{}
+	stopOnce       sync.Once
+	rootStopped    bool
 }
 
 var _ interface {
@@ -39,7 +39,7 @@ var _ interface {
 } = (*Registry)(nil)
 
 // NewRegistry constructs a runtime registry without starting any gotd client.
-// Client construction and Run both remain lazy until Open is called.
+// Client construction and Run both remain lazy until open is called.
 func NewRegistry(config RegistryConfig) (*Registry, error) {
 	return newRegistry(
 		config,
@@ -49,7 +49,7 @@ func NewRegistry(config RegistryConfig) (*Registry, error) {
 			appID int,
 			appHash string,
 		) (ownerRuntime, error) {
-			return NewOwner(factory, scope, appID, appHash)
+			return newOwner(factory, scope, appID, appHash)
 		},
 	)
 }
@@ -65,23 +65,23 @@ func newRegistry(config RegistryConfig, build ownerBuilder) (*Registry, error) {
 
 	runtimeContext, cancel := context.WithCancel(context.Background())
 	registry := &Registry{
-		config:     normalizedConfig,
-		build:      build,
-		slots:      make(map[accountKey]*accountSlot),
-		fences:     newFenceSet(normalizedConfig.Capacity),
-		context:    runtimeContext,
-		cancel:     cancel,
-		reaperDone: make(chan struct{}),
-		stopReaper: make(chan struct{}),
+		config:         normalizedConfig,
+		build:          build,
+		slots:          make(map[accountKey]*accountSlot),
+		fences:         newFenceSet(normalizedConfig.Capacity),
+		runtimeContext: runtimeContext,
+		cancel:         cancel,
+		reaperDone:     make(chan struct{}),
+		stopReaper:     make(chan struct{}),
 	}
 	go registry.reapIdle()
 	return registry, nil
 }
 
-// Open admits target and waits for the current owner to become ready. Existing
+// open admits target and waits for the current owner to become ready. Existing
 // owners are reused; readiness is a current-state wait and is therefore safe
 // across gotd reconnects.
-func (registry *Registry) Open(ctx context.Context, target operatoraccounts.RuntimeTarget) (*Handle, error) {
+func (registry *Registry) open(ctx context.Context, target operatoraccounts.RuntimeTarget) (*handle, error) {
 	if failure := validateAdmission(target); failure != nil {
 		return nil, failure
 	}
@@ -90,7 +90,7 @@ func (registry *Registry) Open(ctx context.Context, target operatoraccounts.Runt
 	if err != nil {
 		return nil, err
 	}
-	handle := &Handle{rentry: runtimeEntry, target: target}
+	handle := &handle{entry: runtimeEntry, target: target}
 	if err := runtimeEntry.waitBuilt(ctx); err != nil {
 		handle.Close()
 		return nil, err
@@ -118,7 +118,7 @@ func (registry *Registry) Execute(
 	target operatoraccounts.RuntimeTarget,
 	callback ClientCallback,
 ) error {
-	handle, err := registry.Open(ctx, target)
+	handle, err := registry.open(ctx, target)
 	if err != nil {
 		return err
 	}

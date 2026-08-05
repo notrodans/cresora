@@ -57,7 +57,7 @@ func TestRegistry_RevokeAndStopFencesDrainsAndTearsDown(t *testing.T) {
 	queuedChecked := make(chan error, 1)
 	// Open is the public admission barrier. The first callback is still holding
 	// the account gate, so this admitted handle's Execute cannot reach its body.
-	queuedHandle, openFailure := registry.Open(queuedContext, prior)
+	queuedHandle, openFailure := registry.open(queuedContext, prior)
 	if openFailure != nil {
 		t.Fatalf("Open() second ordinary admission error = %v", openFailure)
 	}
@@ -344,7 +344,7 @@ func TestRegistry_PrivateRevokeBuildFailureIgnoresStaleHandles(t *testing.T) {
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	prior := registryTarget()
 	prior.Status = operatoraccount.StatusActive
-	staleHandle, failure := registry.Open(context.Background(), prior)
+	staleHandle, failure := registry.open(context.Background(), prior)
 	if failure != nil {
 		t.Fatalf("Open() error = %v", failure)
 	}
@@ -382,7 +382,7 @@ func TestRegistry_PrivateRevokeBuildFailureIgnoresStaleHandles(t *testing.T) {
 		t.Fatal("stale handle callback ran after newer lifecycle admission")
 		return nil
 	}); !errors.Is(failure, ErrStaleAdmission) {
-		t.Fatalf("stale Handle.Execute() error = %v, want ErrStaleAdmission", failure)
+		t.Fatalf("stale handle.Execute() error = %v, want ErrStaleAdmission", failure)
 	}
 	_ = staleHandle
 }

@@ -264,10 +264,10 @@ func TestRegistry_ConcurrentOpenBuildsOneOwner(t *testing.T) {
 	const callers = 20
 	var wait sync.WaitGroup
 	errors := make(chan error, callers)
-	handles := make(chan *Handle, callers)
+	handles := make(chan *handle, callers)
 	for range callers {
 		wait.Go(func() {
-			handle, err := registry.Open(context.Background(), target)
+			handle, err := registry.open(context.Background(), target)
 			if err != nil {
 				errors <- err
 				return
@@ -283,7 +283,7 @@ func TestRegistry_ConcurrentOpenBuildsOneOwner(t *testing.T) {
 	}
 	for handle := range handles {
 		if err := handle.Close(); err != nil {
-			t.Fatalf("Handle.Close() error = %v", err)
+			t.Fatalf("handle.Close() error = %v", err)
 		}
 	}
 	if got := factory.count(); got != 1 {
@@ -541,7 +541,7 @@ func TestRegistry_FenceRejectsOperationBeforeCallbackEntry(t *testing.T) {
 func TestHandle_CloseRetainsReferenceUntilAdmittedExecuteFinishes(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
-	handle, failure := registry.Open(context.Background(), registryTarget())
+	handle, failure := registry.open(context.Background(), registryTarget())
 	if failure != nil {
 		t.Fatalf("Open() error = %v", failure)
 	}
@@ -565,9 +565,9 @@ func TestHandle_CloseRetainsReferenceUntilAdmittedExecuteFinishes(t *testing.T) 
 	if failure := handle.Close(); failure != nil {
 		t.Fatalf("Close() error = %v", failure)
 	}
-	handle.rentry.slot.mu.Lock()
-	handles, active := handle.rentry.slot.handles, handle.rentry.slot.active
-	handle.rentry.slot.mu.Unlock()
+	handle.entry.slot.mu.Lock()
+	handles, active := handle.entry.slot.handles, handle.entry.slot.active
+	handle.entry.slot.mu.Unlock()
 	if handles != 1 || active != 1 {
 		t.Fatalf("slot state after concurrent Close = handles:%d active:%d, want handles:1 active:1", handles, active)
 	}
@@ -581,9 +581,9 @@ func TestHandle_CloseRetainsReferenceUntilAdmittedExecuteFinishes(t *testing.T) 
 	if failure := <-done; failure != nil {
 		t.Fatalf("admitted Execute() error = %v", failure)
 	}
-	handle.rentry.slot.mu.Lock()
-	handles = handle.rentry.slot.handles
-	handle.rentry.slot.mu.Unlock()
+	handle.entry.slot.mu.Lock()
+	handles = handle.entry.slot.handles
+	handle.entry.slot.mu.Unlock()
 	if handles != 0 {
 		t.Fatalf("slot handles after admitted operation = %d, want 0", handles)
 	}
@@ -640,7 +640,7 @@ func TestRegistry_StopAccountCancelsInFlightOperationAndRejectsLateResult(t *tes
 	go func() {
 		operationDone <- func() error {
 			ctx := context.Background()
-			handle, err := registry.Open(ctx, target)
+			handle, err := registry.open(ctx, target)
 			if err != nil {
 				return err
 			}
@@ -678,7 +678,7 @@ func TestRegistry_StopAccountDrainsBeforeStoppingOwnerAndRetriesAfterTimeout(t *
 	go func() {
 		operationDone <- func() error {
 			ctx := context.Background()
-			handle, err := registry.Open(ctx, target)
+			handle, err := registry.open(ctx, target)
 			if err != nil {
 				return err
 			}
@@ -724,13 +724,13 @@ func TestRegistry_StopAccountDrainsBeforeStoppingOwnerAndRetriesAfterTimeout(t *
 }
 
 func TestRegistry_StopAccountDrainsRealOwnerCallbackBeforeStoppingOwner(t *testing.T) {
-	var owner *Owner
+	var owner *owner
 	registry, err := newRegistry(RegistryConfig{
 		Capacity:     1,
 		IdleTimeout:  time.Hour,
 		DrainTimeout: time.Millisecond,
 	}, func(gotdclient.Factory, transporttelegram.SessionScope, int, string) (ownerRuntime, error) {
-		owner = newOwner(newRegistryOwnerLifecycle())
+		owner = newOwnerWithLifecycle(newRegistryOwnerLifecycle())
 		return owner, nil
 	})
 	if err != nil {
@@ -750,7 +750,7 @@ func TestRegistry_StopAccountDrainsRealOwnerCallbackBeforeStoppingOwner(t *testi
 	go func() {
 		operationDone <- func() error {
 			ctx := context.Background()
-			handle, err := registry.Open(ctx, target)
+			handle, err := registry.open(ctx, target)
 			if err != nil {
 				return err
 			}

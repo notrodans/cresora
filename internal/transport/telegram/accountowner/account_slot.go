@@ -1,3 +1,6 @@
+// Package accountowner owns the process-local lifetime of gotd Telegram clients,
+// one per operator/account scope, with versioned admission fencing.
+
 package accountowner
 
 import (
@@ -58,13 +61,13 @@ func newAccountSlot() *accountSlot {
 	}
 }
 
-func (slot *accountSlot) Living() bool {
+func (slot *accountSlot) living() bool {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 	return slot.current != nil && !slot.closed && !slot.stopping
 }
 
-func (slot *accountSlot) Idling(idleTimeout time.Duration, now time.Time) bool {
+func (slot *accountSlot) idling(idleTimeout time.Duration, now time.Time) bool {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 	idle := slot.current != nil && !slot.closed && !slot.stopping && slot.handles == 0 && slot.active == 0 && now.Sub(slot.lastUsed) >= idleTimeout
@@ -151,7 +154,7 @@ func (slot *accountSlot) signalRevoke() {
 	close(previous)
 }
 
-func (slot *accountSlot) currentREntry() *runtimeEntry {
+func (slot *accountSlot) currentEntry() *runtimeEntry {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 

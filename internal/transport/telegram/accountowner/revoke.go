@@ -68,7 +68,7 @@ func (registry *Registry) prepareRevoke(
 		if registry.stopped {
 			prepareErr = ErrRegistryStopped
 		} else {
-			rentry = slot.currentREntry()
+			rentry = slot.currentEntry()
 			if rentry != nil && rentry.privateRevoke && rentry.target == disconnecting {
 				stalePrivate = rentry
 			} else if rentry != nil {
@@ -91,7 +91,7 @@ func (registry *Registry) prepareRevoke(
 			if stalePrivate == nil && prepareErr == nil {
 				cancel = slot.closeAdmission()
 				if rentry == nil {
-					rentry = rentry.newRuntimeEntry(registry, slot, disconnecting)
+					rentry = newRuntimeEntry(registry, slot, disconnecting)
 					rentry.privateRevoke = true
 					slot.current = rentry
 					build = true
@@ -103,7 +103,7 @@ func (registry *Registry) prepareRevoke(
 		if stalePrivate != nil {
 			cleanupFailure := registry.teardownRevoke(slot, stalePrivate, disconnecting.Version, nil)
 			registry.mu.Lock()
-			gone := slot.currentREntry() != stalePrivate
+			gone := slot.currentEntry() != stalePrivate
 			registry.mu.Unlock()
 			if !gone {
 				if cleanupFailure == nil {

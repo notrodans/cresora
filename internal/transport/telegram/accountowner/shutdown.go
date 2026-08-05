@@ -30,7 +30,7 @@ func (registry *Registry) StopAccount(
 		registry.mu.Unlock()
 		return failure
 	}
-	rentry := slot.currentREntry()
+	rentry := slot.currentEntry()
 	if rentry != nil {
 		if rentry.target.Actor != target.Actor || rentry.target.AccountID != target.AccountID || rentry.target.Version != target.Version {
 			slot.mu.Unlock()
@@ -72,7 +72,7 @@ func (registry *Registry) Stop(ctx context.Context) error {
 		registry.mu.Lock()
 		registry.stopped = true
 		for _, slot := range registry.slots {
-			if slot.currentREntry() == nil {
+			if slot.currentEntry() == nil {
 				continue
 			}
 			if cancel := slot.closeAdmission(); cancel != nil {
@@ -109,7 +109,7 @@ func (registry *Registry) Stop(ctx context.Context) error {
 	registry.mu.Lock()
 	complete := true
 	for _, slot := range registry.slots {
-		current := slot.currentREntry()
+		current := slot.currentEntry()
 		if current != nil {
 			complete = false
 			break
@@ -137,7 +137,7 @@ func (registry *Registry) stopEntries() []struct {
 		entry *runtimeEntry
 	}, 0, len(registry.slots))
 	for _, slot := range registry.slots {
-		rentry := slot.currentREntry()
+		rentry := slot.currentEntry()
 		if rentry != nil {
 			entries = append(entries, struct {
 				slot  *accountSlot

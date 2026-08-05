@@ -11,9 +11,9 @@ func (registry *Registry) makeCapacity() *runtimeEntry {
 	}
 	now := time.Now()
 	for _, slot := range registry.slots {
-		isIdle := slot.Idling(registry.config.IdleTimeout, now)
+		isIdle := slot.idling(registry.config.IdleTimeout, now)
 		if isIdle {
-			rentry := slot.currentREntry()
+			rentry := slot.currentEntry()
 			slot.closeAdmission()
 			return rentry
 		}
@@ -24,7 +24,7 @@ func (registry *Registry) makeCapacity() *runtimeEntry {
 func (registry *Registry) liveCount() int {
 	count := 0
 	for _, slot := range registry.slots {
-		live := slot.Living()
+		live := slot.living()
 		if live {
 			count++
 		}
@@ -58,9 +58,9 @@ func (registry *Registry) evictIdle() {
 	now := time.Now()
 	registry.mu.Lock()
 	for _, slot := range registry.slots {
-		isIdle := slot.Idling(registry.config.IdleTimeout, now)
+		isIdle := slot.idling(registry.config.IdleTimeout, now)
 		if isIdle {
-			rentry := slot.currentREntry()
+			rentry := slot.currentEntry()
 			slot.closeAdmission()
 			retired = append(retired, struct {
 				slot  *accountSlot

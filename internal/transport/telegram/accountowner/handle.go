@@ -7,11 +7,11 @@ import (
 	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 )
 
-// Handle is a scoped admission to one account runtime. It does not expose a
+// handle is a scoped admission to one account runtime. It does not expose a
 // gotd client. Call Execute for each logical operation and close the handle
 // when the caller no longer needs to retain the admission.
-type Handle struct {
-	rentry *runtimeEntry
+type handle struct {
+	entry  *runtimeEntry
 	target operatoraccounts.RuntimeTarget
 
 	mu       sync.Mutex
@@ -24,18 +24,18 @@ type Handle struct {
 // Execute are linearized by handle.mu: Close rejects later operations, while an
 // operation admitted first retains the underlying registry reference until it
 // finishes.
-func (handle *Handle) Execute(ctx context.Context, callback ClientCallback) error {
+func (handle *handle) Execute(ctx context.Context, callback ClientCallback) error {
 	if !handle.beginUse() {
 		return ErrAccountStopped
 	}
 	defer handle.finishUse()
-	return handle.rentry.execute(ctx, handle.target, callback)
+	return handle.entry.execute(ctx, handle.target, callback)
 }
 
 // Close prevents new operations through this handle. The registry reference is
 // released immediately when the handle is idle, or by the last operation that
 // was admitted before Close.
-func (handle *Handle) Close() error {
+func (handle *handle) Close() error {
 	handle.mu.Lock()
 	if handle.closed {
 		handle.mu.Unlock()
@@ -48,12 +48,12 @@ func (handle *Handle) Close() error {
 	}
 	handle.mu.Unlock()
 	if release {
-		handle.rentry.releaseHandle()
+		handle.entry.releaseHandle()
 	}
 	return nil
 }
 
-func (handle *Handle) beginUse() bool {
+func (handle *handle) beginUse() bool {
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
 	if handle.closed {
@@ -63,7 +63,7 @@ func (handle *Handle) beginUse() bool {
 	return true
 }
 
-func (handle *Handle) finishUse() {
+func (handle *handle) finishUse() {
 	handle.mu.Lock()
 	handle.uses--
 	release := handle.closed && handle.uses == 0 && !handle.released
@@ -72,6 +72,6 @@ func (handle *Handle) finishUse() {
 	}
 	handle.mu.Unlock()
 	if release {
-		handle.rentry.releaseHandle()
+		handle.entry.releaseHandle()
 	}
 }

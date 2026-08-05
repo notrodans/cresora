@@ -9,7 +9,7 @@ import (
 	"github.com/notrodans/cresora/internal/application/operatoraccounts"
 )
 
-// runtimeEntry represents concrete lifecycle version of an account owner.
+// runtimeEntry represents a concrete lifecycle version of an account owner.
 type runtimeEntry struct {
 	registry      *Registry
 	slot          *accountSlot
@@ -24,7 +24,7 @@ type runtimeEntry struct {
 	runOnce  sync.Once
 }
 
-func (entry *runtimeEntry) newRuntimeEntry(
+func newRuntimeEntry(
 	registry *Registry,
 	slot *accountSlot,
 	target operatoraccounts.RuntimeTarget,
@@ -120,7 +120,7 @@ func (entry *runtimeEntry) operationFailure(
 }
 
 func (registry *Registry) runEntry(entry *runtimeEntry, owner ownerRuntime) {
-	failure := owner.Run(registry.context)
+	failure := owner.Run(registry.runtimeContext)
 	entry.runOnce.Do(func() { close(entry.runDone) })
 	entry.slot.mu.Lock()
 	if entry.slot.current == entry {

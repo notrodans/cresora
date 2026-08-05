@@ -203,7 +203,7 @@ func awaitError(t *testing.T, errors <-chan error, name string) error {
 
 func TestOwner_RunIsOneShot(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	firstRun := make(chan error, 1)
 	go func() { firstRun <- owner.Run(context.Background()) }()
 	awaitChannel(t, fake.runEntered, "first gotd Run")
@@ -227,7 +227,7 @@ func TestOwner_RunIsOneShot(t *testing.T) {
 
 func TestOwner_ParentCancellationPropagatesAndJoins(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	parent, cancelParent := context.WithCancel(context.Background())
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(parent) }()
@@ -244,7 +244,7 @@ func TestOwner_ParentCancellationPropagatesAndJoins(t *testing.T) {
 
 func TestOwner_StopIsIdempotentAndJoinsTeardown(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, fake.runEntered, "gotd Run")
@@ -261,7 +261,7 @@ func TestOwner_StopIsIdempotentAndJoinsTeardown(t *testing.T) {
 
 func TestOwner_WaitReadySuccess(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, fake.runEntered, "gotd Run")
@@ -281,7 +281,7 @@ func TestOwner_WaitReadySuccess(t *testing.T) {
 
 func TestOwner_WaitReadyCallerCancellation(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, fake.runEntered, "gotd Run")
@@ -299,7 +299,7 @@ func TestOwner_WaitReadyCallerCancellation(t *testing.T) {
 }
 
 func TestOwner_WaitReadyAfterShutdown(t *testing.T) {
-	owner := newOwner(newFakeLifecycle())
+	owner := newOwnerWithLifecycle(newFakeLifecycle())
 	owner.Stop()
 
 	if failure := owner.WaitReady(context.Background()); !errors.Is(failure, ErrStopped) {
@@ -312,7 +312,7 @@ func TestOwner_WaitReadyAfterShutdown(t *testing.T) {
 
 func TestOwner_WaitReadyUsesCurrentReadyChannel(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, fake.runEntered, "gotd Run")
@@ -374,7 +374,7 @@ func TestReadinessTrackerStartupAndReconnectUseCurrentGeneration(t *testing.T) {
 func TestOwner_RunFailureIsPreserved(t *testing.T) {
 	fake := newFakeLifecycle()
 	fake.runFailure = errFakeRun
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 
 	if failure := owner.Run(context.Background()); !errors.Is(failure, errFakeRun) {
 		t.Fatalf("Run() error = %v, want fake failure", failure)
@@ -387,7 +387,7 @@ func TestOwner_RunFailureIsPreserved(t *testing.T) {
 func TestOwner_InternalDeadlineWhileRunContextIsLiveIsPreserved(t *testing.T) {
 	fake := newFakeLifecycle()
 	fake.runFailure = context.DeadlineExceeded
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 
 	if failure := owner.Run(context.Background()); !errors.Is(failure, context.DeadlineExceeded) {
 		t.Fatalf("Run() error = %v, want internal deadline exceeded", failure)
@@ -399,7 +399,7 @@ func TestOwner_MixedCancellationFailureIsPreserved(t *testing.T) {
 		runEntered: make(chan struct{}),
 		failure:    errors.Join(errMixedRun, context.Canceled),
 	}
-	owner := newOwner(joined)
+	owner := newOwnerWithLifecycle(joined)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, joined.runEntered, "joined-failure Run")
@@ -448,7 +448,7 @@ func TestNormalizeRunFailurePreservesOppositeJoinedContextSentinel(t *testing.T)
 
 func TestOwner_CallbackIsInertUntilCancellation(t *testing.T) {
 	fake := newFakeLifecycle()
-	owner := newOwner(fake)
+	owner := newOwnerWithLifecycle(fake)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, fake.runEntered, "gotd Run")
@@ -472,7 +472,7 @@ func TestOwner_CallbackIsInertUntilCancellation(t *testing.T) {
 
 func TestOwner_RunDoesNotReturnBeforeDispatchedCallback(t *testing.T) {
 	lifecycle := newDispatchLifecycle()
-	owner := newOwner(lifecycle)
+	owner := newOwnerWithLifecycle(lifecycle)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, lifecycle.callbackStarted, "owner dispatcher callback")
@@ -507,7 +507,7 @@ func TestOwner_RunDoesNotReturnBeforeDispatchedCallback(t *testing.T) {
 func TestOwner_RunStopWaitReadyRace(t *testing.T) {
 	for range 50 {
 		fake := newFakeLifecycle()
-		owner := newOwner(fake)
+		owner := newOwnerWithLifecycle(fake)
 		runResult := make(chan error, 1)
 		readyResult := make(chan error, 1)
 
@@ -527,7 +527,7 @@ func TestOwner_RunStopWaitReadyRace(t *testing.T) {
 
 func TestOwner_StopPublishesStoppingBeforeTeardownCompletes(t *testing.T) {
 	blocked := newBlockedLifecycle()
-	owner := newOwner(blocked)
+	owner := newOwnerWithLifecycle(blocked)
 	runResult := make(chan error, 1)
 	go func() { runResult <- owner.Run(context.Background()) }()
 	awaitChannel(t, blocked.runEntered, "blocked gotd Run")

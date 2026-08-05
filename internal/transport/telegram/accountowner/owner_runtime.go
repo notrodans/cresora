@@ -1,4 +1,3 @@
-// Package accountowner owns the lifetime of one gotd Telegram client.
 package accountowner
 
 import (
@@ -20,7 +19,7 @@ var (
 	ErrStopped = errors.New("telegram account owner stopped")
 )
 
-// lifecycle is the only gotd behavior needed by Owner. Keeping it private
+// lifecycle is the only gotd behavior the owner needs. Keeping it private
 // leaves the production boundary concrete while allowing lifecycle tests to
 // use a deterministic fake without widening a transport interface.
 type lifecycle interface {
@@ -43,10 +42,10 @@ type clientProvider interface {
 	rawClient() *gotdtelegram.Client
 }
 
-// Owner owns one factory-created gotd client. It exposes lifecycle operations
+// owner wraps one factory-created gotd client and exposes lifecycle operations
 // and a callback-only operation boundary; callers cannot retain the client or
 // use it outside an admitted callback.
-type Owner struct {
+type owner struct {
 	client lifecycle
 
 	mu         sync.Mutex
@@ -61,15 +60,15 @@ type Owner struct {
 	requests   chan clientRequest
 }
 
-// NewOwner constructs an owner around exactly one client made by factory. The
+// newOwner constructs an owner around exactly one client made by factory. The
 // factory error is returned unchanged so invalid construction never produces
 // a partially initialized owner.
-func NewOwner(
+func newOwner(
 	factory gotdclient.Factory,
 	scope transporttelegram.SessionScope,
 	appID int,
 	appHash string,
-) (*Owner, error) {
+) (*owner, error) {
 	// The tracker must exist before gotd construction: gotd can publish an
 	// initial connection state as soon as Run starts, and readiness is a
 	// current-state property rather than a one-shot Run callback.
@@ -83,12 +82,12 @@ func NewOwner(
 	if err != nil {
 		return nil, err
 	}
-	return newOwner(newGotdLifecycleWithReadiness(client, readiness)), nil
+	return newOwnerWithLifecycle(newGotdLifecycleWithReadiness(client, readiness)), nil
 }
 
-// newOwner is the private lifecycle seam used by unit tests.
-func newOwner(client lifecycle) *Owner {
-	return &Owner{
+// newOwnerWithLifecycle is the private lifecycle seam used by unit tests.
+func newOwnerWithLifecycle(client lifecycle) *owner {
+	return &owner{
 		client:     client,
 		done:       make(chan struct{}),
 		startedCh:  make(chan struct{}),
@@ -100,7 +99,7 @@ func newOwner(client lifecycle) *Owner {
 // Run starts the owned gotd client once and joins its complete teardown. All
 // client callbacks are dispatched by the callback passed to gotd Run, so Run
 // cannot return while an admitted callback is still executing.
-func (owner *Owner) Run(ctx context.Context) error {
+func (owner *owner) Run(ctx context.Context) error {
 	runContext, cancel := context.WithCancel(ctx)
 	owner.mu.Lock()
 	if owner.started {
@@ -126,7 +125,7 @@ func (owner *Owner) Run(ctx context.Context) error {
 // Stop cancels the active gotd run. It is safe to call more than once. A stop
 // before Run consumes the one-shot owner and makes subsequent Run calls fail
 // with ErrAlreadyRun.
-func (owner *Owner) Stop() {
+func (owner *owner) Stop() {
 	if owner == nil {
 		return
 	}
@@ -162,7 +161,7 @@ func (owner *Owner) Stop() {
 // WaitReady waits for the current gotd readiness signal, caller cancellation,
 // or owner shutdown. Ready is obtained for every call rather than cached:
 // gotd replaces that channel when it reconnects.
-func (owner *Owner) WaitReady(ctx context.Context) error {
+func (owner *owner) WaitReady(ctx context.Context) error {
 	for {
 		owner.mu.Lock()
 		stopping := owner.stopping
@@ -219,7 +218,7 @@ func (owner *Owner) WaitReady(ctx context.Context) error {
 // Wait joins the one-shot gotd run, or returns when ctx is canceled. It is
 // intentionally separate from Stop: callers that own a registry can publish
 // the admission fence before waiting for teardown.
-func (owner *Owner) Wait(ctx context.Context) error {
+func (owner *owner) Wait(ctx context.Context) error {
 	select {
 	case <-owner.done:
 		owner.mu.Lock()
@@ -239,7 +238,7 @@ func (tracker *readinessTracker) Ready() <-chan struct{} {
 
 // Execute queues callback for the dispatcher owned by client.Run. The client
 // never escapes this callback through the owner API.
-func (owner *Owner) Execute(ctx context.Context, callback ClientCallback) error {
+func (owner *owner) Execute(ctx context.Context, callback ClientCallback) error {
 	if callback == nil {
 		return errors.New("telegram account owner callback is required")
 	}
@@ -288,7 +287,7 @@ func (owner *Owner) Execute(ctx context.Context, callback ClientCallback) error 
 	}
 }
 
-func (owner *Owner) dispatch(ctx context.Context) error {
+func (owner *owner) dispatch(ctx context.Context) error {
 	provider, ok := owner.client.(clientProvider)
 	var client *gotdtelegram.Client
 	if ok {
@@ -312,7 +311,7 @@ func (owner *Owner) dispatch(ctx context.Context) error {
 	}
 }
 
-func (owner *Owner) complete(failure error) {
+func (owner *owner) complete(failure error) {
 	owner.mu.Lock()
 	owner.result = failure
 	owner.completed = true
@@ -320,7 +319,7 @@ func (owner *Owner) complete(failure error) {
 	owner.mu.Unlock()
 }
 
-func (owner *Owner) completionResult() error {
+func (owner *owner) completionResult() error {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if owner.result != nil {
@@ -329,7 +328,7 @@ func (owner *Owner) completionResult() error {
 	return ErrStopped
 }
 
-func (owner *Owner) readyResult() error {
+func (owner *owner) readyResult() error {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if owner.stopping {

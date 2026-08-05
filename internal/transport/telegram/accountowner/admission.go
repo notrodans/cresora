@@ -41,7 +41,7 @@ func (registry *Registry) reserve(
 			registry.slots[key] = slot
 		}
 
-		currREntry := slot.currentREntry()
+		currREntry := slot.currentEntry()
 		slot.mu.Lock()
 		stopping := slot.stopping
 		closed := slot.closed
@@ -91,7 +91,7 @@ func (registry *Registry) reserve(
 			registry.mu.Unlock()
 			return nil, ErrAccountStopped
 		}
-		entry := currREntry.newRuntimeEntry(registry, slot, target)
+		entry := newRuntimeEntry(registry, slot, target)
 		slot.mu.Lock()
 		canPublish := !registry.stopped && slot.current == nil && !slot.closed && !slot.stopping
 		if canPublish {
