@@ -184,10 +184,3 @@ func validateTarget(target operatoraccounts.RuntimeTarget) error {
 	}
 	return nil
 }
-
-func accountKeyFromTarget(target operatoraccounts.RuntimeTarget) accountKey {
-	return accountKey{
-		operatorID: target.Actor.OperatorID,
-		accountID:  target.AccountID.UUID(),
-	}
-}

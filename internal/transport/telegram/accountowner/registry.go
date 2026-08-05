@@ -78,6 +78,21 @@ func newRegistry(config RegistryConfig, build ownerBuilder) (*Registry, error) {
 	return registry, nil
 }
 
+// Execute opens an admission for one logical operation, executes the callback
+// while holding the account gate, and releases the admission afterwards.
+func (registry *Registry) Execute(
+	ctx context.Context,
+	target operatoraccounts.RuntimeTarget,
+	callback ClientCallback,
+) error {
+	handle, err := registry.open(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	return handle.Execute(ctx, callback)
+}
+
 // open admits target and waits for the current owner to become ready. Existing
 // owners are reused; readiness is a current-state wait and is therefore safe
 // across gotd reconnects.
@@ -109,21 +124,6 @@ func (registry *Registry) open(ctx context.Context, target operatoraccounts.Runt
 		return nil, err
 	}
 	return handle, nil
-}
-
-// Execute opens an admission for one logical operation, executes the callback
-// while holding the account gate, and releases the admission afterwards.
-func (registry *Registry) Execute(
-	ctx context.Context,
-	target operatoraccounts.RuntimeTarget,
-	callback ClientCallback,
-) error {
-	handle, err := registry.open(ctx, target)
-	if err != nil {
-		return err
-	}
-	defer handle.Close()
-	return handle.Execute(ctx, callback)
 }
 
 func (registry *Registry) buildEntry(entry *runtimeEntry) {
@@ -164,8 +164,4 @@ func (registry *Registry) buildEntry(entry *runtimeEntry) {
 	}
 
 	go registry.runEntry(entry, owner)
-}
-
-func isContextFailure(failure error) bool {
-	return errors.Is(failure, context.Canceled) || errors.Is(failure, context.DeadlineExceeded)
 }
