@@ -25,10 +25,10 @@ func (registry *Registry) reserve(
 		}
 		slot := registry.slots[key]
 		if slot == nil {
-			evicted := registry.makeCapacityLocked()
+			evicted := registry.makeCapacity()
 			if evicted != nil {
 				registry.mu.Unlock()
-				if failure := registry.teardown(evicted.slot, evicted, ctx); failure != nil {
+				if failure := registry.teardown(ctx, evicted.slot, evicted); failure != nil {
 					return nil, failure
 				}
 				continue
@@ -41,7 +41,7 @@ func (registry *Registry) reserve(
 			registry.slots[key] = slot
 		}
 
-		currREntry := slot.currentEntry()
+		currREntry := slot.currentREntry()
 		slot.mu.Lock()
 		stopping := slot.stopping
 		closed := slot.closed
@@ -55,7 +55,7 @@ func (registry *Registry) reserve(
 			switch {
 			case currREntry.target == target && !stopping:
 				slot.mu.Lock()
-				reserved := slot.reserveRefLocked(currREntry)
+				reserved := slot.reserveHandle(currREntry)
 				slot.mu.Unlock()
 				registry.mu.Unlock()
 				if !reserved {
@@ -72,7 +72,7 @@ func (registry *Registry) reserve(
 				// Keep the old entry installed while it drains. A replacement
 				// cannot construct or start a second client for this account.
 				if !stopping {
-					cancel := slot.closeAdmissionLocked()
+					cancel := slot.closeAdmission()
 					registry.mu.Unlock()
 					if cancel != nil {
 						cancel()
@@ -80,7 +80,7 @@ func (registry *Registry) reserve(
 				} else {
 					registry.mu.Unlock()
 				}
-				if failure := registry.teardown(slot, currREntry, ctx); failure != nil {
+				if failure := registry.teardown(ctx, slot, currREntry); failure != nil {
 					return nil, failure
 				}
 				continue
@@ -96,7 +96,7 @@ func (registry *Registry) reserve(
 		canPublish := !registry.stopped && slot.current == nil && !slot.closed && !slot.stopping
 		if canPublish {
 			slot.current = entry
-			canPublish = slot.reserveRefLocked(entry)
+			canPublish = slot.reserveHandle(entry)
 		}
 		slot.mu.Unlock()
 		registry.mu.Unlock()
@@ -114,10 +114,10 @@ func (registry *Registry) checkAdmission(
 ) error {
 	entry.slot.mu.Lock()
 	defer entry.slot.mu.Unlock()
-	return admissionErrorLocked(entry.slot, entry, target)
+	return admissionError(entry.slot, entry, target)
 }
 
-func admissionErrorLocked(
+func admissionError(
 	slot *accountSlot,
 	entry *runtimeEntry,
 	target operatoraccounts.RuntimeTarget,

@@ -30,7 +30,7 @@ func (registry *Registry) StopAccount(
 		registry.mu.Unlock()
 		return failure
 	}
-	rentry := slot.currentEntry()
+	rentry := slot.currentREntry()
 	if rentry != nil {
 		if rentry.target.Actor != target.Actor || rentry.target.AccountID != target.AccountID || rentry.target.Version != target.Version {
 			slot.mu.Unlock()
@@ -50,7 +50,7 @@ func (registry *Registry) StopAccount(
 
 	var cancel context.CancelFunc
 	if rentry != nil && !slot.stopping {
-		cancel = slot.closeAdmissionLocked()
+		cancel = slot.closeAdmission()
 	}
 	registry.mu.Unlock()
 
@@ -60,7 +60,7 @@ func (registry *Registry) StopAccount(
 	if rentry == nil {
 		return nil
 	}
-	return registry.teardown(slot, rentry, ctx)
+	return registry.teardown(ctx, slot, rentry)
 }
 
 // Stop closes every account admission and joins each owner within the supplied
@@ -72,10 +72,10 @@ func (registry *Registry) Stop(ctx context.Context) error {
 		registry.mu.Lock()
 		registry.stopped = true
 		for _, slot := range registry.slots {
-			if slot.currentEntry() == nil {
+			if slot.currentREntry() == nil {
 				continue
 			}
-			if cancel := slot.closeAdmissionLocked(); cancel != nil {
+			if cancel := slot.closeAdmission(); cancel != nil {
 				cancels = append(cancels, cancel)
 			}
 		}
@@ -93,7 +93,7 @@ func (registry *Registry) Stop(ctx context.Context) error {
 		}
 		iterationFailed := false
 		for _, item := range entries {
-			if err := registry.teardown(item.slot, item.entry, ctx); err != nil {
+			if err := registry.teardown(ctx, item.slot, item.entry); err != nil {
 				iterationFailed = true
 				if first == nil {
 					first = err
@@ -109,7 +109,7 @@ func (registry *Registry) Stop(ctx context.Context) error {
 	registry.mu.Lock()
 	complete := true
 	for _, slot := range registry.slots {
-		current := slot.currentEntry()
+		current := slot.currentREntry()
 		if current != nil {
 			complete = false
 			break
@@ -137,7 +137,7 @@ func (registry *Registry) stopEntries() []struct {
 		entry *runtimeEntry
 	}, 0, len(registry.slots))
 	for _, slot := range registry.slots {
-		rentry := slot.currentEntry()
+		rentry := slot.currentREntry()
 		if rentry != nil {
 			entries = append(entries, struct {
 				slot  *accountSlot
@@ -148,7 +148,7 @@ func (registry *Registry) stopEntries() []struct {
 	return entries
 }
 
-func (registry *Registry) teardown(slot *accountSlot, entry *runtimeEntry, ctx context.Context) error {
+func (registry *Registry) teardown(ctx context.Context, slot *accountSlot, entry *runtimeEntry) error {
 	if failure := registry.waitForRevoke(slot, ctx); failure != nil {
 		return failure
 	}
@@ -211,7 +211,7 @@ func (registry *Registry) removeSlot(slot *accountSlot) {
 			continue
 		}
 		candidate.mu.Lock()
-		remove := candidate.current == nil && candidate.refs == 0 && candidate.active == 0 &&
+		remove := candidate.current == nil && candidate.handles == 0 && candidate.active == 0 &&
 			!candidate.stopping && !candidate.revokeRunning && candidate.revokeWaiters == 0
 		candidate.mu.Unlock()
 		if remove {

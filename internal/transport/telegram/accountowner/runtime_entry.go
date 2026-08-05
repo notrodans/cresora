@@ -55,7 +55,9 @@ func (entry *runtimeEntry) execute(
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	defer func() { slot.gate <- struct{}{} }()
+	defer func() {
+		slot.gate <- struct{}{}
+	}()
 
 	operationContext, cancel := context.WithCancel(ctx)
 	if failure := slot.beginOperation(entry, target, cancel); failure != nil {
@@ -91,18 +93,18 @@ func (entry *runtimeEntry) execute(
 	return entry.operationFailure(target, failure)
 }
 
-func (entry *runtimeEntry) releaseRef() {
+func (entry *runtimeEntry) releaseHandle() {
 	entry.slot.mu.Lock()
-	if entry.slot.refs > 0 {
-		entry.slot.refs--
+	if entry.slot.handles > 0 {
+		entry.slot.handles--
 	}
 	entry.slot.lastUsed = time.Now()
-	refs := entry.slot.refs
+	handles := entry.slot.handles
 	current := entry.slot.current
 	active := entry.slot.active
 	stopping := entry.slot.stopping
 	entry.slot.mu.Unlock()
-	if refs == 0 && current == nil && active == 0 && !stopping {
+	if handles == 0 && current == nil && active == 0 && !stopping {
 		entry.registry.removeSlot(entry.slot)
 	}
 }
@@ -165,19 +167,19 @@ func (registry *Registry) finishStoppedEntry(entry *runtimeEntry) {
 		entry.slot.mu.Unlock()
 		return
 	}
-	active, refs := entry.slot.active, entry.slot.refs
+	active, handles := entry.slot.active, entry.slot.handles
 	entry.slot.mu.Unlock()
-	if active == 0 && refs == 0 {
+	if active == 0 && handles == 0 {
 		registry.removeSlot(entry.slot)
 	}
 }
 
 func (registry *Registry) cleanupFailedEntry(entry *runtimeEntry) {
 	entry.slot.mu.Lock()
-	refs := entry.slot.refs
+	handles := entry.slot.handles
 	current := entry.slot.current
 	entry.slot.mu.Unlock()
-	if refs == 0 && current == nil {
+	if handles == 0 && current == nil {
 		registry.removeSlot(entry.slot)
 	}
 }

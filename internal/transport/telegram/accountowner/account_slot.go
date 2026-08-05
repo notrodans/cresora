@@ -20,7 +20,7 @@ type accountKey struct {
 type accountSlot struct {
 	mu sync.Mutex
 
-	// mu guards current, closed, stopping, refs, active, activeDone,
+	// mu guards current, closed, stopping, handles, active, activeDone,
 	// activeCancel and lastUsed. gate serializes account operations, but it is
 	// not the admission boundary: beginOperation is.
 	gate     chan struct{}
@@ -28,7 +28,7 @@ type accountSlot struct {
 	closed   bool
 	stopping bool
 
-	refs         int // Count of open handles
+	handles      int // Count of open handles
 	active       int
 	activeDone   chan struct{}
 	activeCancel context.CancelFunc
@@ -58,25 +58,38 @@ func newAccountSlot() *accountSlot {
 	}
 }
 
+func (slot *accountSlot) Living() bool {
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	return slot.current != nil && !slot.closed && !slot.stopping
+}
+
+func (slot *accountSlot) Idling(idleTimeout time.Duration, now time.Time) bool {
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	idle := slot.current != nil && !slot.closed && !slot.stopping && slot.handles == 0 && slot.active == 0 && now.Sub(slot.lastUsed) >= idleTimeout
+	return idle
+}
+
 func closedSignal() chan struct{} {
 	closed := make(chan struct{})
 	close(closed)
 	return closed
 }
 
-func (slot *accountSlot) reserveRefLocked(rentry *runtimeEntry) bool {
+func (slot *accountSlot) reserveHandle(rentry *runtimeEntry) bool {
 	if slot.closed || slot.stopping {
 		return false
 	}
 	if rentry != nil && slot.current != rentry {
 		return false
 	}
-	slot.refs++
+	slot.handles++
 	slot.lastUsed = time.Now()
 	return true
 }
 
-func (slot *accountSlot) closeAdmissionLocked() context.CancelFunc {
+func (slot *accountSlot) closeAdmission() context.CancelFunc {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 	slot.closed = true
@@ -97,7 +110,7 @@ func (slot *accountSlot) beginOperation(
 ) error {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
-	if failure := admissionErrorLocked(slot, rentry, target); failure != nil {
+	if failure := admissionError(slot, rentry, target); failure != nil {
 		return failure
 	}
 	if slot.active == 0 {
@@ -132,13 +145,13 @@ func (slot *accountSlot) waitDrained(ctx context.Context) error {
 	}
 }
 
-func (slot *accountSlot) signalRevokeLocked() {
+func (slot *accountSlot) signalRevoke() {
 	previous := slot.revokeChanged
 	slot.revokeChanged = make(chan struct{})
 	close(previous)
 }
 
-func (slot *accountSlot) currentEntry() *runtimeEntry {
+func (slot *accountSlot) currentREntry() *runtimeEntry {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 
@@ -150,7 +163,7 @@ func (slot *accountSlot) removable() bool {
 	defer slot.mu.Unlock()
 
 	return slot.current == nil &&
-		slot.refs == 0 &&
+		slot.handles == 0 &&
 		slot.active == 0 &&
 		!slot.stopping
 }

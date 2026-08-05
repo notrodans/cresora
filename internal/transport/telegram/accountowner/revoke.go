@@ -68,7 +68,7 @@ func (registry *Registry) prepareRevoke(
 		if registry.stopped {
 			prepareErr = ErrRegistryStopped
 		} else {
-			rentry = slot.currentEntry()
+			rentry = slot.currentREntry()
 			if rentry != nil && rentry.privateRevoke && rentry.target == disconnecting {
 				stalePrivate = rentry
 			} else if rentry != nil {
@@ -89,7 +89,7 @@ func (registry *Registry) prepareRevoke(
 				prepareErr = registry.recordFence(key, disconnecting.Version, true)
 			}
 			if stalePrivate == nil && prepareErr == nil {
-				cancel = slot.closeAdmissionLocked()
+				cancel = slot.closeAdmission()
 				if rentry == nil {
 					rentry = rentry.newRuntimeEntry(registry, slot, disconnecting)
 					rentry.privateRevoke = true
@@ -103,7 +103,7 @@ func (registry *Registry) prepareRevoke(
 		if stalePrivate != nil {
 			cleanupFailure := registry.teardownRevoke(slot, stalePrivate, disconnecting.Version, nil)
 			registry.mu.Lock()
-			gone := slot.currentEntry() != stalePrivate
+			gone := slot.currentREntry() != stalePrivate
 			registry.mu.Unlock()
 			if !gone {
 				if cleanupFailure == nil {
@@ -156,10 +156,10 @@ func (registry *Registry) acquireRevoke(ctx context.Context, key accountKey) (*a
 	}
 	slot := registry.slots[key]
 	if slot == nil {
-		evicted := registry.makeCapacityLocked()
+		evicted := registry.makeCapacity()
 		if evicted != nil {
 			registry.mu.Unlock()
-			if failure := registry.teardown(evicted.slot, evicted, ctx); failure != nil {
+			if failure := registry.teardown(ctx, evicted.slot, evicted); failure != nil {
 				return nil, failure
 			}
 			return registry.acquireRevoke(ctx, key)
@@ -172,7 +172,7 @@ func (registry *Registry) acquireRevoke(ctx context.Context, key accountKey) (*a
 		registry.slots[key] = slot
 	}
 	slot.revokeWaiters++
-	slot.signalRevokeLocked()
+	slot.signalRevoke()
 	registry.mu.Unlock()
 
 	select {
@@ -180,7 +180,7 @@ func (registry *Registry) acquireRevoke(ctx context.Context, key accountKey) (*a
 	case <-ctx.Done():
 		registry.mu.Lock()
 		slot.revokeWaiters--
-		slot.signalRevokeLocked()
+		slot.signalRevoke()
 		registry.mu.Unlock()
 		return nil, ctx.Err()
 	}
@@ -188,13 +188,13 @@ func (registry *Registry) acquireRevoke(ctx context.Context, key accountKey) (*a
 	registry.mu.Lock()
 	slot.revokeWaiters--
 	if registry.stopped {
-		slot.signalRevokeLocked()
+		slot.signalRevoke()
 		registry.mu.Unlock()
 		slot.teardownGate <- struct{}{}
 		return nil, ErrRegistryStopped
 	}
 	slot.revokeRunning = true
-	slot.signalRevokeLocked()
+	slot.signalRevoke()
 	registry.mu.Unlock()
 	return slot, nil
 }
@@ -289,7 +289,7 @@ func (registry *Registry) releaseRevoke(slot *accountSlot) {
 	registry.mu.Lock()
 	if slot.revokeRunning {
 		slot.revokeRunning = false
-		slot.signalRevokeLocked()
+		slot.signalRevoke()
 	}
 	slot.mu.Lock()
 	if slot.current == nil && slot.active == 0 {

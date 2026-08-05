@@ -48,7 +48,7 @@ func (handle *Handle) Close() error {
 	}
 	handle.mu.Unlock()
 	if release {
-		handle.rentry.releaseRef()
+		handle.rentry.releaseHandle()
 	}
 	return nil
 }
@@ -72,6 +72,6 @@ func (handle *Handle) finishUse() {
 	}
 	handle.mu.Unlock()
 	if release {
-		handle.rentry.releaseRef()
+		handle.rentry.releaseHandle()
 	}
 }

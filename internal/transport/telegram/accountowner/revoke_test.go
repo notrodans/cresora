@@ -14,7 +14,7 @@ import (
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 )
 
-func TestRegistryRevokeAndStopFencesDrainsAndTearsDown(t *testing.T) {
+func TestRegistry_RevokeAndStopFencesDrainsAndTearsDown(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	prior := registryTarget()
@@ -175,7 +175,7 @@ func (context *executeGateWaitContext) Done() <-chan struct{} {
 	return context.Context.Done()
 }
 
-func TestRegistryRevokeAndStopSerializesSameIntentAndBuildsPrivateOwners(t *testing.T) {
+func TestRegistry_RevokeAndStopSerializesSameIntentAndBuildsPrivateOwners(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	target := registryTarget()
@@ -237,7 +237,7 @@ func TestRegistryRevokeAndStopSerializesSameIntentAndBuildsPrivateOwners(t *test
 	}
 }
 
-func TestRegistryRevokeAndStopRepanicsAfterTeardown(t *testing.T) {
+func TestRegistry_RevokeAndStopRepanicsAfterTeardown(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	target := registryTarget()
@@ -262,7 +262,7 @@ func TestRegistryRevokeAndStopRepanicsAfterTeardown(t *testing.T) {
 	}
 }
 
-func TestRegistryStopAccountAcceptsReauthenticationTarget(t *testing.T) {
+func TestRegistry_StopAccountAcceptsReauthenticationTarget(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	target := registryTarget()
@@ -273,7 +273,7 @@ func TestRegistryStopAccountAcceptsReauthenticationTarget(t *testing.T) {
 	}
 }
 
-func TestRegistryRevokeAndStopAcceptsReauthenticationPriorOwner(t *testing.T) {
+func TestRegistry_RevokeAndStopAcceptsReauthenticationPriorOwner(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	prior := registryTarget()
@@ -294,7 +294,7 @@ func TestRegistryRevokeAndStopAcceptsReauthenticationPriorOwner(t *testing.T) {
 	}
 }
 
-func TestRegistryRevokeAndStopRejectsNoOwnerInitialVersion(t *testing.T) {
+func TestRegistry_RevokeAndStopRejectsNoOwnerInitialVersion(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	target := registryTarget()
@@ -311,7 +311,7 @@ func TestRegistryRevokeAndStopRejectsNoOwnerInitialVersion(t *testing.T) {
 	}
 }
 
-func TestRegistryPrivateRevokeBuildFailureRestoresNewerAdmission(t *testing.T) {
+func TestRegistry_PrivateRevokeBuildFailureRestoresNewerAdmission(t *testing.T) {
 	factory := &registryOwnerFactory{fail: errors.New("private owner build failed")}
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	target := registryTarget()
@@ -339,7 +339,7 @@ func TestRegistryPrivateRevokeBuildFailureRestoresNewerAdmission(t *testing.T) {
 	}
 }
 
-func TestRegistryPrivateRevokeBuildFailureIgnoresStaleHandleRefs(t *testing.T) {
+func TestRegistry_PrivateRevokeBuildFailureIgnoresStaleHandles(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	prior := registryTarget()
@@ -387,7 +387,7 @@ func TestRegistryPrivateRevokeBuildFailureIgnoresStaleHandleRefs(t *testing.T) {
 	_ = staleHandle
 }
 
-func TestRegistryPrivateRevokeTeardownFailureRestoresNewerAdmission(t *testing.T) {
+func TestRegistry_PrivateRevokeTeardownFailureRestoresNewerAdmission(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{DrainTimeout: time.Millisecond})
 	target := registryTarget()
@@ -416,7 +416,7 @@ func TestRegistryPrivateRevokeTeardownFailureRestoresNewerAdmission(t *testing.T
 	}
 }
 
-func TestRegistryRevokeWaitsForTeardownAndQueuedRetry(t *testing.T) {
+func TestRegistry_RevokeWaitsForTeardownAndQueuedRetry(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{})
 	prior := registryTarget()
@@ -541,7 +541,7 @@ func waitForNoCurrentEntry(t *testing.T, registry *Registry, key accountKey) {
 	}
 }
 
-func TestRegistryRevokeTeardownFailurePrecedesCallbackFailure(t *testing.T) {
+func TestRegistry_RevokeTeardownFailurePrecedesCallbackFailure(t *testing.T) {
 	factory := new(registryOwnerFactory)
 	registry := newFakeRegistry(t, factory, RegistryConfig{DrainTimeout: time.Millisecond})
 	target := registryTarget()

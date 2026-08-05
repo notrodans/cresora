@@ -5,28 +5,26 @@ import (
 	"time"
 )
 
-func (registry *Registry) makeCapacityLocked() *runtimeEntry {
-	if registry.liveCountLocked() < registry.config.Capacity {
+func (registry *Registry) makeCapacity() *runtimeEntry {
+	if registry.liveCount() < registry.config.Capacity {
 		return nil
 	}
 	now := time.Now()
 	for _, slot := range registry.slots {
-		idle := slot.current != nil && !slot.closed && !slot.stopping && slot.refs == 0 && slot.active == 0 && now.Sub(slot.lastUsed) >= registry.config.IdleTimeout
-		if idle {
-			rentry := slot.currentEntry()
-			slot.closeAdmissionLocked()
+		isIdle := slot.Idling(registry.config.IdleTimeout, now)
+		if isIdle {
+			rentry := slot.currentREntry()
+			slot.closeAdmission()
 			return rentry
 		}
 	}
 	return nil
 }
 
-func (registry *Registry) liveCountLocked() int {
+func (registry *Registry) liveCount() int {
 	count := 0
 	for _, slot := range registry.slots {
-		slot.mu.Lock()
-		live := slot.current != nil && !slot.closed && !slot.stopping
-		slot.mu.Unlock()
+		live := slot.Living()
 		if live {
 			count++
 		}
@@ -60,9 +58,10 @@ func (registry *Registry) evictIdle() {
 	now := time.Now()
 	registry.mu.Lock()
 	for _, slot := range registry.slots {
-		if slot.current != nil && !slot.closed && !slot.stopping && slot.refs == 0 && slot.active == 0 && now.Sub(slot.lastUsed) >= registry.config.IdleTimeout {
-			rentry := slot.currentEntry()
-			slot.closeAdmissionLocked()
+		isIdle := slot.Idling(registry.config.IdleTimeout, now)
+		if isIdle {
+			rentry := slot.currentREntry()
+			slot.closeAdmission()
 			retired = append(retired, struct {
 				slot  *accountSlot
 				entry *runtimeEntry
@@ -72,6 +71,6 @@ func (registry *Registry) evictIdle() {
 	registry.mu.Unlock()
 
 	for _, item := range retired {
-		_ = registry.teardown(item.slot, item.entry, context.Background())
+		_ = registry.teardown(context.Background(), item.slot, item.entry)
 	}
 }

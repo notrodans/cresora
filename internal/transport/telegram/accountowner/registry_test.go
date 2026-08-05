@@ -566,10 +566,10 @@ func TestHandle_CloseRetainsReferenceUntilAdmittedExecuteFinishes(t *testing.T) 
 		t.Fatalf("Close() error = %v", failure)
 	}
 	handle.rentry.slot.mu.Lock()
-	refs, active := handle.rentry.slot.refs, handle.rentry.slot.active
+	handles, active := handle.rentry.slot.handles, handle.rentry.slot.active
 	handle.rentry.slot.mu.Unlock()
-	if refs != 1 || active != 1 {
-		t.Fatalf("slot state after concurrent Close = refs:%d active:%d, want refs:1 active:1", refs, active)
+	if handles != 1 || active != 1 {
+		t.Fatalf("slot state after concurrent Close = handles:%d active:%d, want handles:1 active:1", handles, active)
 	}
 	if failure := handle.Execute(context.Background(), func(context.Context, *gotdtelegram.Client) error {
 		return nil
@@ -582,10 +582,10 @@ func TestHandle_CloseRetainsReferenceUntilAdmittedExecuteFinishes(t *testing.T) 
 		t.Fatalf("admitted Execute() error = %v", failure)
 	}
 	handle.rentry.slot.mu.Lock()
-	refs = handle.rentry.slot.refs
+	handles = handle.rentry.slot.handles
 	handle.rentry.slot.mu.Unlock()
-	if refs != 0 {
-		t.Fatalf("slot refs after admitted operation = %d, want 0", refs)
+	if handles != 0 {
+		t.Fatalf("slot handles after admitted operation = %d, want 0", handles)
 	}
 }
 
