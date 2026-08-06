@@ -162,7 +162,7 @@ func newServiceFixture(t *testing.T) (*Service, *servicePersistence, *servicePro
 	return service, persistence, provider, stopper, actor
 }
 
-func TestServiceStartAdmitsBeforeSendCodeAndKeepsHashOutOfChallenge(t *testing.T) {
+func TestService_StartAdmitsBeforeSendCodeAndKeepsHashOutOfChallenge(t *testing.T) {
 	service, persistence, provider, _, actor := newServiceFixture(t)
 	result, err := service.Start(context.Background(), actor, "+1 (555) 123-4567")
 	if err != nil {
@@ -185,12 +185,21 @@ func TestServiceStartAdmitsBeforeSendCodeAndKeepsHashOutOfChallenge(t *testing.T
 	}
 }
 
-func TestServiceUsesStoredBeginExpiryAsChallengeUpperBound(t *testing.T) {
+func TestService_UsesStoredBeginExpiryAsChallengeUpperBound(t *testing.T) {
 	service, persistence, _, _, actor := newServiceFixture(t)
 	now := time.Unix(500, 0)
 	persistence.authExpiresAt = now.Add(time.Minute)
 	persistence.beginOutcome = BeginInProgress
-	service = NewService(persistence, service.provider, service.stopper, WithClock(func() time.Time { return now }), WithChallengeTTL(time.Hour))
+	service = NewService(
+		persistence,
+		service.provider,
+		service.stopper,
+		WithClock(
+			func() time.Time {
+				return now
+			}),
+		WithChallengeTTL(time.Hour),
+	)
 	result, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +209,7 @@ func TestServiceUsesStoredBeginExpiryAsChallengeUpperBound(t *testing.T) {
 	}
 }
 
-func TestServicePasswordStageAndCompletionTombstone(t *testing.T) {
+func TestService_PasswordStageAndCompletionTombstone(t *testing.T) {
 	service, persistence, provider, _, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -231,7 +240,7 @@ func TestServicePasswordStageAndCompletionTombstone(t *testing.T) {
 	}
 }
 
-func TestServicePasswordPreservesRawBytes(t *testing.T) {
+func TestService_PasswordPreservesRawBytes(t *testing.T) {
 	service, _, provider, _, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -250,14 +259,14 @@ func TestServicePasswordPreservesRawBytes(t *testing.T) {
 	}
 }
 
-func TestServiceReservesFixedAttemptBudgetsBeforeProviderCalls(t *testing.T) {
+func TestService_ReservesFixedAttemptBudgetsBeforeProviderCalls(t *testing.T) {
 	service, _, provider, _, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
 		t.Fatal(err)
 	}
 	provider.signInError = ErrInvalidCode
-	for attempt := 0; attempt < maxCodeAttempts; attempt++ {
+	for attempt := range maxCodeAttempts {
 		if _, err := service.Code(context.Background(), actor, start.Challenge.RequestID, "wrong"); !errors.Is(err, ErrInvalidCode) {
 			t.Fatalf("attempt %d error = %v", attempt+1, err)
 		}
@@ -270,9 +279,9 @@ func TestServiceReservesFixedAttemptBudgetsBeforeProviderCalls(t *testing.T) {
 	}
 }
 
-func TestServiceUsesFixedGlobalChallengeCapacity(t *testing.T) {
+func TestService_UsesFixedGlobalChallengeCapacity(t *testing.T) {
 	service, persistence, provider, _, actor := newServiceFixture(t)
-	service.coordinator.capacity = 1
+	service.registry.capacity = 1
 	if _, err := service.Start(context.Background(), actor, "+15551234567"); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +297,7 @@ func TestServiceUsesFixedGlobalChallengeCapacity(t *testing.T) {
 	}
 }
 
-func TestServiceRetriesOnlyFinalizeAfterProviderAuthorization(t *testing.T) {
+func TestService_RetriesOnlyFinalizeAfterProviderAuthorization(t *testing.T) {
 	service, persistence, provider, _, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -298,9 +307,9 @@ func TestServiceRetriesOnlyFinalizeAfterProviderAuthorization(t *testing.T) {
 	if _, err := service.Code(context.Background(), actor, start.Challenge.RequestID, "12345"); err == nil {
 		t.Fatal("first finalization unexpectedly succeeded")
 	}
-	service.coordinator.mu.Lock()
-	record := service.coordinator.challenges[start.Challenge.RequestID]
-	service.coordinator.mu.Unlock()
+	service.registry.mu.Lock()
+	record := service.registry.challenges[start.Challenge.RequestID]
+	service.registry.mu.Unlock()
 	if record == nil {
 		t.Fatal("pending finalization challenge was removed")
 	}
@@ -309,7 +318,13 @@ func TestServiceRetriesOnlyFinalizeAfterProviderAuthorization(t *testing.T) {
 	pendingRetained := record.pendingProfile != nil
 	record.mu.Unlock()
 	if provider.signIns.Load() != 1 || len(provider.codeHashes) != 1 || !hashCleared || !pendingRetained {
-		t.Fatalf("authorized state was not retained safely: sign-ins=%d hashes=%+v hash-cleared=%t pending=%t", provider.signIns.Load(), provider.codeHashes, hashCleared, pendingRetained)
+		t.Fatalf(
+			"authorized state was not retained safely: sign-ins=%d hashes=%+v hash-cleared=%t pending=%t",
+			provider.signIns.Load(),
+			provider.codeHashes,
+			hashCleared,
+			pendingRetained,
+		)
 	}
 	persistence.finalizeError = nil
 	result, err := service.Code(context.Background(), actor, start.Challenge.RequestID, "12345")
@@ -321,7 +336,7 @@ func TestServiceRetriesOnlyFinalizeAfterProviderAuthorization(t *testing.T) {
 	}
 }
 
-func TestServiceInvalidCodePreservesChallenge(t *testing.T) {
+func TestService_InvalidCodePreservesChallenge(t *testing.T) {
 	service, _, provider, _, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -374,7 +389,7 @@ func TestProviderFailureErrorValidatesAndExposesOnlySafeKind(t *testing.T) {
 	}
 }
 
-func TestServicePreservesSafeProviderFailureAndStripsOuterWrapper(t *testing.T) {
+func TestService_PreservesSafeProviderFailureAndStripsOuterWrapper(t *testing.T) {
 	const canary = "provider-secret-must-not-escape"
 	tests := []struct {
 		name string
@@ -434,7 +449,7 @@ func TestServicePreservesSafeProviderFailureAndStripsOuterWrapper(t *testing.T) 
 	}
 }
 
-func TestServiceStartAbortsOnJoinedEmptySendCodeResponse(t *testing.T) {
+func TestService_StartAbortsOnJoinedEmptySendCodeResponse(t *testing.T) {
 	const canary = "joined-provider-secret"
 	service, persistence, provider, stopper, actor := newServiceFixture(t)
 	failure, err := NewProviderFailureError(ProviderFailureProtocol)
@@ -470,7 +485,7 @@ func TestServiceStartAbortsOnJoinedEmptySendCodeResponse(t *testing.T) {
 	}
 }
 
-func TestServiceUnknownProviderFailureReturnsBareTransientSentinel(t *testing.T) {
+func TestService_UnknownProviderFailureReturnsBareTransientSentinel(t *testing.T) {
 	const canary = "unknown-provider-secret"
 	tests := []struct {
 		name string
@@ -518,7 +533,7 @@ func TestServiceUnknownProviderFailureReturnsBareTransientSentinel(t *testing.T)
 	}
 }
 
-func TestServiceCapsRetryAfterAtChallengeExpiry(t *testing.T) {
+func TestService_CapsRetryAfterAtChallengeExpiry(t *testing.T) {
 	service, _, provider, _, actor := newServiceFixture(t)
 	service = NewService(service.persistence, provider, service.stopper, WithChallengeTTL(time.Minute))
 	start, err := service.Start(context.Background(), actor, "+15551234567")
@@ -543,7 +558,7 @@ func TestServiceCapsRetryAfterAtChallengeExpiry(t *testing.T) {
 	}
 }
 
-func TestServiceSerializesCodeOperationsPerChallenge(t *testing.T) {
+func TestService_SerializesCodeOperationsPerChallenge(t *testing.T) {
 	service, _, provider, _, actor := newServiceFixture(t)
 	provider.entered = make(chan struct{})
 	provider.release = make(chan struct{})
@@ -584,7 +599,7 @@ func TestServiceSerializesCodeOperationsPerChallenge(t *testing.T) {
 	}
 }
 
-func TestServiceUnauthorizedUsesStrictAbortOrder(t *testing.T) {
+func TestService_UnauthorizedUsesStrictAbortOrder(t *testing.T) {
 	service, persistence, provider, stopper, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -606,10 +621,16 @@ func TestServiceUnauthorizedUsesStrictAbortOrder(t *testing.T) {
 	}
 }
 
-func TestServiceExpiredChallengeStrictlyAbortsBeforeRemoval(t *testing.T) {
+func TestService_ExpiredChallengeStrictlyAbortsBeforeRemoval(t *testing.T) {
 	service, persistence, provider, stopper, actor := newServiceFixture(t)
 	now := time.Unix(100, 0)
-	service = NewService(persistence, provider, stopper, WithClock(func() time.Time { return now }), WithChallengeTTL(time.Minute))
+	service = NewService(
+		persistence,
+		provider,
+		stopper,
+		WithClock(func() time.Time { return now }),
+		WithChallengeTTL(time.Minute),
+	)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
 		t.Fatal(err)
@@ -630,7 +651,7 @@ func TestServiceExpiredChallengeStrictlyAbortsBeforeRemoval(t *testing.T) {
 	}
 }
 
-func TestServiceShutdownClosesAdmissionAbortsAndClearsState(t *testing.T) {
+func TestService_ShutdownClosesAdmissionAbortsAndClearsState(t *testing.T) {
 	service, persistence, _, stopper, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -656,7 +677,7 @@ func TestServiceShutdownClosesAdmissionAbortsAndClearsState(t *testing.T) {
 	}
 }
 
-func TestServiceShutdownHonorsContextWhileProviderIgnoresCancellation(t *testing.T) {
+func TestService_ShutdownHonorsContextWhileProviderIgnoresCancellation(t *testing.T) {
 	service, _, provider, _, actor := newServiceFixture(t)
 	provider.entered = make(chan struct{})
 	provider.release = make(chan struct{})
@@ -687,7 +708,7 @@ func TestServiceShutdownHonorsContextWhileProviderIgnoresCancellation(t *testing
 	}
 }
 
-func TestServiceShutdownClearsFailedAbortSecretsForRetry(t *testing.T) {
+func TestService_ShutdownClearsFailedAbortSecretsForRetry(t *testing.T) {
 	service, persistence, provider, stopper, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -704,15 +725,15 @@ func TestServiceShutdownClearsFailedAbortSecretsForRetry(t *testing.T) {
 	if err := service.Shutdown(context.Background()); err == nil {
 		t.Fatal("failed shutdown unexpectedly succeeded")
 	}
-	service.coordinator.mu.Lock()
-	remaining := len(service.coordinator.challenges)
-	service.coordinator.mu.Unlock()
+	service.registry.mu.Lock()
+	remaining := len(service.registry.challenges)
+	service.registry.mu.Unlock()
 	if remaining != 1 || persistence.completeAborts != 0 {
 		t.Fatalf("failed abort was not retained: challenges=%d complete-aborts=%d", remaining, persistence.completeAborts)
 	}
-	service.coordinator.mu.Lock()
-	record := service.coordinator.challenges[start.Challenge.RequestID]
-	service.coordinator.mu.Unlock()
+	service.registry.mu.Lock()
+	record := service.registry.challenges[start.Challenge.RequestID]
+	service.registry.mu.Unlock()
 	record.mu.Lock()
 	hashCleared := record.hash.IsZero()
 	pendingCleared := record.pendingProfile == nil
@@ -728,15 +749,15 @@ func TestServiceShutdownClearsFailedAbortSecretsForRetry(t *testing.T) {
 	if err := service.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	service.coordinator.mu.Lock()
-	remaining = len(service.coordinator.challenges)
-	service.coordinator.mu.Unlock()
+	service.registry.mu.Lock()
+	remaining = len(service.registry.challenges)
+	service.registry.mu.Unlock()
 	if remaining != 0 || persistence.completeAborts != 1 {
 		t.Fatalf("retry did not finish abort: challenges=%d complete-aborts=%d", remaining, persistence.completeAborts)
 	}
 }
 
-func TestServiceCancelDoesNotCrossActorScope(t *testing.T) {
+func TestService_CancelDoesNotCrossActorScope(t *testing.T) {
 	service, _, _, _, owner := newServiceFixture(t)
 	start, err := service.Start(context.Background(), owner, "+15551234567")
 	if err != nil {
@@ -748,7 +769,7 @@ func TestServiceCancelDoesNotCrossActorScope(t *testing.T) {
 	}
 }
 
-func TestServiceNeverCompletesAbortWhenRuntimeStopFails(t *testing.T) {
+func TestService_NeverCompletesAbortWhenRuntimeStopFails(t *testing.T) {
 	service, persistence, provider, stopper, actor := newServiceFixture(t)
 	start, err := service.Start(context.Background(), actor, "+15551234567")
 	if err != nil {
@@ -762,7 +783,7 @@ func TestServiceNeverCompletesAbortWhenRuntimeStopFails(t *testing.T) {
 	}
 }
 
-func TestServiceStatusMergesAccountsAndChallenge(t *testing.T) {
+func TestService_StatusMergesAccountsAndChallenge(t *testing.T) {
 	service, _, _, _, actor := newServiceFixture(t)
 	if _, err := service.Start(context.Background(), actor, "+15551234567"); err != nil {
 		t.Fatal(err)
