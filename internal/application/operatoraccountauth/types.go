@@ -65,25 +65,7 @@ type Challenge struct {
 	ExpiresAt time.Time
 }
 
-// PhoneChallenge describes a pending Telegram phone-code authentication
-// request in the legacy CQS projection. New phone-auth commands use
-// Challenge and Result; this type remains so the existing disabled HTTP
-// adapter can compile until its route is migrated.
-type PhoneChallenge struct {
-	RequestID uuid.UUID
-	Phone     string
-	Delivery  string
-	ExpiresAt time.Time
-}
-
-// QRChallenge describes a pending Telegram QR authentication request.
-type QRChallenge struct {
-	RequestID uuid.UUID
-	URL       string
-	ExpiresAt time.Time
-}
-
-// Result is the common safe result returned by phone-auth commands. Exactly
+// PhoneCodeHash is an opaque in-memory Telegram phone-code hash. Exactly
 // one of Account and Challenge is set: an Account means authentication is
 // complete, while a Challenge means another phone-auth operation is needed.
 type Result struct {
@@ -212,10 +194,8 @@ type SendCodeResult struct {
 }
 
 // Status is the operator account authentication dashboard projection. A nil
-// challenge means that no authentication flow of that kind is in progress.
+// challenge means that no authentication flow is in progress.
 type Status struct {
-	Accounts       []Account
-	Challenge      *Challenge
-	PhoneChallenge *PhoneChallenge
-	QRChallenge    *QRChallenge
+	Accounts  []Account
+	Challenge *Challenge
 }

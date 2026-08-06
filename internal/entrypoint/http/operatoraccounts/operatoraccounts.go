@@ -23,7 +23,6 @@ import (
 	application "github.com/notrodans/cresora/internal/application"
 	commands "github.com/notrodans/cresora/internal/application/commands/operator-account-auth"
 	common "github.com/notrodans/cresora/internal/application/operatoraccountauth"
-	challengecoordinator "github.com/notrodans/cresora/internal/application/operatoraccountauth/challenges"
 	disconnect "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	requests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
@@ -170,8 +169,6 @@ const (
 var assets embed.FS
 
 type handler struct {
-	startPhone                     commands.StartPhone
-	verifyPhone                    commands.VerifyPhone
 	start                          commands.Start
 	codeCommand                    commands.Code
 	password                       commands.Password
@@ -183,14 +180,12 @@ type handler struct {
 	disabled                       bool
 	disconnectDisabled             bool
 	cookie                         CookieConfig
-	canonical                      bool
 	allowLocalNullOriginNativeForm bool
 }
 
 type page struct {
 	Accounts           []accountRow
 	Phone              string
-	PhoneRequestID     string
 	CodeSent           bool
 	ChallengeRequestID string
 	ChallengeStage     string
@@ -230,22 +225,6 @@ type disconnectCommand interface {
 	Execute(context.Context, application.Actor, operatoraccount.ID) (disconnect.DisconnectResult, error)
 }
 
-// New constructs the chi router for operator account authentication.
-func New(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, publicOrigin string) chi.Router {
-	r := chi.NewRouter()
-	Register(r, startPhone, verifyPhone, startQR, refreshQR, status, provider, publicOrigin)
-	return r
-}
-
-// NewWithOptions constructs the compatibility phone/code router with an
-// explicit deployment policy. Canonical password/cancel ports are deliberately
-// not guessed from this legacy signature.
-func NewWithOptions(startPhone commands.StartPhone, verifyPhone commands.VerifyPhone, startQR commands.StartQR, refreshQR commands.RefreshQR, status requests.Status, provider principal.Provider, publicOrigin string, options RouteOptions) chi.Router {
-	r := chi.NewRouter()
-	RegisterWithOptions(r, startPhone, verifyPhone, startQR, refreshQR, status, provider, publicOrigin, options)
-	return r
-}
-
 // NewWithPhoneAuth constructs the approved runtime phone-auth flow. It accepts
 // only the canonical command ports; QR ports are deliberately not part of this
 // composition and cannot be called by the live HTTP handler.
@@ -263,122 +242,6 @@ func NewWithPhoneAuthAndDisconnect(start commands.Start, code commands.Code, pas
 	r := chi.NewRouter()
 	registerPhoneAuth(r, start, code, password, cancel, status, disconnectCommand, provider, publicOrigin, options)
 	return r
-}
-
-// NewWithChallengeCoordinator composes the application-only coordinator into
-// an explicitly supplied HTTP route. It is intended for development/testing
-// with challenges/fake; production and staging must continue to use the
-// authenticated RouteDisabled composition until a real adapter is approved.
-// Account rows are intentionally empty because the coordinator does not read
-// or write account persistence.
-func NewWithChallengeCoordinator(
-	coordinator *challengecoordinator.Coordinator,
-	provider principal.Provider,
-	publicOrigin string,
-	options RouteOptions,
-) chi.Router {
-	ports := coordinator.CQS()
-	return NewWithOptions(ports.StartPhone, ports.VerifyPhone, ports.StartQR, ports.RefreshQR, ports.Status, provider, publicOrigin, options)
-}
-
-// Register adds the account authentication routes to an existing chi router.
-func Register(
-	router chi.Router,
-	startPhone commands.StartPhone,
-	verifyPhone commands.VerifyPhone,
-	startQR commands.StartQR,
-	refreshQR commands.RefreshQR,
-	status requests.Status,
-	provider principal.Provider,
-	configuredOrigin string,
-) {
-	// The legacy constructor remains available for the explicitly composed
-	// in-memory development/test handlers. The application composition root
-	// uses RegisterWithOptions with RouteDisabled instead.
-	RegisterWithOptions(router, startPhone, verifyPhone, startQR, refreshQR, status, provider, configuredOrigin, RouteOptions{
-		Mode:   RouteLive,
-		Cookie: SecureCookieConfig(),
-	})
-}
-
-// RegisterWithOptions adds the account authentication routes to an existing
-// chi router with an explicit command and cookie policy.
-func RegisterWithOptions(
-	router chi.Router,
-	startPhone commands.StartPhone,
-	verifyPhone commands.VerifyPhone,
-	startQR commands.StartQR,
-	refreshQR commands.RefreshQR,
-	status requests.Status,
-	provider principal.Provider,
-	configuredOrigin string,
-	options RouteOptions,
-) {
-	origin, failure := parsePublicOrigin(configuredOrigin)
-	if failure != nil {
-		panic(failure)
-	}
-	if options.Mode == "" {
-		options.Mode = RouteDisabled
-	}
-	if options.Cookie == (CookieConfig{}) {
-		options.Cookie = SecureCookieConfig()
-	}
-	if failure := ValidateCookieConfig(options.Cookie); failure != nil {
-		panic(failure)
-	}
-	if !options.Cookie.Secure && (!strings.EqualFold(origin.Scheme, "http") || !isLocalOriginHost(origin)) {
-		panic("insecure operator-account cookies require a local HTTP origin")
-	}
-	switch options.Mode {
-	case RouteDisabled:
-		// A disabled route deliberately accepts nil command ports. This keeps
-		// the unavailable composition unable to call a mock or a partially
-		// initialized Telegram adapter.
-	case RouteLive:
-		// QR arguments remain in this compatibility constructor so existing
-		// composition code can migrate without a flag day. They are ignored;
-		// enabling phone auth never requires or calls a QR port.
-		if startPhone == nil || verifyPhone == nil || status == nil {
-			panic("register enabled operator account routes with missing command")
-		}
-	case RouteDevelopmentTestMock:
-		if !options.AllowDevelopmentTestMock {
-			panic("development/test mock route requires explicit opt-in")
-		}
-		if options.Environment != EnvironmentDevelopment && options.Environment != EnvironmentTesting {
-			panic("development/test mock route requires DEVELOPMENT or TESTING environment")
-		}
-		if startPhone == nil || verifyPhone == nil || status == nil {
-			panic("register enabled operator account routes with missing command")
-		}
-	default:
-		panic("register operator account routes with unknown mode")
-	}
-	if options.Mode == RouteLive && (options.Environment == EnvironmentProduction || options.Environment == EnvironmentStaging) && !options.Cookie.Secure {
-		panic("live operator account routes require Secure cookies in production and staging")
-	}
-	h := &handler{
-		startPhone:         startPhone,
-		verifyPhone:        verifyPhone,
-		status:             status,
-		publicOrigin:       origin,
-		disabled:           options.Mode == RouteDisabled,
-		disconnectDisabled: true,
-		cookie:             options.Cookie,
-	}
-	h.tmpl = template.Must(template.New("authenticate.html").ParseFS(assets, "templates/authenticate.html"))
-	protected := router.With(principal.Middleware(provider))
-	protected.Get("/operator-accounts/authenticate", h.authenticate)
-	protected.Post("/operator-accounts/authenticate/phone", h.phone)
-	protected.Post("/operator-accounts/authenticate/phone/code", h.code)
-	registerDisconnectRoutes(protected, h)
-	router.Get("/operator-accounts/authenticate/style.css", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, assets, "style.css")
-	})
-	router.Get("/operator-accounts/authenticate/authenticate.js", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, assets, "authenticate.js")
-	})
 }
 
 func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Code, password commands.Password, cancel commands.Cancel, status requests.Status, disconnectCommand disconnectCommand, provider principal.Provider, configuredOrigin string, options RouteOptions) {
@@ -432,7 +295,6 @@ func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Co
 		cancel:                         cancel,
 		status:                         status,
 		disconnect:                     disconnectCommand,
-		canonical:                      true,
 		publicOrigin:                   origin,
 		disabled:                       options.Mode == RouteDisabled,
 		disconnectDisabled:             options.Mode != RouteLive || disconnectCommand == nil,
@@ -476,20 +338,13 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 			p.ErrorFocus = true
 		} else {
 			p.Accounts = mapAccounts(current.Accounts)
-			if h.canonical && current.Challenge != nil && time.Now().Before(current.Challenge.ExpiresAt) {
+			if current.Challenge != nil && time.Now().Before(current.Challenge.ExpiresAt) {
 				p.Phone = current.Challenge.Phone
 				p.ChallengeRequestID = current.Challenge.RequestID.String()
 				p.ChallengeStage = string(current.Challenge.Stage)
 				p.Delivery = current.Challenge.Delivery
 				p.ChallengeExpires = current.Challenge.ExpiresAt.UnixMilli()
 				p.CodeSent = current.Challenge.Stage == common.StageCode
-			} else if current.PhoneChallenge != nil && time.Now().Before(current.PhoneChallenge.ExpiresAt) {
-				p.Phone = current.PhoneChallenge.Phone
-				p.PhoneRequestID = current.PhoneChallenge.RequestID.String()
-				p.CodeSent = true
-				p.ChallengeRequestID = p.PhoneRequestID
-				p.ChallengeStage = string(common.StageCode)
-				p.ChallengeExpires = current.PhoneChallenge.ExpiresAt.UnixMilli()
 			}
 		}
 	}
@@ -677,137 +532,6 @@ func (h *handler) disconnectAccount(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, "disconnect")
 	}
 }
-
-func (h *handler) phone(w http.ResponseWriter, r *http.Request) {
-	noStore(w)
-	if h.unavailable(w) {
-		return
-	}
-	actor, ok := requestActor(w, r)
-	if !ok {
-		return
-	}
-	if !h.protectPost(w, r) {
-		return
-	}
-	if err := parseForm(w, r); err != nil {
-		redirectError(w, "invalid")
-		return
-	}
-	phone := strings.TrimSpace(r.FormValue("phone"))
-	if phone == "" || len(phone) > 32 {
-		redirectError(w, "phone")
-		return
-	}
-	scope := h.scopeForActor(w, r, actor)
-	_, err := h.startPhone.Execute(r.Context(), scope.actor, phone)
-	if err != nil {
-		redirectError(w, "send-code")
-		return
-	}
-	h.redirect(w, "/operator-accounts/authenticate?notice=code-sent")
-}
-
-func (h *handler) code(w http.ResponseWriter, r *http.Request) {
-	noStore(w)
-	if h.unavailable(w) {
-		return
-	}
-	actor, ok := requestActor(w, r)
-	if !ok {
-		return
-	}
-	if !h.protectPost(w, r) {
-		return
-	}
-	if err := parseForm(w, r); err != nil {
-		redirectError(w, "invalid")
-		return
-	}
-	code := strings.TrimSpace(r.FormValue("code"))
-	requestIDValue := strings.TrimSpace(r.FormValue("challenge_request_id"))
-	scope := h.scopeForActor(w, r, actor)
-	current, err := h.status.Execute(r.Context(), scope.actor)
-	requestID := uuid.Nil
-	if requestIDValue != "" {
-		requestID, err = uuid.Parse(requestIDValue)
-		if err != nil {
-			redirectError(w, "code")
-			return
-		}
-	} else if current.PhoneChallenge != nil {
-		requestID = current.PhoneChallenge.RequestID
-	}
-	if (err != nil && requestIDValue == "") || requestID == uuid.Nil || (requestIDValue == "" && (current.PhoneChallenge == nil || !time.Now().Before(current.PhoneChallenge.ExpiresAt))) || code == "" || len(code) > 16 {
-		redirectError(w, "code")
-		return
-	}
-	if _, err := h.verifyPhone.Execute(r.Context(), scope.actor, requestID, code); err != nil {
-		redirectError(w, "code")
-		return
-	}
-	h.redirect(w, "/operator-accounts/authenticate?notice=account-added")
-}
-
-/*
-func (h *handler) qr(w http.ResponseWriter, r *http.Request) {
-	noStore(w)
-	if h.unavailable(w) {
-		return
-	}
-	actor, ok := requestActor(w, r)
-	if !ok {
-		return
-	}
-	if !h.protectPost(w, r) {
-		return
-	}
-	scope := h.scopeForActor(w, r, actor)
-	_, err := h.startQR.Execute(r.Context(), scope.actor)
-	if err != nil {
-		redirectError(w, "qr-start")
-		return
-	}
-	h.redirect(w, "/operator-accounts/authenticate?notice=qr-ready")
-}
-
-func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
-	noStore(w)
-	if h.unavailable(w) {
-		return
-	}
-	actor, ok := requestActor(w, r)
-	if !ok {
-		return
-	}
-	if !h.protectPost(w, r) {
-		return
-	}
-	scope := h.scopeForActor(w, r, actor)
-	current, err := h.status.Execute(r.Context(), scope.actor)
-	requestIDValue := strings.TrimSpace(r.FormValue("challenge_request_id"))
-	requestID := uuid.Nil
-	if requestIDValue != "" {
-		requestID, err = uuid.Parse(requestIDValue)
-		if err != nil {
-			redirectError(w, "qr-refresh")
-			return
-		}
-	} else if current.QRChallenge != nil {
-		requestID = current.QRChallenge.RequestID
-	}
-	if (err != nil && requestIDValue == "") || requestID == uuid.Nil || (requestIDValue == "" && (current.QRChallenge == nil || !time.Now().Before(current.QRChallenge.ExpiresAt))) {
-		redirectError(w, "qr-expired")
-		return
-	}
-	_, err = h.refreshQR.Execute(r.Context(), scope.actor, requestID)
-	if err != nil {
-		redirectError(w, "qr-refresh")
-		return
-	}
-	h.redirect(w, "/operator-accounts/authenticate?notice=qr-ready")
-}
-*/
 
 func (h *handler) resolveScope(w http.ResponseWriter, r *http.Request) (requestScope, bool) {
 	actor, ok := requestActor(w, r)
@@ -1199,4 +923,3 @@ func accountState(status operatoraccount.Status) string {
 }
 
 var _ common.Account
-var _ common.PhoneChallenge

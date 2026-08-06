@@ -17,7 +17,7 @@ type Start interface {
 }
 
 // Code submits one code to the challenge identified by requestID. The
-// coordinator supplies the in-memory phone-code hash retained from SendCode;
+// registry supplies the in-memory phone-code hash retained from SendCode;
 // callers never provide or receive that hash.
 type Code interface {
 	Execute(context.Context, applicationroot.Actor, uuid.UUID, string) (application.Result, error)
@@ -34,30 +34,4 @@ type Password interface {
 // cancellation is best effort; durable lifecycle cleanup is not.
 type Cancel interface {
 	Execute(context.Context, applicationroot.Actor, uuid.UUID) error
-}
-
-// StartPhone starts phone-code authentication for a normalized phone number.
-//
-// Deprecated: use Start for the runtime-backed phone-auth flow. This legacy
-// contract remains until the disabled HTTP adapter is migrated.
-type StartPhone interface {
-	Execute(context.Context, applicationroot.Actor, string) (application.PhoneChallenge, error)
-}
-
-// VerifyPhone completes phone-code authentication for a pending request.
-//
-// Deprecated: use Code for the runtime-backed phone-auth flow. This legacy
-// contract remains until the disabled HTTP adapter is migrated.
-type VerifyPhone interface {
-	Execute(context.Context, applicationroot.Actor, uuid.UUID, string) (application.Account, error)
-}
-
-// StartQR starts QR authentication.
-type StartQR interface {
-	Execute(context.Context, applicationroot.Actor) (application.QRChallenge, error)
-}
-
-// RefreshQR refreshes a pending QR authentication token.
-type RefreshQR interface {
-	Execute(context.Context, applicationroot.Actor, uuid.UUID) (application.QRChallenge, error)
 }

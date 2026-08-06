@@ -323,8 +323,7 @@ func recoverOperatorAccountDisconnect(
 }
 
 func registerDisabledOperatorAuth(router chi.Router, principalProvider principal.Provider, cfg *config.Config) {
-	operatoraccounts.RegisterWithOptions(
-		router,
+	authenticationRouter := operatoraccounts.NewWithPhoneAuth(
 		nil,
 		nil,
 		nil,
@@ -338,6 +337,7 @@ func registerDisabledOperatorAuth(router chi.Router, principalProvider principal
 			Cookie:      operatoraccounts.NewCookieConfig(cfg.SessionCookieSecure(), cfg.SessionCookieAllowsInsecureLocal()),
 		},
 	)
+	router.Mount("/", authenticationRouter)
 }
 
 var operatorAuthShutdownTimeout = 10 * time.Second
