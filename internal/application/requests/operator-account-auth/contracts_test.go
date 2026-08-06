@@ -9,7 +9,7 @@ import (
 
 type statusRequestProbe struct{}
 
-func (statusRequestProbe) Execute(context.Context, applicationroot.Actor) (application.Status, error) {
+func (statusRequestProbe) Status(context.Context, applicationroot.Actor) (application.Status, error) {
 	return application.Status{}, nil
 }
 

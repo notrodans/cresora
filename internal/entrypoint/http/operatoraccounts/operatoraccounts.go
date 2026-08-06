@@ -332,7 +332,7 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) {
 	p.ErrorFocus = p.Error != ""
 
 	if h.status != nil {
-		current, err := h.status.Execute(r.Context(), scope.actor)
+		current, err := h.status.Status(r.Context(), scope.actor)
 		if err != nil {
 			p.Error = "Accounts are temporarily unavailable."
 			p.ErrorFocus = true
@@ -373,7 +373,7 @@ func (h *handler) phoneCanonical(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, "phone")
 		return
 	}
-	result, err := h.start.Execute(r.Context(), actor, phone)
+	result, err := h.start.Start(r.Context(), actor, phone)
 	if err != nil {
 		logCanonicalFailure(r, canonicalOperationSendCode, err)
 		if isFloodWait(err) {
@@ -411,7 +411,7 @@ func (h *handler) codeCanonical(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, "code")
 		return
 	}
-	result, err := h.codeCommand.Execute(r.Context(), actor, requestID, code)
+	result, err := h.codeCommand.Code(r.Context(), actor, requestID, code)
 	if err != nil {
 		if errors.Is(err, common.ErrPasswordRequired) {
 			h.redirect(w, "/operator-accounts/authenticate?notice=password-required")
@@ -449,7 +449,7 @@ func (h *handler) passwordStep(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, "password")
 		return
 	}
-	result, err := h.password.Execute(r.Context(), actor, requestID, password)
+	result, err := h.password.Password(r.Context(), actor, requestID, password)
 	if err != nil {
 		logCanonicalFailure(r, canonicalOperationPassword, err)
 		if isFloodWait(err) {
@@ -482,7 +482,7 @@ func (h *handler) cancelStep(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, "invalid")
 		return
 	}
-	if err := h.cancel.Execute(r.Context(), actor, requestID); err != nil {
+	if err := h.cancel.Cancel(r.Context(), actor, requestID); err != nil {
 		logCanonicalFailure(r, canonicalOperationCancel, err)
 		redirectError(w, "cancel")
 		return

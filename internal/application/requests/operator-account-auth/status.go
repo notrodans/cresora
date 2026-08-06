@@ -11,5 +11,5 @@ import (
 // authentication challenge. The returned projection never contains the
 // Telegram phone-code hash or a provider/runtime value.
 type Status interface {
-	Execute(context.Context, applicationroot.Actor) (application.Status, error)
+	Status(context.Context, applicationroot.Actor) (application.Status, error)
 }

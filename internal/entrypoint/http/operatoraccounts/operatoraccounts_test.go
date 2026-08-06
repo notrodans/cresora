@@ -585,7 +585,7 @@ type canonicalStartProbe struct {
 	calls *int32
 }
 
-func (probe canonicalStartProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+func (probe canonicalStartProbe) Start(context.Context, application.Actor, string) (common.Result, error) {
 	if probe.calls != nil {
 		atomic.AddInt32(probe.calls, 1)
 	}
@@ -597,7 +597,7 @@ type canonicalStartResultProbe struct {
 	failure error
 }
 
-func (probe canonicalStartResultProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+func (probe canonicalStartResultProbe) Start(context.Context, application.Actor, string) (common.Result, error) {
 	return probe.result, probe.failure
 }
 
@@ -605,7 +605,7 @@ type canonicalChallengeStartProbe struct {
 	calls *int32
 }
 
-func (probe canonicalChallengeStartProbe) Execute(context.Context, application.Actor, string) (common.Result, error) {
+func (probe canonicalChallengeStartProbe) Start(context.Context, application.Actor, string) (common.Result, error) {
 	if probe.calls != nil {
 		atomic.AddInt32(probe.calls, 1)
 	}
@@ -616,7 +616,7 @@ type canonicalCodeProbe struct {
 	calls *int32
 }
 
-func (probe canonicalCodeProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+func (probe canonicalCodeProbe) Code(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
 	if probe.calls != nil {
 		atomic.AddInt32(probe.calls, 1)
 	}
@@ -628,7 +628,7 @@ type canonicalCodeResultProbe struct {
 	failure error
 }
 
-func (probe canonicalCodeResultProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+func (probe canonicalCodeResultProbe) Code(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
 	return probe.result, probe.failure
 }
 
@@ -636,7 +636,7 @@ type canonicalPasswordProbe struct {
 	calls *int32
 }
 
-func (probe canonicalPasswordProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+func (probe canonicalPasswordProbe) Password(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
 	if probe.calls != nil {
 		atomic.AddInt32(probe.calls, 1)
 	}
@@ -648,7 +648,7 @@ type canonicalPasswordResultProbe struct {
 	failure error
 }
 
-func (probe canonicalPasswordResultProbe) Execute(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
+func (probe canonicalPasswordResultProbe) Password(context.Context, application.Actor, uuid.UUID, string) (common.Result, error) {
 	return probe.result, probe.failure
 }
 
@@ -656,7 +656,7 @@ type canonicalCancelProbe struct {
 	calls *int32
 }
 
-func (probe canonicalCancelProbe) Execute(context.Context, application.Actor, uuid.UUID) error {
+func (probe canonicalCancelProbe) Cancel(context.Context, application.Actor, uuid.UUID) error {
 	if probe.calls != nil {
 		atomic.AddInt32(probe.calls, 1)
 	}
@@ -667,19 +667,19 @@ type canonicalCancelFailureProbe struct {
 	failure error
 }
 
-func (probe canonicalCancelFailureProbe) Execute(context.Context, application.Actor, uuid.UUID) error {
+func (probe canonicalCancelFailureProbe) Cancel(context.Context, application.Actor, uuid.UUID) error {
 	return probe.failure
 }
 
 type canonicalStatusProbe struct{}
 
-func (canonicalStatusProbe) Execute(context.Context, application.Actor) (common.Status, error) {
+func (canonicalStatusProbe) Status(context.Context, application.Actor) (common.Status, error) {
 	return common.Status{}, nil
 }
 
 type canonicalPasswordStatusProbe struct{}
 
-func (canonicalPasswordStatusProbe) Execute(context.Context, application.Actor) (common.Status, error) {
+func (canonicalPasswordStatusProbe) Status(context.Context, application.Actor) (common.Status, error) {
 	return common.Status{Challenge: &common.Challenge{RequestID: uuid.New(), Phone: "+15551234567", Stage: common.StagePassword, ExpiresAt: time.Now().Add(time.Minute)}}, nil
 }
 

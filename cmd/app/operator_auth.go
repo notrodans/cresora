@@ -165,13 +165,12 @@ func composeOperatorAuthWithComposition(
 		remoteIntents:             composition.store,
 	}
 	applicationOperatorAccountAuthService := applicationoperatoraccountauth.NewService(authPersistence, provider, composition.runtime)
-	commands := operatoraccountcommands.NewApplication(applicationOperatorAccountAuthService)
 	ports := operatorAuthPorts{
-		start:    commands.Start,
-		code:     commands.Code,
-		password: commands.Password,
-		cancel:   commands.Cancel,
-		status:   operatoraccountrequests.NewStatus(applicationOperatorAccountAuthService),
+		start:    applicationOperatorAccountAuthService,
+		code:     applicationOperatorAccountAuthService,
+		password: applicationOperatorAccountAuthService,
+		cancel:   applicationOperatorAccountAuthService,
+		status:   applicationOperatorAccountAuthService,
 	}
 
 	lifecycle, failure := orchestrateOperatorAuth(rootContext, applicationOperatorAccountAuthService, func() {
