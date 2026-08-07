@@ -135,6 +135,7 @@ func (port runtimeGatedPort) Send(
 	return runtimeFailure
 }
 
+// TODO: move to accountowner
 func isRuntimeAdmissionRejection(failure error) bool {
 	return errors.Is(failure, accountowner.ErrRegistryStopped) ||
 		errors.Is(failure, accountowner.ErrAccountStopped) ||

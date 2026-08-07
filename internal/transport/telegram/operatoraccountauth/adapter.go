@@ -49,15 +49,18 @@ func (adapter Adapter) SendCode(
 	phone string,
 ) (application.SendCodeResult, error) {
 	var sent sentCode
-	failure := adapter.runtime.Execute(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
-		client := adapter.clientFactory(raw)
-		if client == nil {
-			return application.ErrProviderUnavailable
-		}
-		var err error
-		sent, err = client.sendCode(callbackContext, phone)
-		return err
-	})
+	failure := adapter.runtime.Execute(
+		ctx,
+		target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+			client := adapter.clientFactory(raw)
+			if client == nil {
+				return application.ErrProviderUnavailable
+			}
+			var err error
+			sent, err = client.sendCode(callbackContext, phone)
+			return err
+		},
+	)
 	if failure != nil {
 		return application.SendCodeResult{}, mapProviderError(failure)
 	}
@@ -81,18 +84,23 @@ func (adapter Adapter) SignIn(
 	hash application.PhoneCodeHash,
 ) (application.Profile, error) {
 	var profile application.Profile
-	failure := adapter.runtime.Execute(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
-		client := adapter.clientFactory(raw)
-		if client == nil {
-			return application.ErrProviderUnavailable
-		}
-		if err := client.signIn(callbackContext, phone, code, hash.Value()); err != nil {
+	failure := adapter.runtime.Execute(
+		ctx,
+		target,
+		func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+			client := adapter.clientFactory(raw)
+			if client == nil {
+				return application.ErrProviderUnavailable
+			}
+			if err := client.signIn(callbackContext, phone, code, hash.Value()); err != nil {
+				return err
+			}
+			var err error
+			profile, err = client.self(callbackContext)
+
 			return err
-		}
-		var err error
-		profile, err = client.self(callbackContext)
-		return err
-	})
+		},
+	)
 	if failure != nil {
 		return application.Profile{}, mapProviderError(failure)
 	}
@@ -110,18 +118,22 @@ func (adapter Adapter) Password(
 	password string,
 ) (application.Profile, error) {
 	var profile application.Profile
-	failure := adapter.runtime.Execute(ctx, target, func(callbackContext context.Context, raw *gotdtelegram.Client) error {
-		client := adapter.clientFactory(raw)
-		if client == nil {
-			return application.ErrProviderUnavailable
-		}
-		if err := client.password(callbackContext, password); err != nil {
+	failure := adapter.runtime.Execute(
+		ctx,
+		target,
+		func(callbackContext context.Context, raw *gotdtelegram.Client) error {
+			client := adapter.clientFactory(raw)
+			if client == nil {
+				return application.ErrProviderUnavailable
+			}
+			if err := client.password(callbackContext, password); err != nil {
+				return err
+			}
+			var err error
+			profile, err = client.self(callbackContext)
 			return err
-		}
-		var err error
-		profile, err = client.self(callbackContext)
-		return err
-	})
+		},
+	)
 	if failure != nil {
 		return application.Profile{}, mapProviderError(failure)
 	}
