@@ -72,6 +72,18 @@ func TestMigrationsContainCurrentBaselineAndRepair(t *testing.T) {
 				"DROP COLUMN IF EXISTS remote_logout_required",
 			},
 		},
+		{
+			name: "20260803000000_add_account_dialog_syncs.sql",
+			contents: []string{
+				"-- +goose Up",
+				"CREATE TYPE account_dialog_sync_status_type AS ENUM",
+				"CREATE TABLE account_dialog_syncs",
+				"lease_token uuid",
+				"lease_generation bigint",
+				"-- +goose Down",
+				"DROP TABLE account_dialog_syncs",
+			},
+		},
 	}
 	if len(entries) != len(expected) {
 		t.Fatalf("migration file count = %d, want %d", len(entries), len(expected))
