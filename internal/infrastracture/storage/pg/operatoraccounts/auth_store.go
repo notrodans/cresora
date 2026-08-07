@@ -268,6 +268,25 @@ func (store *Store) Finalize(
 		}
 		return applicationoperatoraccountauth.Account{}, fmt.Errorf("finalize operator account authentication: %w", failure)
 	}
+	if _, failure = transaction.Exec(
+		context,
+		`INSERT INTO account_dialog_syncs (account_id)
+		 VALUES ($1)
+		 ON CONFLICT (account_id) DO UPDATE
+		 SET status = 'pending',
+		     needs_sync_at = CURRENT_TIMESTAMP,
+		     next_retry_at = NULL,
+		     lease_token = NULL,
+		     lease_until = NULL,
+		     lease_generation = NULL,
+		     last_error = NULL,
+		     finished_at = NULL,
+		     attempt_count = 0,
+		     updated_at = CURRENT_TIMESTAMP`,
+		accountID.UUID(),
+	); failure != nil {
+		return applicationoperatoraccountauth.Account{}, fmt.Errorf("enqueue account dialog sync on finalization: %w", failure)
+	}
 	if failure = transaction.Commit(context); failure != nil {
 		return applicationoperatoraccountauth.Account{}, fmt.Errorf("commit operator account authentication finalization: %w", failure)
 	}

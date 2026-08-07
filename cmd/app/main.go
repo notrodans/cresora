@@ -19,6 +19,7 @@ import (
 
 	"github.com/notrodans/cresora/config"
 	mailingconsolecommands "github.com/notrodans/cresora/internal/application/commands/mailing-console"
+	appdialogsync "github.com/notrodans/cresora/internal/application/dialogsync"
 	operatorsessions "github.com/notrodans/cresora/internal/application/operatorsessions"
 	mailingconsolerequests "github.com/notrodans/cresora/internal/application/requests/mailing-console"
 	mailingconsole "github.com/notrodans/cresora/internal/application/services/mailingconsole"
@@ -26,12 +27,14 @@ import (
 	deliveryreaper "github.com/notrodans/cresora/internal/entrypoint/background/deliveryreaper"
 	deliveryreconciler "github.com/notrodans/cresora/internal/entrypoint/background/deliveryreconciler"
 	deliveryworker "github.com/notrodans/cresora/internal/entrypoint/background/deliveryworker"
+	backgrounddialogsync "github.com/notrodans/cresora/internal/entrypoint/background/dialogsync"
 	"github.com/notrodans/cresora/internal/entrypoint/http/authentication"
 	"github.com/notrodans/cresora/internal/entrypoint/http/console"
 	"github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 	"github.com/notrodans/cresora/internal/infrastracture/storage/pg"
 	claims "github.com/notrodans/cresora/internal/infrastracture/storage/pg/claims"
 	deliveries "github.com/notrodans/cresora/internal/infrastracture/storage/pg/deliveries"
+	pgdialogsync "github.com/notrodans/cresora/internal/infrastracture/storage/pg/dialogsync"
 	mailings "github.com/notrodans/cresora/internal/infrastracture/storage/pg/mailings"
 	pgreaper "github.com/notrodans/cresora/internal/infrastracture/storage/pg/reaper"
 	pgreconciler "github.com/notrodans/cresora/internal/infrastracture/storage/pg/reconciler"
@@ -202,13 +205,22 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	}
 
 	backgroundErrors := make(chan error, 1)
-	backgroundSupervisor := backgroundjobs.NewRunner(
-		[]backgroundjobs.Job{
-			namedBackgroundJob("delivery reaper", reaperLoop.Run),
-			namedBackgroundJob("delivery reconciler", reconcilerLoop.Run),
-		},
-		lifecycleWaitTimeout,
-	)
+	jobs := []backgroundjobs.Job{
+		namedBackgroundJob("delivery reaper", reaperLoop.Run),
+		namedBackgroundJob("delivery reconciler", reconcilerLoop.Run),
+	}
+	if sharedRuntime != nil {
+		dialogSyncStore := pgdialogsync.New(database)
+		if _, backfillFailure := dialogSyncStore.Backfill(rootContext); backfillFailure != nil {
+			return fmt.Errorf("backfill account dialog synchronizations: %w", backfillFailure)
+		}
+		dialogFetcher := telegramaccount.NewDialogFetcher(sharedRuntime)
+		dialogSyncer := appdialogsync.NewSyncer(dialogFetcher)
+		dialogWorker := backgrounddialogsync.New(dialogSyncStore, dialogSyncer, backgrounddialogsync.Defaults()).
+			WithLogger(log)
+		jobs = append(jobs, namedBackgroundJob("account dialog sync", dialogWorker.Run))
+	}
+	backgroundSupervisor := backgroundjobs.NewRunner(jobs, lifecycleWaitTimeout)
 	go func() {
 		backgroundErrors <- backgroundSupervisor.Run(rootContext)
 	}()
