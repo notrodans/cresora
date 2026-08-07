@@ -152,9 +152,6 @@ func composeOperatorAuthWithComposition(
 	if cfg == nil {
 		return nil, errors.New("telegram authentication configuration is required")
 	}
-	if !cfg.TelegramAuthEnabled {
-		return nil, nil
-	}
 	if composition == nil || composition.runtime == nil || composition.store == nil || composition.disconnect == nil {
 		return nil, errors.New("telegram authentication requires the composed operator account services")
 	}
@@ -217,25 +214,18 @@ func validateTelegramRuntimeConfig(cfg *config.Config) error {
 		return errors.New("telegram runtime configuration is required")
 	}
 	if cfg.TelegramAPIID <= 0 {
-		return errors.New("telegram configuration TELEGRAM_API_ID must be positive when the shared runtime is enabled")
+		return errors.New("telegram configuration TELEGRAM_API_ID must be positive")
 	}
 	if !cfg.TelegramAPIHash.Configured() {
-		return errors.New("telegram configuration TELEGRAM_API_HASH is required when the shared runtime is enabled")
+		return errors.New("telegram configuration TELEGRAM_API_HASH is required")
 	}
 	if cfg.TelegramSessionKeyID == "" {
-		return errors.New("telegram configuration TELEGRAM_SESSION_KEY_ID is required when the shared runtime is enabled")
+		return errors.New("telegram configuration TELEGRAM_SESSION_KEY_ID is required")
 	}
 	if !cfg.TelegramSessionEncryptionKey.Configured() {
-		return errors.New("telegram configuration TELEGRAM_SESSION_ENCRYPTION_KEY is required when the shared runtime is enabled")
+		return errors.New("telegram configuration TELEGRAM_SESSION_ENCRYPTION_KEY is required")
 	}
 	return nil
-}
-
-// validateOperatorAuthConfig remains as a compatibility seam for direct
-// package tests. Runtime validation is owned by root composition and is
-// intentionally independent of the HTTP route flag.
-func validateOperatorAuthConfig(cfg *config.Config) error {
-	return validateTelegramRuntimeConfig(cfg)
 }
 
 func operatorAuthRouteOptions(cfg *config.Config) operatoraccounts.RouteOptions {
@@ -244,16 +234,6 @@ func operatorAuthRouteOptions(cfg *config.Config) operatoraccounts.RouteOptions 
 		Environment: operatoraccounts.DeploymentEnvironment(cfg.Env),
 		Cookie:      operatoraccounts.NewCookieConfig(cfg.SessionCookieSecure(), cfg.SessionCookieAllowsInsecureLocal()),
 	}
-}
-
-func registerLiveOperatorAuth(
-	router chi.Router,
-	ports operatorAuthPorts,
-	principalProvider principal.Provider,
-	publicOrigin string,
-	options operatoraccounts.RouteOptions,
-) {
-	registerLiveOperatorAuthWithDisconnect(router, ports, principalProvider, publicOrigin, options, nil)
 }
 
 func registerLiveOperatorAuthWithDisconnect(
@@ -319,24 +299,6 @@ func recoverOperatorAccountDisconnect(
 		slogger.Int("pending_unavailable", result.PendingByKind[applicationoperatoraccounts.RemoteLogoutFailureUnavailable]),
 	)
 	return nil
-}
-
-func registerDisabledOperatorAuth(router chi.Router, principalProvider principal.Provider, cfg *config.Config) {
-	authenticationRouter := operatoraccounts.NewWithPhoneAuth(
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		principalProvider,
-		cfg.PublicOrigin.String(),
-		operatoraccounts.RouteOptions{
-			Mode:        operatoraccounts.RouteDisabled,
-			Environment: operatoraccounts.DeploymentEnvironment(cfg.Env),
-			Cookie:      operatoraccounts.NewCookieConfig(cfg.SessionCookieSecure(), cfg.SessionCookieAllowsInsecureLocal()),
-		},
-	)
-	router.Mount("/", authenticationRouter)
 }
 
 var operatorAuthShutdownTimeout = 10 * time.Second

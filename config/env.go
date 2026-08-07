@@ -49,14 +49,12 @@ type Config struct {
 	Env          EnvKind `env:"ENV"`
 	DbUrl        string  `env:"DB_URL"`
 	WebAddr      url.URL `env:"WEB_ADDR"`
-	WebOnly      bool    `env:"WEB_ONLY" envDefault:"true"`
 	PublicOrigin url.URL `env:"PUBLIC_ORIGIN"`
 	// DeliveryReaperInterval controls the transport-neutral lease recovery poll.
 	DeliveryReaperInterval time.Duration `env:"DELIVERY_REAPER_INTERVAL" envDefault:"1m"`
 	// DeliveryReconcilerInterval controls the transport-neutral terminal run
 	// reconciliation poll.
 	DeliveryReconcilerInterval   time.Duration        `env:"DELIVERY_RECONCILER_INTERVAL" envDefault:"1m"`
-	TelegramAuthEnabled          bool                 `env:"TELEGRAM_AUTH_ENABLED" envDefault:"false"`
 	TelegramAPIID                int                  `env:"TELEGRAM_API_ID" envDefault:"0"`
 	TelegramAPIHash              SecretString         `env:"TELEGRAM_API_HASH" envDefault:""`
 	TelegramSessionKeyID         string               `env:"TELEGRAM_SESSION_KEY_ID" envDefault:""`
@@ -96,7 +94,6 @@ const (
 	DefaultDeliveryReaperInterval     = time.Minute
 	DeliveryReconcilerIntervalEnv     = "DELIVERY_RECONCILER_INTERVAL"
 	DefaultDeliveryReconcilerInterval = time.Minute
-	telegramAuthEnabledEnv            = "TELEGRAM_AUTH_ENABLED"
 	telegramAPIIDEnv                  = "TELEGRAM_API_ID"
 	telegramAPIHashEnv                = "TELEGRAM_API_HASH"
 	telegramSessionKeyIDEnv           = "TELEGRAM_SESSION_KEY_ID"
@@ -259,7 +256,7 @@ func loadFrom(root string) (Config, error) {
 	}); err != nil {
 		return Config{}, fmt.Errorf("parse configuration: %w", err)
 	}
-	if err := validateTelegramConfiguration(cfg); err != nil {
+	if err := validateTelegramSessionConfiguration(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := validateDeliveryReaperConfiguration(cfg); err != nil {
@@ -332,32 +329,6 @@ func validateTelegramSessionConfiguration(cfg Config) error {
 	}
 	if keyID != "" && !cfg.TelegramSessionEncryptionKey.Configured() {
 		return fmt.Errorf("%s is required when %s is configured", telegramSessionEncryptionKeyEnv, telegramSessionKeyIDEnv)
-	}
-	return nil
-}
-
-func validateTelegramConfiguration(cfg Config) error {
-	// Keep the existing optional session-pair behavior when auth is disabled.
-	// This lets HTTP-only deployments continue loading without any Telegram
-	// settings while still rejecting a partially supplied pair as before.
-	if err := validateTelegramSessionConfiguration(cfg); err != nil {
-		return err
-	}
-	if !cfg.TelegramAuthEnabled {
-		return nil
-	}
-
-	if cfg.TelegramAPIID <= 0 {
-		return fmt.Errorf("%s must be positive when %s is enabled", telegramAPIIDEnv, telegramAuthEnabledEnv)
-	}
-	if !cfg.TelegramAPIHash.Configured() {
-		return fmt.Errorf("%s is required when %s is enabled", telegramAPIHashEnv, telegramAuthEnabledEnv)
-	}
-	if cfg.TelegramSessionKeyID == "" {
-		return fmt.Errorf("%s is required when %s is enabled", telegramSessionKeyIDEnv, telegramAuthEnabledEnv)
-	}
-	if !cfg.TelegramSessionEncryptionKey.Configured() {
-		return fmt.Errorf("%s is required when %s is enabled", telegramSessionEncryptionKeyEnv, telegramAuthEnabledEnv)
 	}
 	return nil
 }

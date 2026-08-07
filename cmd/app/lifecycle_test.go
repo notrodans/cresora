@@ -37,7 +37,7 @@ func (server *fakeServerController) serve() error {
 	return http.ErrServerClosed
 }
 
-func TestMonitorRuntimeWebOnlyCleanCancellation(t *testing.T) {
+func TestMonitorRuntimeCleanCancellation(t *testing.T) {
 	root, cancel := context.WithCancel(context.Background())
 	server := newFakeServerController()
 	go func() {
