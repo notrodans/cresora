@@ -43,6 +43,13 @@ h2 { font-size: 25px; letter-spacing: -.04em; margin: 0 0 22px; }
 .disconnect-button:hover { background: color-mix(in srgb, var(--orange) 9%, transparent); }
 .disconnect-button:disabled { color: var(--muted); border-color: var(--line); cursor: not-allowed; background: transparent; }
 .disconnect-reason { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.force-forget-panel { margin-bottom: 18px; border-left: 4px solid var(--orange); }
+.force-forget-panel p { max-width: 620px; line-height: 1.55; }
+.force-forget-form { margin-top: 18px; max-width: 560px; }
+.force-forget-form label { display: flex; gap: 9px; align-items: flex-start; text-transform: none; line-height: 1.45; }
+.force-forget-form label input { width: auto; flex: 0 0 auto; margin-top: 2px; }
+.force-forget-button { width: auto; background: var(--orange); color: #fff; margin-top: 8px; }
+.force-forget-button:hover { filter: brightness(.92); }
 .empty { text-align: center; padding: 40px 10px; color: var(--muted); }
 .empty-icon { font-size: 36px; color: var(--lime); }
 .empty p { color: var(--ink); font-weight: 700; margin: 12px 0 4px; }

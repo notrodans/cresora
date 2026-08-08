@@ -322,6 +322,190 @@ func TestOperatorAccountStorePostgresRemoteLogoutIntentLifecycle(t *testing.T) {
 	}
 }
 
+func TestOperatorAccountStorePostgresForceForgetIsAtomicAndIdempotent(t *testing.T) {
+	context, database := newOperatorAccountsIntegrationDatabase(t)
+	operatorID := uuid.New()
+	accountID := uuid.New()
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO operators (id, username) VALUES ($1, $2)`,
+		operatorID,
+		"operator-account-force-forget-"+operatorID.String()[:8],
+	); failure != nil {
+		t.Fatalf("insert operator: %v", failure)
+	}
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO operator_accounts (id, operator_id, status, status_version, telegram_user_id, remote_logout_required)
+		 VALUES ($1, $2, 'disconnecting', 9, 9009, TRUE)`,
+		accountID,
+		operatorID,
+	); failure != nil {
+		t.Fatalf("insert disconnecting account: %v", failure)
+	}
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO sessions (account_id, format_version, key_id, nonce, ciphertext)
+		 VALUES ($1, 1, 'force-forget-test', $2, $3)`,
+		accountID,
+		[]byte("012345678901"),
+		[]byte("0123456789012345"),
+	); failure != nil {
+		t.Fatalf("insert encrypted session: %v", failure)
+	}
+
+	store := New(database)
+	actor := application.Actor{OperatorID: operatorID}
+	pending := mustLoadAccount(t, context, store, actor, accountID)
+	if failure := pending.MarkDisconnected(); failure != nil {
+		t.Fatalf("mark force-forgotten account disconnected: %v", failure)
+	}
+	key := uuid.New()
+	alreadyApplied, failure := store.PersistForceForget(context, actor, pending, 9, key)
+	if failure != nil {
+		t.Fatalf("persist force forget: %v", failure)
+	}
+	if alreadyApplied {
+		t.Fatal("first force forget was reported as already applied")
+	}
+
+	var (
+		status           string
+		version          int64
+		identity         int64
+		remoteRequired   bool
+		sessionCount     int
+		eventCount       int
+		eventID          uuid.UUID
+		eventType        string
+		eventOperatorID  uuid.UUID
+		eventAccountID   uuid.UUID
+		previousVersion  int64
+		resultingVersion int64
+		reason           string
+		eventKey         uuid.UUID
+		occurredAt       time.Time
+	)
+	if failure = database.QueryRow(context, `SELECT status::text, status_version, telegram_user_id, remote_logout_required FROM operator_accounts WHERE id = $1`, accountID).Scan(&status, &version, &identity, &remoteRequired); failure != nil {
+		t.Fatalf("load force-forgotten account: %v", failure)
+	}
+	if status != string(operatoraccount.StatusDisconnected) || version != 10 || identity != 9009 || remoteRequired {
+		t.Fatalf("force-forgotten account = status %q version %d identity %d remote=%t, want disconnected version 10 identity 9009 remote=false", status, version, identity, remoteRequired)
+	}
+	if failure = database.QueryRow(context, `SELECT count(*) FROM sessions WHERE account_id = $1`, accountID).Scan(&sessionCount); failure != nil {
+		t.Fatalf("count force-forgotten sessions: %v", failure)
+	}
+	if sessionCount != 0 {
+		t.Fatalf("force-forgotten sessions = %d, want 0", sessionCount)
+	}
+	if failure = database.QueryRow(
+		context,
+		`SELECT event_id, event_type, operator_id, account_id, previous_version, resulting_version, reason, idempotency_key, occurred_at
+		 FROM operator_account_force_forget_events WHERE operator_id = $1 AND account_id = $2 AND idempotency_key = $3`,
+		operatorID,
+		accountID,
+		key,
+	).Scan(&eventID, &eventType, &eventOperatorID, &eventAccountID, &previousVersion, &resultingVersion, &reason, &eventKey, &occurredAt); failure != nil {
+		t.Fatalf("load force-forget audit event: %v", failure)
+	}
+	if eventID == uuid.Nil || eventType != "operator_account_force_forgotten" || eventOperatorID != operatorID || eventAccountID != accountID || previousVersion != 9 || resultingVersion != 10 || reason != "remote_logout_unverified_operator_override" || eventKey != key || occurredAt.IsZero() {
+		t.Fatalf("force-forget audit event = id %s type %q operator %s account %s versions %d/%d reason %q key %s at %s, want fixed event fields", eventID, eventType, eventOperatorID, eventAccountID, previousVersion, resultingVersion, reason, eventKey, occurredAt)
+	}
+	if failure = database.QueryRow(context, `SELECT count(*) FROM operator_account_force_forget_events WHERE account_id = $1`, accountID).Scan(&eventCount); failure != nil {
+		t.Fatalf("count force-forget audit events: %v", failure)
+	}
+	if eventCount != 1 {
+		t.Fatalf("force-forget audit event count = %d, want 1", eventCount)
+	}
+
+	alreadyApplied, failure = store.PersistForceForget(context, actor, pending, 9, key)
+	if failure != nil || !alreadyApplied {
+		t.Fatalf("idempotent force forget = alreadyApplied %t error %v, want true and nil", alreadyApplied, failure)
+	}
+	if failure = database.QueryRow(context, `SELECT status_version FROM operator_accounts WHERE id = $1`, accountID).Scan(&version); failure != nil {
+		t.Fatalf("reload idempotent account version: %v", failure)
+	}
+	if version != 10 {
+		t.Fatalf("idempotent account version = %d, want 10", version)
+	}
+	if failure = database.QueryRow(context, `SELECT count(*) FROM operator_account_force_forget_events WHERE account_id = $1`, accountID).Scan(&eventCount); failure != nil {
+		t.Fatalf("reload idempotent audit event count: %v", failure)
+	}
+	if eventCount != 1 {
+		t.Fatalf("idempotent audit event count = %d, want 1", eventCount)
+	}
+}
+
+func TestOperatorAccountStorePostgresForceForgetRollsBackWhenAuditInsertFails(t *testing.T) {
+	context, database := newOperatorAccountsIntegrationDatabase(t)
+	operatorID := uuid.New()
+	accountID := uuid.New()
+	if _, failure := database.Exec(context, `INSERT INTO operators (id, username) VALUES ($1, $2)`, operatorID, "operator-account-force-forget-rollback-"+operatorID.String()[:8]); failure != nil {
+		t.Fatalf("insert operator: %v", failure)
+	}
+	if _, failure := database.Exec(context, `INSERT INTO operator_accounts (id, operator_id, status, status_version, remote_logout_required) VALUES ($1, $2, 'disconnecting', 4, TRUE)`, accountID, operatorID); failure != nil {
+		t.Fatalf("insert disconnecting account: %v", failure)
+	}
+	if _, failure := database.Exec(
+		context,
+		`INSERT INTO sessions (account_id, format_version, key_id, nonce, ciphertext) VALUES ($1, 1, 'force-forget-rollback', $2, $3)`,
+		accountID,
+		[]byte("012345678901"),
+		[]byte("0123456789012345"),
+	); failure != nil {
+		t.Fatalf("insert encrypted session: %v", failure)
+	}
+	if _, failure := database.Exec(context, `
+		CREATE FUNCTION reject_force_forget_audit() RETURNS trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'force forget audit unavailable';
+		END;
+		$$`); failure != nil {
+		t.Fatalf("create audit failure function: %v", failure)
+	}
+	if _, failure := database.Exec(context, `CREATE TRIGGER reject_force_forget_audit BEFORE INSERT ON operator_account_force_forget_events FOR EACH ROW EXECUTE FUNCTION reject_force_forget_audit()`); failure != nil {
+		t.Fatalf("create audit failure trigger: %v", failure)
+	}
+
+	store := New(database)
+	actor := application.Actor{OperatorID: operatorID}
+	pending := mustLoadAccount(t, context, store, actor, accountID)
+	if failure := pending.MarkDisconnected(); failure != nil {
+		t.Fatalf("mark rollback account disconnected: %v", failure)
+	}
+	_, failure := store.PersistForceForget(context, actor, pending, 4, uuid.New())
+	if failure == nil {
+		t.Fatal("force forget succeeded despite audit insertion failure")
+	}
+
+	var (
+		status         string
+		version        int64
+		remoteRequired bool
+		sessionCount   int
+		eventCount     int
+	)
+	if failure = database.QueryRow(context, `SELECT status::text, status_version, remote_logout_required FROM operator_accounts WHERE id = $1`, accountID).Scan(&status, &version, &remoteRequired); failure != nil {
+		t.Fatalf("load rolled-back account: %v", failure)
+	}
+	if status != string(operatoraccount.StatusDisconnecting) || version != 4 || !remoteRequired {
+		t.Fatalf("rolled-back account = status %q version %d remote=%t, want disconnecting version 4 remote=true", status, version, remoteRequired)
+	}
+	if failure = database.QueryRow(context, `SELECT count(*) FROM sessions WHERE account_id = $1`, accountID).Scan(&sessionCount); failure != nil {
+		t.Fatalf("count rolled-back session: %v", failure)
+	}
+	if sessionCount != 1 {
+		t.Fatalf("rolled-back session count = %d, want 1", sessionCount)
+	}
+	if failure = database.QueryRow(context, `SELECT count(*) FROM operator_account_force_forget_events WHERE account_id = $1`, accountID).Scan(&eventCount); failure != nil {
+		t.Fatalf("count rolled-back audit events: %v", failure)
+	}
+	if eventCount != 0 {
+		t.Fatalf("rolled-back audit event count = %d, want 0", eventCount)
+	}
+}
+
 func assertRemoteLogoutIntentAndSession(
 	t *testing.T,
 	context context.Context,
