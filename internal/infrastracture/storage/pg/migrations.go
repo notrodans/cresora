@@ -10,6 +10,10 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/notrodans/cresora/config"
 	"github.com/pressly/goose/v3"
+
+	"path/filepath"
+	"runtime"
+	"testing"
 )
 
 func ExecuteMigrations(ctx context.Context, cfg *config.Config, logger *slog.Logger, migrationsPath string) error {
@@ -46,4 +50,13 @@ func ExecuteMigrations(ctx context.Context, cfg *config.Config, logger *slog.Log
 
 	logger.Info("Migrations applied successfully")
 	return nil
+}
+
+func migrationsPathForTest(t *testing.T) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate migration integration test")
+	}
+	return filepath.Join(filepath.Dir(filename), "../../../../migrations")
 }
