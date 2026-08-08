@@ -67,6 +67,9 @@ func project(projection transport.PeerProjection) (transport.Target, error) {
 	case transport.PeerTypeChat:
 		return BasicGroup(transport.ChatID(projection.ID)), nil
 	case transport.PeerTypeChannel:
+		if !projection.CanSend {
+			return nil, fmt.Errorf("%w: channel %d", transport.ErrTargetNotSendable, projection.ID)
+		}
 		hash, failure := requiredHash(projection)
 		if failure != nil {
 			return nil, failure

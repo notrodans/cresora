@@ -71,6 +71,7 @@ func TestResolverMapsPeers(t *testing.T) {
 				Type:       transport.PeerTypeChannel,
 				ID:         401,
 				AccessHash: int64Pointer(501),
+				CanSend:    true,
 			},
 			assertPeer: func(t *testing.T, peer tg.InputPeerClass) {
 				actual, ok := peer.(*tg.InputPeerChannel)
@@ -112,6 +113,24 @@ func TestResolverMapsPeers(t *testing.T) {
 				t.Fatalf("expected recipient %s, got %s", recipientID, actualRequest.RecipientID)
 			}
 		})
+	}
+}
+
+func TestResolverRejectsDisabledSharedChannel(t *testing.T) {
+	resolver := targets.NewResolver(uuid.New(), fakeLookup(func(
+		context.Context,
+		transport.PeerLookupRequest,
+	) (transport.PeerProjection, error) {
+		return transport.PeerProjection{
+			Type:       transport.PeerTypeChannel,
+			ID:         401,
+			AccessHash: int64Pointer(501),
+		}, nil
+	}))
+
+	_, failure := resolver.Target(context.Background(), recipient.Identity(uuid.New()))
+	if !errors.Is(failure, transport.ErrTargetNotSendable) {
+		t.Fatalf("disabled shared channel error = %v, want target not sendable", failure)
 	}
 }
 
@@ -195,6 +214,7 @@ func TestResolverRejectsInvalidPeers(t *testing.T) {
 				Type:       transport.PeerTypeChannel,
 				ID:         1,
 				AccessHash: int64Pointer(0),
+				CanSend:    true,
 			},
 		},
 	}

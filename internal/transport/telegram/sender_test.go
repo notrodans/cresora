@@ -173,3 +173,18 @@ func TestSenderClassifiesTargetAndPeerFailuresByEvidence(t *testing.T) {
 		t.Fatalf("nil peer = %v, want permanent structural failure", failure)
 	}
 }
+
+func TestSenderRejectsNotSendableTargetWithoutRPC(t *testing.T) {
+	api := &senderAPI{}
+	sender := telegram.New(api, senderTargets{
+		failure: fmt.Errorf("project shared channel: %w", telegram.ErrTargetNotSendable),
+	})
+
+	failure := sender.Send(context.Background(), recipient.Identity(uuid.New()), message.Text("hello"), 1)
+	if !errors.Is(failure, delivery.ErrPermanent) {
+		t.Fatalf("not-sendable target = %v, want permanent failure", failure)
+	}
+	if api.calls != 0 {
+		t.Fatalf("API calls = %d, want 0 for a denied target", api.calls)
+	}
+}

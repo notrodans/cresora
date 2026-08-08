@@ -40,6 +40,7 @@ func TestTelegramPeerLookupMapsProjection(t *testing.T) {
 		peerType   string
 		peerID     int64
 		accessHash *int64
+		canSend    bool
 	}{
 		{
 			name:       "user with hash",
@@ -53,10 +54,16 @@ func TestTelegramPeerLookupMapsProjection(t *testing.T) {
 			peerID:   301,
 		},
 		{
-			name:       "channel with hash",
+			name:     "disabled channel",
+			peerType: "channel",
+			peerID:   401,
+		},
+		{
+			name:       "enabled channel with hash",
 			peerType:   "channel",
 			peerID:     401,
 			accessHash: int64Pointer(501),
+			canSend:    true,
 		},
 	}
 
@@ -72,6 +79,7 @@ func TestTelegramPeerLookupMapsProjection(t *testing.T) {
 					} else {
 						*hash = pgtype.Int8{Int64: *test.accessHash, Valid: true}
 					}
+					*destinations[3].(*bool) = test.canSend
 					return nil
 				}),
 			}
@@ -93,6 +101,9 @@ func TestTelegramPeerLookupMapsProjection(t *testing.T) {
 			}
 			if !equalInt64Pointers(projection.AccessHash, test.accessHash) {
 				t.Fatalf("expected access hash %v, got %v", test.accessHash, projection.AccessHash)
+			}
+			if projection.CanSend != test.canSend {
+				t.Fatalf("expected can send %t, got %t", test.canSend, projection.CanSend)
 			}
 			if len(database.arguments) != 2 || database.arguments[0] != request.RecipientID || database.arguments[1] != request.AccountID {
 				t.Fatalf("unexpected lookup arguments: %#v", database.arguments)

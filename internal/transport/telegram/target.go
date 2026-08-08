@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrTargetNotFound = errors.New("Telegram target not found")
-	ErrInvalidPeer    = errors.New("invalid Telegram peer")
+	ErrTargetNotFound    = errors.New("Telegram target not found")
+	ErrTargetNotSendable = errors.New("Telegram target is not sendable")
+	ErrInvalidPeer       = errors.New("invalid Telegram peer")
 )
 
 // PeerType identifies the Telegram peer kind returned by a lookup
@@ -29,6 +30,7 @@ type PeerProjection struct {
 	Type       PeerType
 	ID         int64
 	AccessHash *int64
+	CanSend    bool
 }
 
 // PeerLookupRequest identifies the account and mailing recipient to resolve
