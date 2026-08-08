@@ -70,7 +70,9 @@ func (ts telegramSender) Send(
 
 func classifyTargetFailure(operation string, failure error) error {
 	wrapped := fmt.Errorf("%s: %w", operation, failure)
-	if errors.Is(failure, ErrTargetNotFound) || errors.Is(failure, ErrInvalidPeer) {
+	if errors.Is(failure, ErrTargetNotFound) ||
+		errors.Is(failure, ErrTargetNotSendable) ||
+		errors.Is(failure, ErrInvalidPeer) {
 		return application.WrapPermanent(wrapped)
 	}
 	return application.WrapUnknown(wrapped)

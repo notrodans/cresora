@@ -49,6 +49,7 @@ func (lookup telegramPeerLookup) Lookup(
 		peerType   string
 		peerID     int64
 		accessHash pgtype.Int8
+		canSend    bool
 	)
 	failure := lookup.database.QueryRow(
 		context,
@@ -64,7 +65,11 @@ func (lookup telegramPeerLookup) Lookup(
 			CASE
 				WHEN target.shared_dialog_id IS NOT NULL THEN shared_access.access_hash
 				ELSE private.access_hash
-			END AS access_hash
+			END AS access_hash,
+			CASE
+				WHEN target.shared_dialog_id IS NOT NULL THEN shared_access.can_send
+				ELSE FALSE
+			END AS can_send
 		FROM mailing_recipients AS recipient
 		JOIN telegram_mailing_recipients AS target
 		  ON target.mailing_id = recipient.mailing_id
@@ -96,7 +101,7 @@ func (lookup telegramPeerLookup) Lookup(
 		)`,
 		request.RecipientID,
 		request.AccountID,
-	).Scan(&peerType, &peerID, &accessHash)
+	).Scan(&peerType, &peerID, &accessHash, &canSend)
 	if errors.Is(failure, pgx.ErrNoRows) {
 		return telegram.PeerProjection{}, fmt.Errorf(
 			"lookup Telegram target for account %s and recipient %s: %w",
@@ -115,8 +120,9 @@ func (lookup telegramPeerLookup) Lookup(
 	}
 
 	projection := telegram.PeerProjection{
-		Type: telegram.PeerType(peerType),
-		ID:   peerID,
+		Type:    telegram.PeerType(peerType),
+		ID:      peerID,
+		CanSend: canSend,
 	}
 	if accessHash.Valid {
 		value := accessHash.Int64
