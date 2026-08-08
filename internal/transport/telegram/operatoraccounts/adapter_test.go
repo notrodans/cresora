@@ -42,14 +42,26 @@ func (runtime *revokeRuntimeFake) RevokeAndStop(
 }
 
 type logoutClientFake struct {
-	response *tg.AuthLoggedOut
-	err      error
-	calls    atomic.Int32
+	authorizationResponse *tg.AccountAuthorizations
+	authorizationErr      error
+	authorizationCalls    atomic.Int32
+	response              *tg.AuthLoggedOut
+	err                   error
+	logoutCalls           atomic.Int32
+}
+
+func (client *logoutClientFake) getAuthorizations(context.Context) (*tg.AccountAuthorizations, error) {
+	client.authorizationCalls.Add(1)
+	return client.authorizationResponse, client.authorizationErr
 }
 
 func (client *logoutClientFake) logOut(context.Context) (*tg.AuthLoggedOut, error) {
-	client.calls.Add(1)
+	client.logoutCalls.Add(1)
 	return client.response, client.err
+}
+
+func validAuthorizationResponse() *tg.AccountAuthorizations {
+	return &tg.AccountAuthorizations{}
 }
 
 func newTestAdapter(runtime Runtime, client *logoutClientFake) Adapter {
@@ -71,6 +83,7 @@ func TestAdapterRevokeAndStopMapsLogoutOutcomesWithoutRetry(t *testing.T) {
 	}{
 		{name: "success", converged: true},
 		{name: "unauthorized", err: tgerr.New(401, "AUTH_KEY_UNREGISTERED"), converged: true},
+		{name: "generic unauthorized", err: tgerr.New(401, "AUTH_KEY_INVALID"), kind: application.RemoteLogoutFailurePermanent},
 		{
 			name:       "flood wait",
 			err:        tgerr.New(420, "FLOOD_WAIT_3"),
@@ -83,7 +96,11 @@ func TestAdapterRevokeAndStopMapsLogoutOutcomesWithoutRetry(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &logoutClientFake{response: &tg.AuthLoggedOut{}, err: test.err}
+			client := &logoutClientFake{
+				authorizationResponse: validAuthorizationResponse(),
+				response:              &tg.AuthLoggedOut{},
+				err:                   test.err,
+			}
 			adapter := newTestAdapter(new(revokeRuntimeFake), client)
 			outcome := adapter.RevokeAndStop(context.Background(), application.RuntimeTarget{})
 			if err := outcome.Validate(); err != nil {
@@ -108,7 +125,10 @@ func TestAdapterRevokeAndStopMapsLogoutOutcomesWithoutRetry(t *testing.T) {
 					t.Fatalf("failure.RetryAfter() = %s, want %s", got, test.retryAfter)
 				}
 			}
-			if got := client.calls.Load(); got != 1 {
+			if got := client.authorizationCalls.Load(); got != 1 {
+				t.Fatalf("AccountGetAuthorizations callback calls = %d, want 1", got)
+			}
+			if got := client.logoutCalls.Load(); got != 1 {
 				t.Fatalf("AuthLogOut callback calls = %d, want 1", got)
 			}
 		})
@@ -127,13 +147,18 @@ func TestAdapterRevokeAndStopMapsRuntimeFailureToClosedOutcome(t *testing.T) {
 	if !ok || failure.Kind() != application.RemoteLogoutFailureUnavailable {
 		t.Fatalf("runtime failure outcome = %#v, want unavailable failure", outcome)
 	}
-	if got := client.calls.Load(); got != 0 {
+	if got := client.authorizationCalls.Load(); got != 0 {
+		t.Fatalf("AccountGetAuthorizations callback calls = %d, want 0", got)
+	}
+	if got := client.logoutCalls.Load(); got != 0 {
 		t.Fatalf("AuthLogOut callback calls = %d, want 0", got)
 	}
 }
 
 func TestAdapterRevokeAndStopRejectsNilLogoutResponse(t *testing.T) {
-	client := new(logoutClientFake)
+	client := &logoutClientFake{
+		authorizationResponse: validAuthorizationResponse(),
+	}
 	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 
 	if err := outcome.Validate(); err != nil {
@@ -146,7 +171,10 @@ func TestAdapterRevokeAndStopRejectsNilLogoutResponse(t *testing.T) {
 	if !ok || failure.Kind() != application.RemoteLogoutFailurePermanent {
 		t.Fatalf("nil logout response outcome = %#v, want permanent failure", outcome)
 	}
-	if got := client.calls.Load(); got != 1 {
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations callback calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 1 {
 		t.Fatalf("AuthLogOut callback calls = %d, want 1", got)
 	}
 }
@@ -170,7 +198,10 @@ func TestAdapterRevokeAndStopClassifiesTopLevelFailures(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &logoutClientFake{response: &tg.AuthLoggedOut{}}
+			client := &logoutClientFake{
+				authorizationResponse: validAuthorizationResponse(),
+				response:              &tg.AuthLoggedOut{},
+			}
 			outcome := newTestAdapter(&revokeRuntimeFake{err: test.err}, client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 			if err := outcome.Validate(); err != nil {
 				t.Fatalf("outcome.Validate() error = %v", err)
@@ -187,7 +218,10 @@ func TestAdapterRevokeAndStopClassifiesTopLevelFailures(t *testing.T) {
 					t.Fatalf("top-level failure leaked %q: %q", test.wantSecret, failure.Error())
 				}
 			}
-			if got := client.calls.Load(); got != 0 {
+			if got := client.authorizationCalls.Load(); got != 0 {
+				t.Fatalf("AccountGetAuthorizations callback calls = %d for top-level failure, want 0", got)
+			}
+			if got := client.logoutCalls.Load(); got != 0 {
 				t.Fatalf("AuthLogOut callback calls = %d for top-level failure, want 0", got)
 			}
 		})
@@ -195,7 +229,11 @@ func TestAdapterRevokeAndStopClassifiesTopLevelFailures(t *testing.T) {
 }
 
 func TestAdapterRevokeAndStopSanitizesRawLogoutFailure(t *testing.T) {
-	client := &logoutClientFake{response: &tg.AuthLoggedOut{}, err: errors.New("provider secret response")}
+	client := &logoutClientFake{
+		authorizationResponse: validAuthorizationResponse(),
+		response:              &tg.AuthLoggedOut{},
+		err:                   errors.New("provider secret response"),
+	}
 	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 	failure, ok := outcome.Failure()
 	if !ok {
@@ -208,7 +246,11 @@ func TestAdapterRevokeAndStopSanitizesRawLogoutFailure(t *testing.T) {
 
 func TestAdapterRevokeAndStopDoesNotConverge401WhenTeardownFails(t *testing.T) {
 	runtime := &revokeRuntimeFake{teardownErr: context.DeadlineExceeded}
-	client := &logoutClientFake{response: &tg.AuthLoggedOut{}, err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}
+	client := &logoutClientFake{
+		authorizationResponse: validAuthorizationResponse(),
+		response:              &tg.AuthLoggedOut{},
+		err:                   tgerr.New(401, "AUTH_KEY_UNREGISTERED"),
+	}
 	outcome := newTestAdapter(runtime, client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 
 	if err := outcome.Validate(); err != nil {
@@ -221,14 +263,20 @@ func TestAdapterRevokeAndStopDoesNotConverge401WhenTeardownFails(t *testing.T) {
 	if !ok || failure.Kind() != application.RemoteLogoutFailureUnavailable {
 		t.Fatalf("teardown failure outcome = %#v, want unavailable failure", outcome)
 	}
-	if got := client.calls.Load(); got != 1 {
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations callback calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 1 {
 		t.Fatalf("AuthLogOut callback calls = %d, want 1", got)
 	}
 }
 
 func TestAdapterRevokeAndStopRequiresTeardownForSuccess(t *testing.T) {
 	runtime := &revokeRuntimeFake{teardownErr: errors.New("owner teardown failed")}
-	client := &logoutClientFake{response: &tg.AuthLoggedOut{}}
+	client := &logoutClientFake{
+		authorizationResponse: validAuthorizationResponse(),
+		response:              &tg.AuthLoggedOut{},
+	}
 	outcome := newTestAdapter(runtime, client).RevokeAndStop(context.Background(), application.RuntimeTarget{})
 
 	if outcome.Converged() {
@@ -237,5 +285,158 @@ func TestAdapterRevokeAndStopRequiresTeardownForSuccess(t *testing.T) {
 	failure, ok := outcome.Failure()
 	if !ok || failure.Kind() != application.RemoteLogoutFailureUnavailable {
 		t.Fatalf("teardown failure outcome = %#v, want unavailable failure", outcome)
+	}
+}
+
+func TestAdapterRevokeAndStopConvergesVerifiedRevokedAuthorization(t *testing.T) {
+	for _, message := range []string{"AUTH_KEY_UNREGISTERED", "SESSION_REVOKED"} {
+		t.Run(message, func(t *testing.T) {
+			client := &logoutClientFake{
+				authorizationErr: tgerr.New(401, message),
+			}
+			outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(
+				context.Background(), application.RuntimeTarget{},
+			)
+
+			if err := outcome.Validate(); err != nil {
+				t.Fatalf("outcome.Validate() error = %v", err)
+			}
+			if !outcome.Converged() {
+				t.Fatal("verified revoked authorization was not reported as converged")
+			}
+			if got := client.authorizationCalls.Load(); got != 1 {
+				t.Fatalf("AccountGetAuthorizations calls = %d, want 1", got)
+			}
+			if got := client.logoutCalls.Load(); got != 0 {
+				t.Fatalf("AuthLogOut calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAdapterRevokeAndStopVerifiesThenLogsOut(t *testing.T) {
+	client := &logoutClientFake{
+		authorizationResponse: validAuthorizationResponse(),
+		response:              &tg.AuthLoggedOut{},
+	}
+	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(
+		context.Background(), application.RuntimeTarget{},
+	)
+
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome.Validate() error = %v", err)
+	}
+	if !outcome.Converged() {
+		t.Fatalf("successful verification and logout outcome = %#v, want converged", outcome)
+	}
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 1 {
+		t.Fatalf("AuthLogOut calls = %d, want 1", got)
+	}
+}
+
+func TestAdapterRevokeAndStopKeepsLogoutDeadlineNonConverged(t *testing.T) {
+	client := &logoutClientFake{
+		authorizationResponse: validAuthorizationResponse(),
+		response:              &tg.AuthLoggedOut{},
+		err:                   context.DeadlineExceeded,
+	}
+	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(
+		context.Background(), application.RuntimeTarget{},
+	)
+
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome.Validate() error = %v", err)
+	}
+	if outcome.Converged() {
+		t.Fatal("logout deadline was incorrectly reported as converged")
+	}
+	failure, ok := outcome.Failure()
+	if !ok || failure.Kind() != application.RemoteLogoutFailureAmbiguous {
+		t.Fatalf("logout deadline outcome = %#v, want ambiguous failure", outcome)
+	}
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 1 {
+		t.Fatalf("AuthLogOut calls = %d, want 1", got)
+	}
+}
+
+func TestAdapterRevokeAndStopDoesNotLogOutAfterVerificationTimeout(t *testing.T) {
+	client := &logoutClientFake{
+		authorizationErr: context.DeadlineExceeded,
+	}
+	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(
+		context.Background(), application.RuntimeTarget{},
+	)
+
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome.Validate() error = %v", err)
+	}
+	if outcome.Converged() {
+		t.Fatal("verification timeout was incorrectly reported as converged")
+	}
+	failure, ok := outcome.Failure()
+	if !ok || failure.Kind() != application.RemoteLogoutFailureAmbiguous {
+		t.Fatalf("verification timeout outcome = %#v, want ambiguous failure", outcome)
+	}
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 0 {
+		t.Fatalf("AuthLogOut calls = %d, want 0", got)
+	}
+}
+
+func TestAdapterRevokeAndStopDoesNotLogOutAfterGenericVerificationUnauthorized(t *testing.T) {
+	client := &logoutClientFake{
+		authorizationErr: tgerr.New(401, "AUTH_KEY_INVALID"),
+	}
+	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(
+		context.Background(), application.RuntimeTarget{},
+	)
+
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome.Validate() error = %v", err)
+	}
+	if outcome.Converged() {
+		t.Fatal("generic verification 401 was incorrectly reported as converged")
+	}
+	failure, ok := outcome.Failure()
+	if !ok || failure.Kind() != application.RemoteLogoutFailurePermanent {
+		t.Fatalf("generic verification 401 outcome = %#v, want permanent failure", outcome)
+	}
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 0 {
+		t.Fatalf("AuthLogOut calls = %d, want 0", got)
+	}
+}
+
+func TestAdapterRevokeAndStopRejectsNilAuthorizationResponse(t *testing.T) {
+	client := new(logoutClientFake)
+	outcome := newTestAdapter(new(revokeRuntimeFake), client).RevokeAndStop(
+		context.Background(), application.RuntimeTarget{},
+	)
+
+	if err := outcome.Validate(); err != nil {
+		t.Fatalf("outcome.Validate() error = %v", err)
+	}
+	if outcome.Converged() {
+		t.Fatal("nil authorization response was incorrectly reported as converged")
+	}
+	failure, ok := outcome.Failure()
+	if !ok || failure.Kind() != application.RemoteLogoutFailurePermanent {
+		t.Fatalf("nil authorization response outcome = %#v, want permanent failure", outcome)
+	}
+	if got := client.authorizationCalls.Load(); got != 1 {
+		t.Fatalf("AccountGetAuthorizations calls = %d, want 1", got)
+	}
+	if got := client.logoutCalls.Load(); got != 0 {
+		t.Fatalf("AuthLogOut calls = %d, want 0", got)
 	}
 }
