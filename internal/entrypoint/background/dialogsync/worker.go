@@ -342,8 +342,8 @@ func (worker *Worker) execute(
 		worker.logger.Log(context.Background(), slog.LevelWarn,
 			"account dialog sync flood wait",
 			"account_id", task.Key().AccountID,
-			"retry_after", floodWait.RetryAfter(),
-			"next_retry", delay,
+			"retry_after", floodWait.RetryAfter().Seconds(),
+			"next_retry", delay.Seconds(),
 		)
 		if failure := task.Retry(context.Background(), runFailure, delay); failure != nil && !errors.Is(failure, dialogsync.ErrLeaseLost) {
 			reportFatal(fmt.Errorf("retry account dialog sync after flood wait: %w", failure))
@@ -361,7 +361,7 @@ func (worker *Worker) execute(
 		worker.logger.Log(context.Background(), slog.LevelWarn,
 			"account dialog sync transiently failed",
 			"account_id", task.Key().AccountID,
-			"next_retry", delay,
+			"next_retry", delay.Seconds(),
 		)
 		if failure := task.Retry(context.Background(), runFailure, delay); failure != nil && !errors.Is(failure, dialogsync.ErrLeaseLost) {
 			reportFatal(fmt.Errorf("retry account dialog sync: %w", failure))
@@ -386,10 +386,7 @@ func (worker *Worker) floodBackoff(server time.Duration) time.Duration {
 // re-issue a request exactly when Telegram expects it, which keeps a persistent
 // rate limit alive.
 func (worker *Worker) backoff(server time.Duration) time.Duration {
-	base := worker.config.RetryBackoff
-	if server > base {
-		base = server
-	}
+	base := max(server, worker.config.RetryBackoff)
 	return cappedBackoff(base, worker.config.MaxBackoff)
 }
 
