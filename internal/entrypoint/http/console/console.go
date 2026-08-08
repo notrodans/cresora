@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	slogger "log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -320,7 +321,7 @@ func (h *Handler) parsePost(w http.ResponseWriter, r *http.Request) (url.Values,
 		http.Error(w, "Метод не поддерживается.", http.StatusMethodNotAllowed)
 		return nil, false
 	}
-	if !h.sameOrigin(r) {
+	if !h.sameOrigin(r) && !h.localNullOriginNativeForm(r) {
 		if h.redirectRecoverableSession(w, r) {
 			return nil, false
 		}
@@ -362,6 +363,50 @@ func (h *Handler) parsePost(w http.ResponseWriter, r *http.Request) (url.Values,
 		return nil, false
 	}
 	return r.PostForm, true
+}
+
+func (h *Handler) localNullOriginNativeForm(r *http.Request) bool {
+	if r == nil || r.URL == nil || h.publicOrigin == nil {
+		return false
+	}
+	if !strings.EqualFold(h.publicOrigin.Scheme, "http") || !isLoopbackHost(h.publicOrigin.Hostname()) {
+		return false
+	}
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		return false
+	}
+	switch path := r.URL.Path; {
+	case path == "/mailings":
+	case strings.HasPrefix(path, "/mailings/") && strings.HasSuffix(path, "/queue"):
+		rawID := strings.TrimSuffix(strings.TrimPrefix(path, "/mailings/"), "/queue")
+		if rawID == "" || strings.Contains(rawID, "/") {
+			return false
+		}
+		if _, failure := uuid.Parse(rawID); failure != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	if r.Host != h.publicOrigin.Host {
+		return false
+	}
+	if values := r.Header.Values("Origin"); len(values) != 1 || values[0] != "null" {
+		return false
+	}
+	if len(r.Header.Values("Referer")) != 0 {
+		return false
+	}
+	if values := r.Header.Values("Sec-Fetch-Site"); len(values) != 1 || values[0] != "same-origin" {
+		return false
+	}
+	if values := r.Header.Values("Sec-Fetch-Mode"); len(values) != 1 || values[0] != "navigate" {
+		return false
+	}
+	if values := r.Header.Values("Sec-Fetch-Dest"); len(values) != 1 || values[0] != "document" {
+		return false
+	}
+	return true
 }
 
 func (h *Handler) redirectRecoverableSession(w http.ResponseWriter, r *http.Request) bool {
@@ -433,6 +478,14 @@ func (h *Handler) matchesOrigin(raw string, referer bool) bool {
 		return false
 	}
 	return true
+}
+
+func isLoopbackHost(hostname string) bool {
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	address := net.ParseIP(hostname)
+	return address != nil && address.IsLoopback()
 }
 
 func (h *Handler) csrfToken(w http.ResponseWriter, r *http.Request) string {

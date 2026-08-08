@@ -37,9 +37,10 @@ const (
 	localSessionCookie      = "cresora_operator_session"
 	// These aliases describe the secure-by-default route used by the existing
 	// tests. Runtime handlers use the names from CookieConfig instead.
-	csrfCookie    = productionCSRFCookie
-	sessionCookie = productionSessionCookie
-	stateLifetime = 10 * time.Minute
+	csrfCookie        = productionCSRFCookie
+	sessionCookie     = productionSessionCookie
+	stateLifetime     = 10 * time.Minute
+	disconnectTimeout = 10 * time.Second
 )
 
 // CookieConfig is the deployment policy for the operator-account browser
@@ -511,7 +512,9 @@ func (h *handler) disconnectAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.disconnect.Execute(r.Context(), actor, operatoraccount.Identity(accountID))
+	disconnectContext, cancel := context.WithTimeout(r.Context(), disconnectTimeout)
+	defer cancel()
+	result, err := h.disconnect.Execute(disconnectContext, actor, operatoraccount.Identity(accountID))
 	if err != nil {
 		logDisconnectFailure(r, err)
 		if result.Outcome == disconnect.DisconnectPending || errors.Is(err, disconnect.ErrRemoteLogoutNotConverged) {
@@ -767,8 +770,22 @@ func (h *handler) localNullOriginNativeForm(r *http.Request) bool {
 		"/operator-accounts/authenticate/phone/code",
 		"/operator-accounts/authenticate/phone/password",
 		"/operator-accounts/authenticate/phone/cancel":
-	default:
+	case "/operator-accounts/disconnect":
 		return false
+	default:
+		const (
+			prefix = "/operator-accounts/"
+			suffix = "/disconnect"
+		)
+		path := r.URL.EscapedPath()
+		if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+			return false
+		}
+		rawAccountID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+		accountID, failure := uuid.Parse(rawAccountID)
+		if failure != nil || accountID == uuid.Nil {
+			return false
+		}
 	}
 	if r.Host != h.publicOrigin.Host {
 		return false

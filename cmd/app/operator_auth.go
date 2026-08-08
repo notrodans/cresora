@@ -18,6 +18,7 @@ import (
 	applicationoperatoraccounts "github.com/notrodans/cresora/internal/application/operatoraccounts"
 	operatoraccountrequests "github.com/notrodans/cresora/internal/application/requests/operator-account-auth"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
+	backgroundjobs "github.com/notrodans/cresora/internal/entrypoint/background"
 	"github.com/notrodans/cresora/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/cresora/internal/entrypoint/http/principal"
 	pgoperatoraccounts "github.com/notrodans/cresora/internal/infrastracture/storage/pg/operatoraccounts"
@@ -267,6 +268,31 @@ type operatoraccountsDisconnectCommand interface {
 
 type operatorAccountRecovery interface {
 	Recover(context.Context) (applicationoperatoraccounts.RecoveryResult, error)
+}
+
+const operatorAccountDisconnectRecoveryTimeout = 10 * time.Second
+
+func operatorAccountDisconnectRecoveryJob(
+	service operatorAccountRecovery,
+	log *slogger.Logger,
+) backgroundjobs.Job {
+	return func(ctx context.Context) error {
+		recoveryContext, cancel := context.WithTimeout(ctx, operatorAccountDisconnectRecoveryTimeout)
+		defer cancel()
+		if failure := recoverOperatorAccountDisconnect(recoveryContext, service, log); failure != nil && !errors.Is(failure, context.Canceled) {
+			if log == nil {
+				log = slogger.Default()
+			}
+			log.LogAttrs(
+				ctx,
+				slogger.LevelWarn,
+				"telegram account disconnect recovery did not complete",
+				slogger.Any("error", failure),
+			)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
 }
 
 func recoverOperatorAccountDisconnect(
