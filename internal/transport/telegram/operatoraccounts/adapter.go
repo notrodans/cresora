@@ -23,9 +23,9 @@ type Runtime interface {
 	RevokeAndStop(context.Context, application.RuntimeTarget, accountowner.ClientCallback) error
 }
 
-// Adapter implements application.RuntimeRevoker. It performs one raw
-// auth.logOut request and translates its result to the closed application
-// outcome type.
+// Adapter implements application.RuntimeRevoker. It verifies the current
+// Telegram authorizations before performing one raw auth.logOut request and
+// translates the result to the closed application outcome type.
 type Adapter struct {
 	runtime       Runtime
 	clientFactory func(*gotdtelegram.Client) logoutClient
@@ -44,8 +44,8 @@ func New(runtime Runtime) Adapter {
 }
 
 // RevokeAndStop fences and tears down the account runtime while issuing one
-// privileged logout callback. No gotd error or type is returned to the
-// application layer.
+// privileged authorization verification and, when still authorized, one
+// logout callback. No gotd error or type is returned to the application layer.
 func (adapter Adapter) RevokeAndStop(
 	ctx context.Context,
 	target application.RuntimeTarget,
@@ -57,6 +57,14 @@ func (adapter Adapter) RevokeAndStop(
 			client := adapter.clientFactory(raw)
 			if client == nil {
 				return logoutFailure{err: errLogoutClientUnavailable}
+			}
+			if response, failure := client.getAuthorizations(callbackContext); failure != nil {
+				if isRevokedAuthorizationFailure(failure) {
+					return failure
+				}
+				return authorizationVerificationFailure{err: failure}
+			} else if response == nil {
+				return authorizationVerificationFailure{err: errInvalidAuthorizationResponse}
 			}
 			response, failure := client.logOut(callbackContext)
 			if failure != nil {
@@ -71,8 +79,12 @@ func (adapter Adapter) RevokeAndStop(
 	if failure == nil {
 		return application.RevokeSucceeded()
 	}
-	if isUnauthorizedFailure(failure) {
+	if isRevokedAuthorizationFailure(failure) {
 		return application.RevokeAlreadyComplete()
+	}
+	var verificationFailure authorizationVerificationFailure
+	if errors.As(failure, &verificationFailure) {
+		return failedOutcome(classifyRevokeFailure(verificationFailure.err))
 	}
 	var transportFailure logoutFailure
 	if !errors.As(failure, &transportFailure) {
@@ -81,15 +93,13 @@ func (adapter Adapter) RevokeAndStop(
 		}
 		return failedOutcome(application.NewRemoteLogoutFailure(application.RemoteLogoutFailureUnavailable, 0))
 	}
-	if rpcFailure, ok := tgerr.As(transportFailure.err); ok && rpcFailure != nil && rpcFailure.Code == 401 {
-		return application.RevokeAlreadyComplete()
-	}
 	return failedOutcome(classifyRevokeFailure(transportFailure.err))
 }
 
 // logoutClient is deliberately transport-local. Tests can substitute it
 // without constructing a gotd client or issuing a request.
 type logoutClient interface {
+	getAuthorizations(context.Context) (*tg.AccountAuthorizations, error)
 	logOut(context.Context) (*tg.AuthLoggedOut, error)
 }
 
@@ -102,6 +112,18 @@ func (failure logoutFailure) Error() string {
 }
 
 func (failure logoutFailure) Unwrap() error {
+	return failure.err
+}
+
+type authorizationVerificationFailure struct {
+	err error
+}
+
+func (failure authorizationVerificationFailure) Error() string {
+	return "telegram account authorization verification failed"
+}
+
+func (failure authorizationVerificationFailure) Unwrap() error {
 	return failure.err
 }
 
@@ -120,11 +142,15 @@ func (client gotdLogoutClient) logOut(ctx context.Context) (*tg.AuthLoggedOut, e
 	return client.client.API().AuthLogOut(ctx)
 }
 
+func (client gotdLogoutClient) getAuthorizations(ctx context.Context) (*tg.AccountAuthorizations, error) {
+	return client.client.API().AccountGetAuthorizations(ctx)
+}
+
 func classifyRevokeFailure(failure error) (*application.RemoteLogoutFailure, error) {
 	if failure == nil {
 		return application.NewRemoteLogoutFailure(application.RemoteLogoutFailureUnavailable, 0)
 	}
-	if errors.Is(failure, errInvalidLogoutResponse) || isPermanentSessionFailure(failure) {
+	if errors.Is(failure, errInvalidAuthorizationResponse) || errors.Is(failure, errInvalidLogoutResponse) || isPermanentSessionFailure(failure) {
 		return application.NewRemoteLogoutFailure(application.RemoteLogoutFailurePermanent, 0)
 	}
 	if errors.Is(failure, context.Canceled) || errors.Is(failure, context.DeadlineExceeded) {
@@ -150,9 +176,12 @@ func classifyRevokeFailure(failure error) (*application.RemoteLogoutFailure, err
 	return application.NewRemoteLogoutFailure(application.RemoteLogoutFailureTransient, 0)
 }
 
-func isUnauthorizedFailure(failure error) bool {
+func isRevokedAuthorizationFailure(failure error) bool {
 	rpcFailure, ok := tgerr.As(failure)
-	return ok && rpcFailure != nil && rpcFailure.Code == 401
+	if !ok || rpcFailure == nil || rpcFailure.Code != 401 {
+		return false
+	}
+	return rpcFailure.Message == "AUTH_KEY_UNREGISTERED" || rpcFailure.Message == "SESSION_REVOKED"
 }
 
 func isPermanentSessionFailure(failure error) bool {
@@ -201,3 +230,5 @@ func failedOutcome(failure *application.RemoteLogoutFailure, err error) applicat
 var errLogoutClientUnavailable = errors.New("telegram account logout client unavailable")
 
 var errInvalidLogoutResponse = errors.New("telegram account logout response is invalid")
+
+var errInvalidAuthorizationResponse = errors.New("telegram account authorization response is invalid")
