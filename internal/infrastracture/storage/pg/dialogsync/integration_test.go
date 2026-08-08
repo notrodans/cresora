@@ -68,8 +68,8 @@ func TestDialogSyncQueueClaimsCompletesAndUpserts(t *testing.T) {
 
 	channelHash := int64(11)
 	shared := []dialogsync.SharedDialog{{
-		PeerID: 1, Kind: dialogsync.SharedBroadcastChannel, Title: "News",
-		Username: "news", AccessHash: &channelHash,
+		PeerID: 1, Kind: dialogsync.SharedSupergroup, Title: "News",
+		Username: "news", AccessHash: &channelHash, CanSend: true,
 	}}
 	userHash := int64(7)
 	private := []dialogsync.PrivateDialog{{
@@ -80,17 +80,18 @@ func TestDialogSyncQueueClaimsCompletesAndUpserts(t *testing.T) {
 	}
 
 	var (
-		status string
-		title  string
+		canSend bool
+		status  string
+		title   string
 	)
 	if failure = database.QueryRow(ctx,
-		`SELECT d.title
+		`SELECT d.title, link.can_send
 		   FROM telegram_shared_dialogs AS d
 		   JOIN operator_accounts_shared_dialogs AS link ON link.shared_dialog_id = d.id
 		  WHERE link.account_id = $1`,
 		accountID,
-	).Scan(&title); failure != nil || title != "News" {
-		t.Fatalf("shared dialog after sync: title=%q err=%v", title, failure)
+	).Scan(&title, &canSend); failure != nil || title != "News" || !canSend {
+		t.Fatalf("shared dialog after sync: title=%q can_send=%t err=%v", title, canSend, failure)
 	}
 	if failure = database.QueryRow(ctx,
 		`SELECT membership_status::text

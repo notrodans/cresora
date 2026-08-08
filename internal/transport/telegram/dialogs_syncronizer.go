@@ -31,9 +31,9 @@ var (
 // FetchDialogs reads the account's dialog list through its live gotd client
 // and reduces it to transport-neutral shared and private dialogs. Only peers
 // that Telegram represents as channels become shared dialogs (supergroup or
-// broadcast channel); users and basic groups become private dialogs. No send
-// permission is derived from the dialog list; every discovered dialog is
-// stored with can_send = false.
+// broadcast channel); users and basic groups become private dialogs. Shared
+// dialog send permission is derived from the channel rights returned for this
+// account.
 func FetchDialogs(
 	ctx context.Context,
 	client *gotdtelegram.Client,
@@ -208,7 +208,21 @@ func sharedChannelDialog(channel *tg.Channel) dialogsync.SharedDialog {
 		Username:     channel.Username,
 		Participants: optionalInt(channel.ParticipantsCount),
 		AccessHash:   optionalInt64(channel.AccessHash),
+		CanSend:      canSendSharedChannel(channel),
 	}
+}
+
+func canSendSharedChannel(channel *tg.Channel) bool {
+	if channel.Left || channel.BannedRights.ViewMessages {
+		return false
+	}
+	if channel.Creator || channel.AdminRights.PostMessages {
+		return true
+	}
+	if channel.Broadcast {
+		return false
+	}
+	return !channel.BannedRights.SendMessages && !channel.DefaultBannedRights.SendMessages
 }
 
 func optionalInt(value int) *int {

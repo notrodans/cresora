@@ -50,6 +50,7 @@ type SharedDialog struct {
 	Username     string
 	Participants *int
 	AccessHash   *int64
+	CanSend      bool
 }
 
 // PrivateDialog is one per-account private dialog (user, basic chat, or

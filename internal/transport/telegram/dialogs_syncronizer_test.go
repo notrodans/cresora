@@ -66,6 +66,43 @@ func TestReduceDialogsPageClassifiesSharedAndPrivateDialogs(t *testing.T) {
 	}
 }
 
+func TestCanSendSharedChannel(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel tg.Channel
+		want    bool
+	}{
+		{name: "left", channel: tg.Channel{Left: true, Megagroup: true}, want: false},
+		{name: "cannot view messages", channel: tg.Channel{
+			Megagroup:    true,
+			BannedRights: tg.ChatBannedRights{ViewMessages: true},
+		}, want: false},
+		{name: "creator", channel: tg.Channel{Creator: true, Megagroup: true}, want: true},
+		{name: "admin can post", channel: tg.Channel{
+			Megagroup:   true,
+			AdminRights: tg.ChatAdminRights{PostMessages: true},
+		}, want: true},
+		{name: "ordinary broadcast", channel: tg.Channel{Broadcast: true}, want: false},
+		{name: "supergroup", channel: tg.Channel{Megagroup: true}, want: true},
+		{name: "banned from sending", channel: tg.Channel{
+			Megagroup:    true,
+			BannedRights: tg.ChatBannedRights{SendMessages: true},
+		}, want: false},
+		{name: "default banned from sending", channel: tg.Channel{
+			Megagroup:           true,
+			DefaultBannedRights: tg.ChatBannedRights{SendMessages: true},
+		}, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := canSendSharedChannel(&test.channel); got != test.want {
+				t.Fatalf("canSendSharedChannel() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestReduceDialogsPageNotModifiedIsEmpty(t *testing.T) {
 	page, complete, _, failure := reduceDialogsPage(&tg.MessagesDialogsNotModified{})
 	if failure != nil {

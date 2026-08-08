@@ -263,17 +263,18 @@ func (t *task) Complete(
 			     account_id, shared_dialog_id, access_hash, membership_status,
 			     last_joined_at, can_send, last_synced_at
 			 )
-			 VALUES ($1, $2, $3, 'joined', CURRENT_TIMESTAMP, FALSE, CURRENT_TIMESTAMP)
+			 VALUES ($1, $2, $3, 'joined', CURRENT_TIMESTAMP, $4, CURRENT_TIMESTAMP)
 			 ON CONFLICT (account_id, shared_dialog_id) DO UPDATE
 			 SET access_hash = COALESCE(EXCLUDED.access_hash, operator_accounts_shared_dialogs.access_hash),
 			     membership_status = 'joined',
 			     last_joined_at = COALESCE(operator_accounts_shared_dialogs.last_joined_at, CURRENT_TIMESTAMP),
-			     can_send = FALSE,
+			     can_send = EXCLUDED.can_send,
 			     last_synced_at = CURRENT_TIMESTAMP,
 			     updated_at = CURRENT_TIMESTAMP`,
 			t.accountID,
 			sharedID,
 			optionalInt64Value(dialog.AccessHash),
+			dialog.CanSend,
 		); failure != nil {
 			return fmt.Errorf("upsert shared dialog membership: %w", failure)
 		}
