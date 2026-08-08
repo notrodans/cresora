@@ -49,7 +49,6 @@ type Config struct {
 	Env          EnvKind `env:"ENV"`
 	DbUrl        string  `env:"DB_URL"`
 	WebAddr      url.URL `env:"WEB_ADDR"`
-	WebOnly      bool    `env:"WEB_ONLY" envDefault:"true"`
 	PublicOrigin url.URL `env:"PUBLIC_ORIGIN"`
 	// DeliveryReaperInterval controls the transport-neutral lease recovery poll.
 	DeliveryReaperInterval time.Duration `env:"DELIVERY_REAPER_INTERVAL" envDefault:"1m"`

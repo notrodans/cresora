@@ -115,20 +115,17 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		}
 	}()
 
-	var operatorAccounts *operatorAccountComposition
-	if sharedRuntime != nil {
-		operatorAccounts, failure = composeOperatorAccounts(database, sharedRuntime)
-		if failure != nil {
-			return fmt.Errorf("compose telegram operator account services: %w", failure)
-		}
-		if failure = recoverOperatorAccountDisconnect(rootContext, operatorAccounts.disconnect, log); failure != nil {
-			return failure
-		}
+	operatorAccounts, failure := composeOperatorAccounts(database, sharedRuntime)
+	if failure != nil {
+		return fmt.Errorf("compose telegram operator account services: %w", failure)
+	}
+	if failure = recoverOperatorAccountDisconnect(rootContext, operatorAccounts.disconnect, log); failure != nil {
+		return failure
 	}
 
-	// Lease recovery is transport-free and therefore runs in every mode,
-	// including WEB_ONLY. The PostgreSQL adapter retains its own batch, grace,
-	// and retry defaults; only the polling interval is application config.
+	// Lease recovery is transport-free and therefore runs in every mode. The
+	// PostgreSQL adapter retains its own batch, grace, and retry defaults; only
+	// the polling interval is application config.
 	deliveryRecovery := pgreaper.New(database, pgreaper.Config{})
 	reaperLoop := deliveryreaper.New(deliveryRecovery, deliveryreaper.Config{
 		Interval: cfg.DeliveryReaperInterval,
@@ -187,30 +184,30 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 
 	// Канал ошибок фоновых обработчиков.
 	var workerErrors <-chan error
-	if !cfg.WebOnly {
-		worker := make(chan error, 1)
-		workerErrors = worker
-		go func() {
-			worker <- run(rootContext, database, sharedRuntime)
-		}()
-	}
+	workerErrors = make(chan error, 1)
 
 	backgroundErrors := make(chan error, 1)
+	dialogSyncStore := pgdialogsync.New(database)
+	if _, backfillFailure := dialogSyncStore.Backfill(rootContext); backfillFailure != nil {
+		return fmt.Errorf("backfill account dialog synchronizations: %w", backfillFailure)
+	}
+	deliveryClaims := claims.NewClaims(database, 5*time.Minute)
+	deliveryStore := deliveries.NewDeliveries(database)
+	targets := telegramaccount.NewTargets(pg.NewTelegramPeerLookup(database))
+	commands := telegramaccount.NewAdmissionCommands(deliveryClaims, deliveryStore, targets, sharedRuntime)
+	deliveryWorker := deliveryworker.New(deliveryClaims, commands, deliveryworker.Defaults())
+	dialogFetcher := telegramaccount.NewDialogFetcher(sharedRuntime)
+	dialogSyncer := appdialogsync.NewSyncer(dialogFetcher)
+	dialogSyncerWorker := backgrounddialogsync.New(dialogSyncStore, dialogSyncer, backgrounddialogsync.Defaults()).
+		WithLogger(log)
+
 	jobs := []backgroundjobs.Job{
 		namedBackgroundJob("delivery reaper", reaperLoop.Run),
 		namedBackgroundJob("delivery reconciler", reconcilerLoop.Run),
+		namedBackgroundJob("delivery worker", deliveryWorker.Run),
+		namedBackgroundJob("account dialog sync", dialogSyncerWorker.Run),
 	}
-	if sharedRuntime != nil {
-		dialogSyncStore := pgdialogsync.New(database)
-		if _, backfillFailure := dialogSyncStore.Backfill(rootContext); backfillFailure != nil {
-			return fmt.Errorf("backfill account dialog synchronizations: %w", backfillFailure)
-		}
-		dialogFetcher := telegramaccount.NewDialogFetcher(sharedRuntime)
-		dialogSyncer := appdialogsync.NewSyncer(dialogFetcher)
-		dialogWorker := backgrounddialogsync.New(dialogSyncStore, dialogSyncer, backgrounddialogsync.Defaults()).
-			WithLogger(log)
-		jobs = append(jobs, namedBackgroundJob("account dialog sync", dialogWorker.Run))
-	}
+
 	backgroundSupervisor := backgroundjobs.NewRunner(jobs, lifecycleWaitTimeout)
 	go func() {
 		backgroundErrors <- backgroundSupervisor.Run(rootContext)
@@ -254,15 +251,6 @@ func composeTelegramRuntime(cfg *config.Config, database *pgxpool.Pool) (*accoun
 		return nil, fmt.Errorf("construct telegram account runtime: %w", failure)
 	}
 	return runtime, nil
-}
-
-func run(context context.Context, database *pgxpool.Pool, runtime telegramaccount.Runtime) error {
-	deliveryClaims := claims.NewClaims(database, 5*time.Minute)
-	deliveryStore := deliveries.NewDeliveries(database)
-	targets := telegramaccount.NewTargets(pg.NewTelegramPeerLookup(database))
-	commands := telegramaccount.NewAdmissionCommands(deliveryClaims, deliveryStore, targets, runtime)
-	worker := deliveryworker.New(deliveryClaims, commands, deliveryworker.Defaults())
-	return worker.Run(context)
 }
 
 type serverController interface {
