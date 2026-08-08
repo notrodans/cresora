@@ -119,9 +119,6 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	if failure != nil {
 		return fmt.Errorf("compose telegram operator account services: %w", failure)
 	}
-	if failure = recoverOperatorAccountDisconnect(rootContext, operatorAccounts.disconnect, log); failure != nil {
-		return failure
-	}
 
 	// Lease recovery is transport-free and therefore runs in every mode. The
 	// PostgreSQL adapter retains its own batch, grace, and retry defaults; only
@@ -182,10 +179,6 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		MaxHeaderBytes:    maxHeaderBytes,
 	}
 
-	// Канал ошибок фоновых обработчиков.
-	var workerErrors <-chan error
-	workerErrors = make(chan error, 1)
-
 	backgroundErrors := make(chan error, 1)
 	dialogSyncStore := pgdialogsync.New(database)
 	if _, backfillFailure := dialogSyncStore.Backfill(rootContext); backfillFailure != nil {
@@ -202,6 +195,7 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		WithLogger(log)
 
 	jobs := []backgroundjobs.Job{
+		namedBackgroundJob("operator account disconnect recovery", operatorAccountDisconnectRecoveryJob(operatorAccounts.disconnect, log)),
 		namedBackgroundJob("delivery reaper", reaperLoop.Run),
 		namedBackgroundJob("delivery reconciler", reconcilerLoop.Run),
 		namedBackgroundJob("delivery worker", deliveryWorker.Run),
@@ -213,7 +207,7 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		backgroundErrors <- backgroundSupervisor.Run(rootContext)
 	}()
 
-	runtimeFailure := monitorRuntime(rootContext, cancel, server, server.ListenAndServe, workerErrors, backgroundErrors)
+	runtimeFailure := monitorRuntime(rootContext, cancel, server, server.ListenAndServe, backgroundErrors)
 	authFailure := shutdownApplicationResources(operatorAuth, sharedRuntime, database)
 	resourcesClosed = true
 	if runtimeFailure != nil && authFailure != nil {
@@ -271,19 +265,18 @@ func namedBackgroundJob(name string, job backgroundjobs.Job) backgroundjobs.Job 
 
 var lifecycleWaitTimeout = 10 * time.Second
 
-var errReaperErrorsClosed = errors.New("delivery reaper supervision channel closed unexpectedly")
+var errBackgroundErrorsClosed = errors.New("background supervision channel closed unexpectedly")
 
 func monitorRuntime(
 	root context.Context,
 	cancel context.CancelFunc,
 	server serverController,
 	serve serveFunction,
-	workerErrors <-chan error,
 	backgroundErrors ...<-chan error,
 ) error {
-	var reaperErrors <-chan error
+	var backgroundErrorsChannel <-chan error
 	if len(backgroundErrors) > 0 {
-		reaperErrors = backgroundErrors[0]
+		backgroundErrorsChannel = backgroundErrors[0]
 	}
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -296,63 +289,30 @@ func monitorRuntime(
 			failure = normalizeServerFailure(failure)
 			cancel()
 			shutdownFailure := shutdownServer(server)
-			workerFailure := waitWorker(workerErrors)
-			reaperFailure := waitReaper(reaperErrors)
+			backgroundFailure := waitBackground(backgroundErrorsChannel)
 			if failure != nil {
 				return failure
 			}
 			if shutdownFailure != nil {
 				return shutdownFailure
 			}
-			if workerFailure != nil {
-				return fmt.Errorf("delivery worker stopped: %w", workerFailure)
-			}
-			if reaperFailure != nil && !errors.Is(reaperFailure, root.Err()) {
-				return fmt.Errorf("delivery reaper stopped: %w", reaperFailure)
+			if backgroundFailure != nil && !errors.Is(backgroundFailure, root.Err()) {
+				return fmt.Errorf("background job stopped: %w", backgroundFailure)
 			}
 			return errors.New("mailing console server stopped unexpectedly")
-		case failure := <-workerErrors:
-			shutdownRequested := root.Err() != nil
-			cancel()
-			shutdownFailure := shutdownServer(server)
-			serverFailure := waitServer(serverErrors)
-			reaperFailure := waitReaper(reaperErrors)
-			if shutdownRequested && (failure == nil || errors.Is(failure, root.Err())) {
-				if shutdownFailure != nil {
-					return shutdownFailure
-				}
-				if reaperFailure != nil && !errors.Is(reaperFailure, root.Err()) {
-					return fmt.Errorf("delivery reaper stopped: %w", reaperFailure)
-				}
-				return serverFailure
-			}
-			if failure == nil {
-				return errors.New("delivery worker stopped unexpectedly")
-			}
-			if shutdownFailure != nil {
-				return shutdownFailure
-			}
-			if serverFailure != nil {
-				return serverFailure
-			}
-			return fmt.Errorf("delivery worker stopped: %w", failure)
-		case failure, open := <-reaperErrors:
+		case failure, open := <-backgroundErrorsChannel:
 			if !open {
-				failure = errReaperErrorsClosed
+				failure = errBackgroundErrorsClosed
 			}
 			shutdownRequested := root.Err() != nil
 			cancel()
 			shutdownFailure := shutdownServer(server)
 			serverFailure := waitServer(serverErrors)
-			workerFailure := waitWorker(workerErrors)
 			if shutdownFailure != nil {
 				return shutdownFailure
 			}
 			if serverFailure != nil {
 				return serverFailure
-			}
-			if workerFailure != nil && !errors.Is(workerFailure, root.Err()) {
-				return fmt.Errorf("delivery worker stopped: %w", workerFailure)
 			}
 			if failure == nil {
 				if shutdownRequested {
@@ -363,23 +323,19 @@ func monitorRuntime(
 			if shutdownRequested && errors.Is(failure, root.Err()) {
 				return nil
 			}
-			return fmt.Errorf("delivery reaper stopped: %w", failure)
+			return fmt.Errorf("background job stopped: %w", failure)
 		case <-root.Done():
 			shutdownFailure := shutdownServer(server)
 			serverFailure := waitServer(serverErrors)
-			workerFailure := waitWorker(workerErrors)
-			reaperFailure := waitReaper(reaperErrors)
+			backgroundFailure := waitBackground(backgroundErrorsChannel)
 			if shutdownFailure != nil {
 				return shutdownFailure
 			}
 			if serverFailure != nil {
 				return serverFailure
 			}
-			if workerFailure != nil && !errors.Is(workerFailure, root.Err()) {
-				return fmt.Errorf("delivery worker stopped: %w", workerFailure)
-			}
-			if reaperFailure != nil && !errors.Is(reaperFailure, root.Err()) {
-				return fmt.Errorf("delivery reaper stopped: %w", reaperFailure)
+			if backgroundFailure != nil && !errors.Is(backgroundFailure, root.Err()) {
+				return fmt.Errorf("background job stopped: %w", backgroundFailure)
 			}
 			return nil
 		}
@@ -404,30 +360,18 @@ func shutdownServer(server serverController) error {
 	return nil
 }
 
-func waitWorker(workerErrors <-chan error) error {
-	if workerErrors == nil {
+func waitBackground(backgroundErrors <-chan error) error {
+	if backgroundErrors == nil {
 		return nil
 	}
 	select {
-	case failure := <-workerErrors:
-		return failure
-	case <-time.After(lifecycleWaitTimeout):
-		return errors.New("delivery worker shutdown timed out")
-	}
-}
-
-func waitReaper(reaperErrors <-chan error) error {
-	if reaperErrors == nil {
-		return nil
-	}
-	select {
-	case failure, open := <-reaperErrors:
+	case failure, open := <-backgroundErrors:
 		if !open {
-			return errReaperErrorsClosed
+			return errBackgroundErrorsClosed
 		}
 		return failure
 	case <-time.After(lifecycleWaitTimeout):
-		return errors.New("delivery reaper shutdown timed out")
+		return errors.New("background jobs shutdown timed out")
 	}
 }
 
