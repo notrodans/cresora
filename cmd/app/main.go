@@ -164,23 +164,14 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	router.Use(middleware.Recoverer)
 	authentication.Register(router, authenticationService, sessionProvider, cfg.PublicOrigin.String(), cookieConfig)
 	var operatorAuth *operatorAuthLifecycle
-	if cfg.TelegramAuthEnabled {
-		operatorAuth, failure = composeOperatorAuthWithComposition(
-			rootContext,
-			cfg,
-			router,
-			sessionProvider,
-			cfg.PublicOrigin.String(),
-			operatorAccounts,
-		)
-		if failure != nil {
-			return fmt.Errorf("compose telegram operator account authentication: %w", failure)
-		}
-	} else {
-		// The disabled route preserves the endpoint surface without exposing the
-		// authentication or disconnect command ports.
-		registerDisabledOperatorAuth(router, sessionProvider, cfg)
-	}
+	operatorAuth, failure = composeOperatorAuthWithComposition(
+		rootContext,
+		cfg,
+		router,
+		sessionProvider,
+		cfg.PublicOrigin.String(),
+		operatorAccounts,
+	)
 	console.Register(router, createDraft, queueMailing, dashboard, sessionProvider, cfg.PublicOrigin.String(), log)
 
 	// Инициализируем HTTP сервер
@@ -237,16 +228,9 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 	return authFailure
 }
 
-func sharedTelegramRuntimeRequired(cfg *config.Config) bool {
-	return cfg != nil && (cfg.TelegramAuthEnabled || !cfg.WebOnly)
-}
-
 func composeTelegramRuntime(cfg *config.Config, database *pgxpool.Pool) (*accountowner.Registry, error) {
 	if cfg == nil {
 		return nil, errors.New("telegram runtime configuration is required")
-	}
-	if !sharedTelegramRuntimeRequired(cfg) {
-		return nil, nil
 	}
 	if failure := validateTelegramRuntimeConfig(cfg); failure != nil {
 		return nil, failure
