@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
 	"github.com/notrodans/cresora/internal/application/dialogsync"
@@ -143,6 +144,9 @@ func TestDialogSyncRetryExhaustsThenFails(t *testing.T) {
 	if failure = task.Retry(ctx, dialogsync.WrapTransient(nil), time.Second); failure != nil {
 		t.Fatalf("retry: %v", failure)
 	}
+	if _, failure = database.Exec(ctx, `UPDATE account_dialog_syncs SET next_retry_at = CURRENT_TIMESTAMP WHERE account_id = $1`, accountID); failure != nil {
+		t.Fatalf("make transient retry due: %v", failure)
+	}
 
 	task, failure = store.Claim(ctx, time.Minute)
 	if failure != nil {
@@ -211,6 +215,9 @@ func TestDialogFloodWaitNeverTerminalAtAttemptCap(t *testing.T) {
 		t.Fatalf("sync row attempts = %d, want 0 (flood must not consume the budget)", attempts)
 	}
 	// A flood-retried row must remain claimable even at max_attempts.
+	if _, failure = database.Exec(ctx, `UPDATE account_dialog_syncs SET next_retry_at = CURRENT_TIMESTAMP WHERE account_id = $1`, accountID); failure != nil {
+		t.Fatalf("make flood retry due: %v", failure)
+	}
 	if _, failure = store.Claim(ctx, time.Minute); failure != nil {
 		t.Fatalf("second claim after flood retry: %v", failure)
 	}
