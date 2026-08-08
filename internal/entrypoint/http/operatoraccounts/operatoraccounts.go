@@ -162,7 +162,8 @@ const (
 	canonicalFailureInvalidResult    = "invalid_application_result"
 	canonicalFailureRequestCancelled = "request_cancelled"
 
-	disconnectOperation = "disconnect"
+	disconnectOperation  = "disconnect"
+	forceForgetOperation = "force_forget"
 )
 
 //go:embed templates/authenticate.html style.css authenticate.js
@@ -175,6 +176,7 @@ type handler struct {
 	cancel                         commands.Cancel
 	status                         requests.Status
 	disconnect                     disconnectCommand
+	forceForget                    forceForgetCommand
 	tmpl                           *template.Template
 	publicOrigin                   *url.URL
 	disabled                       bool
@@ -216,6 +218,8 @@ type accountRow struct {
 	State                    string
 	CanDisconnect            bool
 	DisconnectDisabledReason string
+	Version                  operatoraccount.Version
+	CanForceForget           bool
 }
 
 // disconnectCommand is the narrow application port consumed by the HTTP
@@ -223,6 +227,35 @@ type accountRow struct {
 // persistence or transport types.
 type disconnectCommand interface {
 	Execute(context.Context, application.Actor, operatoraccount.ID) (disconnect.DisconnectResult, error)
+}
+
+type forceForgetCommand interface {
+	Execute(context.Context, disconnect.ForceForgetCommand) (disconnect.ForceForgetResult, error)
+}
+
+// RegisterForceForget registers the separately authenticated recovery action
+// on the application router after the core service has been composed.
+func RegisterForceForget(router chi.Router, command forceForgetCommand, provider principal.Provider, publicOrigin string, options RouteOptions) {
+	origin, failure := parsePublicOrigin(publicOrigin)
+	if failure != nil {
+		panic(failure)
+	}
+	if options.Cookie == (CookieConfig{}) {
+		options.Cookie = SecureCookieConfig()
+	}
+	if failure := ValidateCookieConfig(options.Cookie); failure != nil {
+		panic(failure)
+	}
+	if !options.Cookie.Secure && (!strings.EqualFold(origin.Scheme, "http") || !isLocalOriginHost(origin)) {
+		panic("insecure operator-account cookies require a local HTTP origin")
+	}
+	h := &handler{
+		forceForget:                    command,
+		publicOrigin:                   origin,
+		cookie:                         options.Cookie,
+		allowLocalNullOriginNativeForm: options.Mode == RouteLive && options.Environment == EnvironmentDevelopment && !options.Cookie.Secure && options.Cookie.AllowInsecureLocal && options.Cookie.CSRFCookieName == localCSRFCookie && options.Cookie.SessionCookieName == localSessionCookie && strings.EqualFold(origin.Scheme, "http") && isLocalOriginHost(origin),
+	}
+	router.With(principal.Middleware(provider)).Post("/operator-accounts/{accountID}/force-forget", h.forceForgetAccount)
 }
 
 // NewWithPhoneAuth constructs the approved runtime phone-auth flow. It accepts
@@ -301,7 +334,9 @@ func registerPhoneAuth(router chi.Router, start commands.Start, code commands.Co
 		cookie:                         options.Cookie,
 		allowLocalNullOriginNativeForm: allowLocalNullOriginNativeForm,
 	}
-	h.tmpl = template.Must(template.New("authenticate.html").ParseFS(assets, "templates/authenticate.html"))
+	h.tmpl = template.Must(template.New("authenticate.html").Funcs(template.FuncMap{
+		"newIdempotencyKey": func() string { return uuid.NewString() },
+	}).ParseFS(assets, "templates/authenticate.html"))
 	protected := router.With(principal.Middleware(provider))
 	protected.Get("/operator-accounts/authenticate", h.authenticate)
 	protected.Post("/operator-accounts/authenticate/phone", h.phoneCanonical)
@@ -533,6 +568,56 @@ func (h *handler) disconnectAccount(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *handler) forceForgetAccount(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if h.forceForget == nil {
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	actor, ok := requestActor(w, r)
+	if !ok || !h.protectPost(w, r) {
+		return
+	}
+	accountID, accountErr := uuid.Parse(strings.TrimSpace(chi.URLParam(r, "accountID")))
+	version, versionErr := parseLifecycleVersion(r.FormValue("expected_version"))
+	idempotencyKey, keyErr := uuid.Parse(strings.TrimSpace(r.FormValue("idempotency_key")))
+	if accountErr != nil || accountID == uuid.Nil || versionErr != nil || version == 0 || keyErr != nil || idempotencyKey == uuid.Nil || r.FormValue("acknowledge") != "on" {
+		logForceForgetFailure(r, disconnect.ErrInvalidInput)
+		redirectError(w, "force-forget")
+		return
+	}
+	result, err := h.forceForget.Execute(r.Context(), disconnect.ForceForgetCommand{
+		Actor: actor, AccountID: operatoraccount.Identity(accountID), ExpectedVersion: operatoraccount.Version(version),
+		Acknowledged: true, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil || (result.Outcome != disconnect.ForceForgetLocallyForgotten && result.Outcome != disconnect.ForceForgetAlreadyApplied) {
+		if err == nil {
+			err = disconnect.ErrInvalidInput
+		}
+		logForceForgetFailure(r, err)
+		redirectError(w, "force-forget")
+		return
+	}
+	h.redirect(w, "/operator-accounts/authenticate?notice=force-forget-complete")
+}
+
+func parseLifecycleVersion(value string) (int64, error) {
+	if value == "" {
+		return 0, errors.New("missing lifecycle version")
+	}
+	var version int64
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return 0, errors.New("invalid lifecycle version")
+		}
+		version = version*10 + int64(digit-'0')
+		if version > 1<<62 {
+			return 0, errors.New("invalid lifecycle version")
+		}
+	}
+	return version, nil
+}
+
 func (h *handler) resolveScope(w http.ResponseWriter, r *http.Request) (requestScope, bool) {
 	actor, ok := requestActor(w, r)
 	if !ok {
@@ -724,6 +809,19 @@ func logDisconnectFailure(r *http.Request, failure error) {
 	)
 }
 
+func logForceForgetFailure(r *http.Request, failure error) {
+	failureClass := canonicalFailureApplication
+	if errors.Is(failure, disconnect.ErrInvalidInput) {
+		failureClass = "invalid_input"
+	} else if errors.Is(failure, disconnect.ErrAccountStateConflict) {
+		failureClass = "state_conflict"
+	} else if errors.Is(failure, disconnect.ErrAccountVersionConflict) {
+		failureClass = "version_conflict"
+	}
+	sloggerForRequest := slog.LoggerOr(r.Context(), slogger.Default())
+	sloggerForRequest.LogAttrs(r.Context(), slogger.LevelError, "operator account force forget failed", slogger.String("operation", forceForgetOperation), slogger.String("failure_class", failureClass))
+}
+
 func redirectError(w http.ResponseWriter, code string) {
 	http.Redirect(w, &http.Request{URL: &url.URL{}}, "/operator-accounts/authenticate?error="+url.QueryEscape(code), http.StatusSeeOther)
 }
@@ -768,7 +866,10 @@ func (h *handler) localNullOriginNativeForm(r *http.Request) bool {
 		"/operator-accounts/authenticate/phone/password",
 		"/operator-accounts/authenticate/phone/cancel":
 	default:
-		return false
+		accountID, err := uuid.Parse(chi.URLParam(r, "accountID"))
+		if err != nil || accountID == uuid.Nil || r.URL.EscapedPath() != "/operator-accounts/"+accountID.String()+"/force-forget" {
+			return false
+		}
 	}
 	if r.Host != h.publicOrigin.Host {
 		return false
@@ -834,6 +935,8 @@ func notice(code string) string {
 		return "Telegram account disconnected."
 	case "account-already-disconnected":
 		return "Telegram account is already disconnected."
+	case "force-forget-complete":
+		return "Локальные данные Telegram удалены. Удалённый выход не подтверждён; аккаунт можно подключить снова."
 	}
 	return ""
 }
@@ -857,6 +960,8 @@ func errorMessage(code string) string {
 		return "We could not disconnect that account. Try again."
 	case "disconnect-pending":
 		return "The account could not be disconnected yet. Try again later."
+	case "force-forget":
+		return "Не удалось удалить локальные данные аккаунта. Проверьте состояние и повторите попытку."
 	}
 	return ""
 }
@@ -887,6 +992,8 @@ func mapAccounts(accounts []common.Account) []accountRow {
 			State:                    accountState(account.Status),
 			CanDisconnect:            canDisconnect,
 			DisconnectDisabledReason: disabledReason,
+			Version:                  account.Version,
+			CanForceForget:           account.Status == operatoraccount.StatusDisconnecting,
 		})
 	}
 	return rows

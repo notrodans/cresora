@@ -30,6 +30,7 @@ import (
 	backgrounddialogsync "github.com/notrodans/cresora/internal/entrypoint/background/dialogsync"
 	"github.com/notrodans/cresora/internal/entrypoint/http/authentication"
 	"github.com/notrodans/cresora/internal/entrypoint/http/console"
+	operatoraccountspage "github.com/notrodans/cresora/internal/entrypoint/http/operatoraccounts"
 	"github.com/notrodans/cresora/internal/infrastracture/logger/slog"
 	"github.com/notrodans/cresora/internal/infrastracture/storage/pg"
 	claims "github.com/notrodans/cresora/internal/infrastracture/storage/pg/claims"
@@ -169,6 +170,7 @@ func runApplication(rootContext context.Context, cancel context.CancelFunc) erro
 		cfg.PublicOrigin.String(),
 		operatorAccounts,
 	)
+	operatoraccountspage.RegisterForceForget(router, operatorAccounts.forceForget, sessionProvider, cfg.PublicOrigin.String(), operatorAuthRouteOptions(cfg))
 	console.Register(router, createDraft, queueMailing, dashboard, sessionProvider, cfg.PublicOrigin.String(), log)
 
 	// Инициализируем HTTP сервер

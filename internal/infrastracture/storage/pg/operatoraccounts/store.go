@@ -27,6 +27,7 @@ var (
 	_ applicationoperatoraccounts.AccountLifecycleRepository = (*Store)(nil)
 	_ applicationoperatoraccounts.RemoteLogoutIntentLister   = (*Store)(nil)
 	_ applicationoperatoraccounts.SessionDeleter             = (*Store)(nil)
+	_ applicationoperatoraccounts.ForceForgetPersistence     = (*Store)(nil)
 )
 
 // Store persists operator account lifecycle state and its associated Telegram
@@ -287,6 +288,201 @@ func (store *Store) PersistLifecycle(
 	return applicationoperatoraccounts.ErrAccountVersionConflict
 }
 
+// ForceForgetAlreadyApplied reports whether one actor/account idempotency key
+// already has a durable force-forget event. It is a read-only lookup used to
+// make retries return an already-applied result before another runtime stop.
+func (store *Store) ForceForgetAlreadyApplied(
+	context context.Context,
+	actor application.Actor,
+	accountID operatoraccount.ID,
+	idempotencyKey uuid.UUID,
+) (bool, error) {
+	if !validForceForgetInput(actor, accountID, idempotencyKey) {
+		return false, applicationoperatoraccounts.ErrAccountNotFound
+	}
+
+	var applied bool
+	failure := store.database.QueryRow(
+		context,
+		`SELECT EXISTS (
+			SELECT 1
+			FROM operator_account_force_forget_events
+			WHERE operator_id = $1
+			  AND account_id = $2
+			  AND idempotency_key = $3
+		)`,
+		actor.OperatorID,
+		accountID.UUID(),
+		idempotencyKey,
+	).Scan(&applied)
+	if failure != nil {
+		return false, fmt.Errorf("check operator account force forget event: %w", failure)
+	}
+	return applied, nil
+}
+
+// PersistForceForget atomically applies the local override. The update is
+// fenced by ownership, disconnecting status, remote logout intent, and the
+// expected version. Session deletion and the fixed audit event are in the
+// same transaction, so an audit failure rolls back both local effects.
+func (store *Store) PersistForceForget(
+	context context.Context,
+	actor application.Actor,
+	account operatoraccount.Account,
+	expectedVersion operatoraccount.Version,
+	idempotencyKey uuid.UUID,
+) (bool, error) {
+	if !validForceForgetInput(actor, account.ID(), idempotencyKey) {
+		return false, applicationoperatoraccounts.ErrAccountNotFound
+	}
+	if applied, failure := store.ForceForgetAlreadyApplied(context, actor, account.ID(), idempotencyKey); failure != nil {
+		return false, fmt.Errorf("check operator account force forget idempotency: %w", failure)
+	} else if applied {
+		return true, nil
+	}
+	if expectedVersion == 0 || expectedVersion >= operatoraccount.Version(math.MaxInt64) ||
+		account.Status() != operatoraccount.StatusDisconnected ||
+		account.Version() != expectedVersion+1 {
+		return false, applicationoperatoraccounts.ErrAccountVersionConflict
+	}
+
+	transaction, failure := store.database.Begin(context)
+	if failure != nil {
+		return false, fmt.Errorf("begin operator account force forget: %w", failure)
+	}
+	defer func() { _ = transaction.Rollback(context) }()
+
+	applied, failure := forceForgetEventExists(context, transaction, actor, account.ID(), idempotencyKey)
+	if failure != nil {
+		return false, fmt.Errorf("check operator account force forget event in transaction: %w", failure)
+	}
+	if applied {
+		if failure = transaction.Commit(context); failure != nil {
+			return false, fmt.Errorf("commit duplicate operator account force forget: %w", failure)
+		}
+		return true, nil
+	}
+
+	var disconnectedID uuid.UUID
+	failure = transaction.QueryRow(
+		context,
+		`UPDATE operator_accounts AS account
+		 SET status = 'disconnected',
+		     status_version = account.status_version + 1,
+		     auth_expires_at = NULL,
+		     failure_code = NULL,
+		     remote_logout_required = FALSE,
+		     updated_at = clock_timestamp()
+		 WHERE account.operator_id = $1
+		   AND account.id = $2
+		   AND account.status = 'disconnecting'
+		   AND account.remote_logout_required = TRUE
+		   AND account.status_version = $3
+		 RETURNING account.id`,
+		actor.OperatorID,
+		account.ID().UUID(),
+		int64(expectedVersion),
+	).Scan(&disconnectedID)
+	if errors.Is(failure, pgx.ErrNoRows) {
+		applied, checkFailure := forceForgetEventExists(context, transaction, actor, account.ID(), idempotencyKey)
+		if checkFailure != nil {
+			return false, fmt.Errorf("recheck operator account force forget event: %w", checkFailure)
+		}
+		if applied {
+			if failure = transaction.Commit(context); failure != nil {
+				return false, fmt.Errorf("commit duplicate operator account force forget: %w", failure)
+			}
+			return true, nil
+		}
+
+		var exists bool
+		failure = transaction.QueryRow(
+			context,
+			`SELECT EXISTS (
+				SELECT 1
+				FROM operator_accounts
+				WHERE operator_id = $1
+				  AND id = $2
+			)`,
+			actor.OperatorID,
+			account.ID().UUID(),
+		).Scan(&exists)
+		if failure != nil {
+			return false, fmt.Errorf("inspect operator account force forget target: %w", failure)
+		}
+		if !exists {
+			return false, applicationoperatoraccounts.ErrAccountNotFound
+		}
+		return false, applicationoperatoraccounts.ErrAccountVersionConflict
+	}
+	if failure != nil {
+		return false, fmt.Errorf("transition operator account for force forget: %w", failure)
+	}
+
+	if _, failure = transaction.Exec(
+		context,
+		`DELETE FROM sessions WHERE account_id = $1`,
+		disconnectedID,
+	); failure != nil {
+		return false, fmt.Errorf("delete operator account session during force forget: %w", failure)
+	}
+	if _, failure = transaction.Exec(
+		context,
+		`INSERT INTO operator_account_force_forget_events (
+			 event_type,
+			 operator_id,
+			 account_id,
+			 previous_version,
+			 resulting_version,
+			 reason,
+			 idempotency_key
+		 ) VALUES (
+			 'operator_account_force_forgotten',
+			 $1,
+			 $2,
+			 $3,
+			 $4,
+			 'remote_logout_unverified_operator_override',
+			 $5
+		 )`,
+		actor.OperatorID,
+		account.ID().UUID(),
+		int64(expectedVersion),
+		int64(expectedVersion+1),
+		idempotencyKey,
+	); failure != nil {
+		return false, fmt.Errorf("insert operator account force forget audit event: %w", failure)
+	}
+	if failure = transaction.Commit(context); failure != nil {
+		return false, fmt.Errorf("commit operator account force forget: %w", failure)
+	}
+	return false, nil
+}
+
+func forceForgetEventExists(
+	context context.Context,
+	transaction pgx.Tx,
+	actor application.Actor,
+	accountID operatoraccount.ID,
+	idempotencyKey uuid.UUID,
+) (bool, error) {
+	var applied bool
+	failure := transaction.QueryRow(
+		context,
+		`SELECT EXISTS (
+			SELECT 1
+			FROM operator_account_force_forget_events
+			WHERE operator_id = $1
+			  AND account_id = $2
+			  AND idempotency_key = $3
+		)`,
+		actor.OperatorID,
+		accountID.UUID(),
+		idempotencyKey,
+	).Scan(&applied)
+	return applied, failure
+}
+
 // DeleteSession removes an owned account's Telegram session. The account row
 // is locked before deletion so this operation cannot race a lifecycle update.
 // Deleting an already-missing session is intentionally successful.
@@ -340,6 +536,10 @@ func (store *Store) DeleteSession(
 
 func validOwnership(actor application.Actor, accountID operatoraccount.ID) bool {
 	return actor.OperatorID != uuid.Nil && !accountID.IsZero()
+}
+
+func validForceForgetInput(actor application.Actor, accountID operatoraccount.ID, idempotencyKey uuid.UUID) bool {
+	return validOwnership(actor, accountID) && idempotencyKey != uuid.Nil
 }
 
 func lifecyclePredecessors(next operatoraccount.Status) (string, bool) {

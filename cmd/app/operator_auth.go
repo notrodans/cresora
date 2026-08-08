@@ -51,9 +51,10 @@ type operatorAuthPorts struct {
 }
 
 type operatorAccountComposition struct {
-	runtime    operatorAuthRuntime
-	store      *pgoperatoraccounts.Store
-	disconnect *applicationoperatoraccounts.Service
+	runtime     operatorAuthRuntime
+	store       *pgoperatoraccounts.Store
+	disconnect  *applicationoperatoraccounts.Service
+	forceForget *applicationoperatoraccounts.ForceForgetOperatorAccount
 }
 
 type operatorAccountDisconnectCommand struct {
@@ -135,9 +136,10 @@ func composeOperatorAccounts(
 	store := pgoperatoraccounts.New(database)
 	revoker := transportoperatoraccounts.New(revokerRuntime)
 	return &operatorAccountComposition{
-		runtime:    runtime,
-		store:      store,
-		disconnect: applicationoperatoraccounts.NewService(store, revoker),
+		runtime:     runtime,
+		store:       store,
+		disconnect:  applicationoperatoraccounts.NewService(store, revoker),
+		forceForget: applicationoperatoraccounts.NewForceForgetOperatorAccount(store, runtime),
 	}, nil
 }
 
@@ -152,7 +154,7 @@ func composeOperatorAuthWithComposition(
 	if cfg == nil {
 		return nil, errors.New("telegram authentication configuration is required")
 	}
-	if composition == nil || composition.runtime == nil || composition.store == nil || composition.disconnect == nil {
+	if composition == nil || composition.runtime == nil || composition.store == nil || composition.disconnect == nil || composition.forceForget == nil {
 		return nil, errors.New("telegram authentication requires the composed operator account services")
 	}
 

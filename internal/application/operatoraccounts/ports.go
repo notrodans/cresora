@@ -3,6 +3,7 @@ package operatoraccounts
 import (
 	"context"
 
+	"github.com/google/uuid"
 	application "github.com/notrodans/cresora/internal/application"
 	"github.com/notrodans/cresora/internal/domain/operatoraccount"
 )
@@ -66,6 +67,30 @@ type DisconnectPersistence interface {
 // transport types must not cross this boundary.
 type RuntimeRevoker interface {
 	RevokeAndStop(context.Context, RuntimeTarget) RevokeOutcome
+}
+
+// RuntimeStopper owns the local runtime fence and teardown for one exact
+// lifecycle target. It deliberately has no remote logout capability; local
+// force-forget must never be able to reach Telegram auth.LogOut.
+type RuntimeStopper interface {
+	StopAccount(context.Context, RuntimeTarget) error
+}
+
+// ForceForgetPersistence is the dedicated persistence boundary for the local
+// force-forget command. PersistForceForget must transition the exact
+// disconnecting version, delete its encrypted session, and insert the audit
+// event in one transaction. The bool result reports whether the supplied
+// idempotency key had already been applied.
+type ForceForgetPersistence interface {
+	AccountLifecycleReader
+	ForceForgetAlreadyApplied(context.Context, application.Actor, operatoraccount.ID, uuid.UUID) (bool, error)
+	PersistForceForget(
+		context.Context,
+		application.Actor,
+		operatoraccount.Account,
+		operatoraccount.Version,
+		uuid.UUID,
+	) (bool, error)
 }
 
 // SessionDeleter removes the persisted Telegram session for one actor-owned
