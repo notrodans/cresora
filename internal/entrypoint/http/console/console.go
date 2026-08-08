@@ -339,8 +339,7 @@ func (h *Handler) parsePost(w http.ResponseWriter, r *http.Request) (url.Values,
 		return nil, false
 	}
 	if failure = r.ParseForm(); failure != nil {
-		var maxError *http.MaxBytesError
-		if errors.As(failure, &maxError) {
+		if _, ok := errors.AsType[*http.MaxBytesError](failure); ok {
 			http.Error(w, "Запрос слишком большой.", http.StatusRequestEntityTooLarge)
 			return nil, false
 		}
